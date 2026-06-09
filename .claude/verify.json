@@ -1,0 +1,8 @@
+{
+  "description": "接合 │ 只在「合併」時放：左右兩段間隔 <JGAP(預設2) 才放 │（緊貼右段、讀作「 │ 」），間隔 >=JGAP 純空白不放（避免 │ 浮在大片空白中間）。寬度數學扣接合寬，行寬不變量仍恆=COLUMNS-EDGE_PAD、不溢出、單行。",
+  "verify": [
+    "bash -n /Users/will/Downloads/macOS/claude-skills/statusline/statusline-command.sh && bash -n /Users/will/Downloads/macOS/claude-skills/statusline/lib/collect.sh && bash -n /Users/will/Downloads/macOS/claude-skills/statusline/lib/render.sh",
+    "bash /tmp/sl-test/run-tests.sh"
+  ],
+  "pass": "第一條 exit 0；第二條 ALL CHECKS PASSED 且 exit 0。測項 K 驗：寬鬆(間隔>=JGAP)中間無 │、擠/截斷有 │、串接退場有 │；A/B/B2/B3/D/J 驗行寬仍恰=COLUMNS-3、不溢出、單行。"
+}

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code Statusline 樣式（無 emoji）</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --txt:#c9d1d9; --dim:#8b949e;
+    --green:#3fb950; --yellow:#d29922; --red:#f85149; --cyan:#39c5cf;
+    --blue:#58a6ff; --purple:#bc8cff; --mute:#484f58; --orange:#db6d28;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; padding:40px 24px; background:#010409; color:var(--txt);
+    font-family:-apple-system,"PingFang TC","Segoe UI",sans-serif;}
+  h1{font-size:20px; font-weight:600; margin:0 0 6px}
+  .sub{color:var(--dim); font-size:13px; margin:0 0 32px}
+  .grid{max-width:940px; margin:0 auto; display:flex; flex-direction:column; gap:24px}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden}
+  .head{padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+  .label{font-size:13px; font-weight:600}
+  .tag{font-size:11px; color:var(--dim); background:#21262d; padding:2px 8px; border-radius:20px}
+  .term{background:var(--bg); padding:14px 16px;
+    font-family:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-size:13.5px;
+    line-height:2.0; white-space:pre; overflow-x:auto;}
+  .note{padding:8px 16px 12px; color:var(--dim); font-size:12px; border-top:1px solid var(--border)}
+  .note code{background:#21262d; padding:1px 6px; border-radius:4px; color:var(--blue); font-size:11.5px}
+  .green{color:var(--green)} .yellow{color:var(--yellow)} .red{color:var(--red)}
+  .cyan{color:var(--cyan)} .blue{color:var(--blue)} .purple{color:var(--purple)}
+  .dim{color:var(--dim)} .mute{color:var(--mute)} .orange{color:var(--orange)}
+  .b{font-weight:600}
+  /* powerline 色塊 */
+  .seg{display:inline-block; padding:1px 10px; color:#0d1117; font-weight:600}
+  .sep{display:inline-block}
+  .s-blue{background:#58a6ff} .s-gray{background:#6e7681} .s-green{background:#3fb950}
+  .s-purple{background:#bc8cff} .s-yellow{background:#d29922}
+</style>
+</head>
+<body>
+  <h1>Claude Code 狀態列 — 純文字樣式（無 emoji）</h1>
+  <p class="sub">每一條就是顯示在終端機最底下的那一行。挑喜歡的,照卡片下面那句 <code style="background:#21262d;padding:1px 6px;border-radius:4px;color:#58a6ff">/statusline …</code> 打就好。</p>
+
+  <div class="grid">
+
+    <!-- 1 -->
+    <div class="card">
+      <div class="head"><span class="label">① 直線分隔</span><span class="tag">最乾淨</span></div>
+      <div class="term">Opus <span class="mute">|</span> demo_app <span class="mute">|</span> <span class="green">18%</span></div>
+      <div class="note">打:<code>/statusline 用直線分隔顯示模型、資料夾、context 百分比,不要 emoji</code></div>
+    </div>
+
+    <!-- 2 -->
+    <div class="card">
+      <div class="head"><span class="label">② key:value</span><span class="tag">標籤清楚</span></div>
+      <div class="term"><span class="dim">model:</span>Opus  <span class="dim">dir:</span>demo_app  <span class="dim">branch:</span><span class="cyan">main</span>  <span class="dim">ctx:</span><span class="green">18%</span></div>
+      <div class="note">打:<code>/statusline 用 key:value 格式顯示 model、dir、branch、ctx,不要 emoji</code></div>
+    </div>
+
+    <!-- 3 -->
+    <div class="card">
+      <div class="head"><span class="label">③ 中點分隔(低調)</span><span class="tag">整行淡色</span></div>
+      <div class="term"><span class="dim">Opus · demo_app · main · 18%</span></div>
+      <div class="note">打:<code>/statusline 用中點分隔顯示模型、資料夾、branch、context%,整行用淡灰色,不要 emoji</code></div>
+    </div>
+
+    <!-- 4 -->
+    <div class="card">
+      <div class="head"><span class="label">④ 括號標籤</span><span class="tag">分段感</span></div>
+      <div class="term"><span class="mute">[</span><span class="b">Opus</span><span class="mute">]</span> <span class="mute">[</span><span class="cyan">main</span><span class="mute">]</span> <span class="mute">[</span>demo_app<span class="mute">]</span> <span class="mute">[</span><span class="green">18%</span><span class="mute">]</span></div>
+      <div class="note">打:<code>/statusline 每個欄位都用方括號包起來,顯示模型、branch、資料夾、context%,不要 emoji</code></div>
+    </div>
+
+    <!-- 5 -->
+    <div class="card">
+      <div class="head"><span class="label">⑤ 箭頭路徑風</span><span class="tag">像麵包屑</span></div>
+      <div class="term"><span class="purple b">Opus</span> <span class="mute">›</span> <span class="cyan">main</span> <span class="mute">›</span> demo_app <span class="mute">›</span> <span class="green">18%</span></div>
+      <div class="note">打:<code>/statusline 用 › 箭頭串接模型、branch、資料夾、context%,不要 emoji</code></div>
+    </div>
+
+    <!-- 6 -->
+    <div class="card">
+      <div class="head"><span class="label">⑥ ASCII 進度條</span><span class="tag">不用方塊字元</span></div>
+      <div class="term">Opus <span class="mute">[</span><span class="green">####</span><span class="mute">------]</span> 40%
+Opus <span class="mute">[</span><span class="yellow">=======&gt;</span><span class="mute">   ]</span> 74%
+Opus <span class="mute">[</span><span class="red">#########</span><span class="mute">-]</span> 93%</div>
+      <div class="note">打:<code>/statusline context 用量用 ASCII 進度條 [####----] 顯示,超過 90% 變紅,不要 emoji</code></div>
+    </div>
+
+    <!-- 7 -->
+    <div class="card">
+      <div class="head"><span class="label">⑦ 大寫標籤 + 顏色</span><span class="tag">資訊密度高</span></div>
+      <div class="term"><span class="dim">MODEL</span> <span class="b">Opus</span>   <span class="dim">CTX</span> <span class="green">18%</span>   <span class="dim">COST</span> <span class="yellow">$0.42</span>   <span class="dim">EFFORT</span> <span class="blue">high</span></div>
+      <div class="note">打:<code>/statusline 用大寫標籤顯示 MODEL、CTX、COST、EFFORT,標籤用淡色,不要 emoji</code></div>
+    </div>
+
+    <!-- 8 -->
+    <div class="card">
+      <div class="head"><span class="label">⑧ Powerline 色塊</span><span class="tag">反白色塊,最顯眼</span></div>
+      <div class="term"><span class="seg s-purple">Opus</span><span class="seg s-gray">main</span><span class="seg s-blue">demo_app</span><span class="seg s-green">18%</span></div>
+      <div class="note">打:<code>/statusline 用 powerline 色塊樣式,每段不同底色顯示模型、branch、資料夾、context%</code>(社群工具 <code>ccstatusline</code> 也能做)</div>
+    </div>
+
+    <!-- 9 -->
+    <div class="card">
+      <div class="head"><span class="label">⑨ 多行 · 純文字</span><span class="tag">資訊量最大</span></div>
+      <div class="term"><span class="cyan b">Opus</span>  demo_app  <span class="mute">on</span> <span class="cyan">main</span> <span class="green">+2</span> <span class="yellow">~5</span>
+ctx <span class="green">18%</span>  <span class="mute">|</span>  cost <span class="yellow">$0.42</span>  <span class="mute">|</span>  <span class="dim">12m30s</span></div>
+      <div class="note">打:<code>/statusline 兩行,第一行模型加資料夾加 git 狀態,第二行 context、花費、時間,不要 emoji</code></div>
+    </div>
+
+  </div>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub 熱門 Statusline 樣式</title>
+<style>
+  :root{--bg:#010409;--panel:#161b22;--border:#30363d;--txt:#c9d1d9;--dim:#8b949e;--blue:#58a6ff;--yellow:#d29922;--green:#3fb950}
+  *{box-sizing:border-box}
+  body{margin:0;padding:36px 20px 60px;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang TC","Segoe UI",sans-serif}
+  h1{font-size:21px;font-weight:700;margin:0 0 4px;text-align:center}
+  .sub{color:var(--dim);font-size:13px;margin:0 0 30px;text-align:center}
+  .wrap{max-width:900px;margin:0 auto}
+  h2{font-size:16px;font-weight:700;margin:34px 0 12px;border-left:3px solid var(--blue);padding-left:10px}
+  /* 專案表 */
+  .repos{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .repos th{text-align:left;padding:9px 14px;background:#1c2128;font-size:12px;color:var(--dim);border-bottom:1px solid var(--border)}
+  .repos td{padding:9px 14px;border-bottom:1px solid #21262d;vertical-align:top}
+  .repos tr:last-child td{border-bottom:none}
+  .repos a{color:var(--blue);text-decoration:none}
+  .stars{color:var(--yellow);font-weight:600;white-space:nowrap}
+  /* 樣式示範 */
+  .demo{margin:8px 0 0}
+  .cap{font-size:12px;color:var(--dim);margin:14px 0 6px}
+  .cap b{color:var(--txt)}
+  .line{padding:12px 14px;border-radius:8px;overflow-x:auto;border:1px solid var(--border);margin-bottom:4px}
+  .pl{display:inline-flex;align-items:stretch;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px}
+  .seg{display:flex;align-items:center;padding:0 12px;font-weight:600;white-space:nowrap}
+  .arr{display:flex;align-items:center}
+  .arr i{width:0;height:0;border-top:12px solid transparent;border-bottom:12px solid transparent;border-left:12px solid}
+  .mono{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px;white-space:nowrap}
+  .cap-seg{display:inline-block;padding:2px 11px;border-radius:11px;font-weight:600;margin-right:5px;font-size:13px;font-family:"SF Mono",Menlo,Consolas,monospace}
+  .tui{display:inline-block;border:1px solid;border-radius:7px;padding:4px 12px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px;font-weight:600}
+  .src{text-align:center;margin-top:34px;font-size:12px;color:var(--dim)}
+  .src a{color:var(--blue)}
+</style>
+</head>
+<body>
+  <h1>GitHub 上推崇的 Statusline 樣式</h1>
+  <p class="sub">熱門社群工具 + 它們最受歡迎的 powerline 主題配色(實際長相)</p>
+
+  <div class="wrap">
+
+    <h2>熱門工具(依星數)</h2>
+    <table class="repos">
+      <tr><th>專案</th><th>Stars</th><th>特色</th></tr>
+      <tr>
+        <td><a href="https://github.com/sirmalloc/ccstatusline">sirmalloc/ccstatusline</a><br><span style="color:var(--dim);font-size:11px">最多人用 · 互動式 TUI 設定</span></td>
+        <td class="stars">★ 10.1k</td>
+        <td>Powerline、多內建主題、truecolor、多行、widget 合併、自動裝字型。想無腦選一個就選它。</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/Owloops/claude-powerline">Owloops/claude-powerline</a><br><span style="color:var(--dim);font-size:11px">vim 風 · 線上預覽</span></td>
+        <td class="stars">★ 1.1k</td>
+        <td>4 種樣式(minimal / powerline / capsule / TUI)+ 6 套主題。有網頁版即時預覽 configurator。</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/stephenleo/cship">stephenleo/cship</a><br><span style="color:var(--dim);font-size:11px">Starship 風</span></td>
+        <td class="stars">★ —</td>
+        <td>用 Starship 的 TOML 設定邏輯。已經在用 starship.toml 的人最順手。</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/ersinkoc/claude-statusline">ersinkoc/claude-statusline</a></td>
+        <td class="stars">★ —</td>
+        <td>100+ powerline 主題、精準成本追蹤、多模型、git 整合。</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/martinemde/starship-claude">martinemde/starship-claude</a></td>
+        <td class="stars">★ —</td>
+        <td>直接把 Starship 拿來當 Claude Code 狀態列。</td>
+      </tr>
+    </table>
+
+    <h2>Powerline + 主題配色(最受推崇)</h2>
+    <p class="cap">同一條狀態列,六套熱門主題。箭頭分隔是 powerline 的招牌(終端需裝 Nerd Font 才會出現箭頭字元;這裡用 CSS 模擬給你看樣子)。</p>
+    <div id="powerlines"></div>
+
+    <h2>claude-powerline 的 4 種樣式(同一主題 nord)</h2>
+    <div id="variants"></div>
+
+  </div>
+
+  <p class="src">Sources:
+    <a href="https://github.com/sirmalloc/ccstatusline">ccstatusline</a> ·
+    <a href="https://github.com/Owloops/claude-powerline">claude-powerline</a> ·
+    <a href="https://github.com/stephenleo/cship">cship</a> ·
+    <a href="https://yigitkonur.com/research/claude-code-statuslines-compared">statuslines compared</a>
+  </p>
+
+<script>
+// segs: [label, bg, fg]
+const themes = {
+  'dark (預設)':   {bg:'#181825', segs:[['Opus','#585b70','#cdd6f4'],['main','#45475a','#cdd6f4'],['demo_app','#89b4fa','#11111b'],['18%','#a6e3a1','#11111b'],['$0.42','#f9e2af','#11111b']]},
+  'light':         {bg:'#eff1f5', segs:[['Opus','#7287fd','#ffffff'],['main','#bcc0cc','#4c4f69'],['demo_app','#1e66f5','#ffffff'],['18%','#40a02b','#ffffff'],['$0.42','#df8e1d','#ffffff']]},
+  'nord':          {bg:'#2e3440', segs:[['Opus','#5e81ac','#eceff4'],['main','#4c566a','#e5e9f0'],['demo_app','#88c0d0','#2e3440'],['18%','#a3be8c','#2e3440'],['$0.42','#ebcb8b','#2e3440']]},
+  'tokyo-night':   {bg:'#1a1b26', segs:[['Opus','#7aa2f7','#1a1b26'],['main','#414868','#c0caf5'],['demo_app','#7dcfff','#1a1b26'],['18%','#9ece6a','#1a1b26'],['$0.42','#e0af68','#1a1b26']]},
+  'rose-pine':     {bg:'#191724', segs:[['Opus','#c4a7e7','#191724'],['main','#26233a','#e0def4'],['demo_app','#9ccfd8','#191724'],['18%','#31748f','#e0def4'],['$0.42','#f6c177','#191724']]},
+  'gruvbox':       {bg:'#282828', segs:[['Opus','#458588','#ebdbb2'],['main','#3c3836','#ebdbb2'],['demo_app','#83a598','#282828'],['18%','#b8bb26','#282828'],['$0.42','#fabd2f','#282828']]},
+};
+
+function powerline(t){
+  let h = '<span class="pl">';
+  t.segs.forEach((s,i)=>{
+    h += `<span class="seg" style="background:${s[1]};color:${s[2]}">${s[0]}</span>`;
+    const next = (i < t.segs.length-1) ? t.segs[i+1][1] : t.bg;
+    h += `<span class="arr" style="background:${next}"><i style="border-left-color:${s[1]}"></i></span>`;
+  });
+  return h + '</span>';
+}
+
+let out = '';
+for (const [name,t] of Object.entries(themes)){
+  out += `<div class="cap"><b>${name}</b></div>`;
+  out += `<div class="line" style="background:${t.bg};border-color:${t.bg}">${powerline(t)}</div>`;
+}
+document.getElementById('powerlines').innerHTML = out;
+
+// 4 種樣式 (nord)
+const n = themes['nord'];
+const fgAccent = ['#88c0d0','#4c566a','#81a1c1','#a3be8c','#ebcb8b'];
+let v = '';
+
+// minimal
+v += `<div class="cap"><b>① minimal</b> — 無分隔,純色字</div>`;
+v += `<div class="line" style="background:${n.bg};border-color:${n.bg}"><span class="mono">`
+   + n.segs.map((s,i)=>`<span style="color:${fgAccent[i]}">${s[0]}</span>`).join('  ')
+   + `</span></div>`;
+
+// powerline
+v += `<div class="cap"><b>② powerline</b> — 箭頭分隔(招牌)</div>`;
+v += `<div class="line" style="background:${n.bg};border-color:${n.bg}">${powerline(n)}</div>`;
+
+// capsule
+v += `<div class="cap"><b>③ capsule</b> — 圓角膠囊</div>`;
+v += `<div class="line" style="background:${n.bg};border-color:${n.bg}">`
+   + n.segs.map(s=>`<span class="cap-seg" style="background:${s[1]};color:${s[2]}">${s[0]}</span>`).join('')
+   + `</div>`;
+
+// TUI
+v += `<div class="cap"><b>④ TUI</b> — 外框面板</div>`;
+v += `<div class="line" style="background:${n.bg};border-color:${n.bg}">`
+   + `<span class="tui" style="border-color:#4c566a;color:#d8dee9">`
+   + n.segs.map((s,i)=>`<span style="color:${fgAccent[i]}">${s[0]}</span>`).join('<span style="color:#4c566a"> │ </span>')
+   + `</span></div>`;
+
+document.getElementById('variants').innerHTML = v;
+</script>
+</body>
+</html>

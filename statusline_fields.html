@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code Statusline — 全部參數</title>
+<style>
+  :root{
+    --bg:#010409; --panel:#0d1117; --card:#161b22; --border:#30363d;
+    --txt:#c9d1d9; --dim:#8b949e; --blue:#58a6ff; --green:#3fb950;
+    --purple:#bc8cff; --yellow:#d29922; --cyan:#39c5cf; --red:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; padding:36px 20px 60px; background:var(--bg); color:var(--txt);
+    font-family:-apple-system,"PingFang TC","Segoe UI",sans-serif;}
+  h1{font-size:21px; font-weight:700; margin:0 0 4px; text-align:center}
+  .sub{color:var(--dim); font-size:13px; margin:0 0 28px; text-align:center}
+  .wrap{max-width:1080px; margin:0 auto; columns:2; column-gap:20px}
+  @media(max-width:760px){.wrap{columns:1}}
+  .group{break-inside:avoid; background:var(--card); border:1px solid var(--border);
+    border-radius:10px; margin:0 0 18px; overflow:hidden}
+  .ghead{display:flex; align-items:center; gap:8px; padding:10px 14px;
+    border-bottom:1px solid var(--border); background:#1c2128}
+  .gtitle{font-size:14px; font-weight:700}
+  .gnote{font-size:11px; color:var(--dim); margin-left:auto}
+  table{width:100%; border-collapse:collapse; font-size:12.5px}
+  td{padding:7px 14px; border-bottom:1px solid #21262d; vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .key{font-family:"SF Mono",Menlo,Consolas,monospace; color:var(--blue);
+    white-space:nowrap; font-size:12px}
+  .star{color:var(--yellow)}
+  .desc{color:var(--txt); width:56%}
+  .legend{max-width:1080px; margin:0 auto 22px; padding:10px 14px; background:var(--card);
+    border:1px solid var(--border); border-radius:8px; font-size:12px; color:var(--dim)}
+  .legend .star{font-weight:700}
+  .src{text-align:center; margin-top:28px; font-size:12px}
+  .src a{color:var(--blue)}
+  .ico{width:9px; height:9px; border-radius:2px; display:inline-block}
+  /* 範例區 */
+  .green{color:var(--green)} .yellow{color:var(--yellow)} .red{color:var(--red)}
+  .cyan{color:var(--cyan)} .blue{color:var(--blue)} .purple{color:var(--purple)} .dim{color:var(--dim)}
+  .b{font-weight:600}
+  .ex-term{background:#010409; padding:14px 16px;
+    font-family:"SF Mono",Menlo,Consolas,monospace; font-size:13.5px; line-height:2.0;
+    white-space:pre; overflow-x:auto;}
+  .ex-foot{display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:9px 16px; border-top:1px solid var(--border); font-size:12.5px; color:var(--txt)}
+  .ex-fields{margin-left:auto; font-family:"SF Mono",Menlo,Consolas,monospace;
+    font-size:11px; color:var(--dim)}
+  .seg{display:inline-block; padding:1px 10px; color:#0d1117; font-weight:600}
+</style>
+</head>
+<body>
+  <h1>Claude Code 狀態列 — 全部可用參數</h1>
+  <p class="sub">stdin JSON 裡的所有欄位。想顯示哪個就挑哪個,然後打 <span style="color:var(--blue);font-family:monospace">/statusline …</span></p>
+
+  <div class="legend">
+    <span class="star">★</span> = 可能不存在或為 null(腳本要做防呆,jq 用 <span style="font-family:monospace;color:var(--blue)">// 0</span> 或 <span style="font-family:monospace;color:var(--blue)">// empty</span>)
+  </div>
+
+  <div class="wrap">
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:var(--purple)"></span><span class="gtitle">model — 模型</span></div>
+      <table>
+        <tr><td class="key">model.display_name</td><td class="desc">模型顯示名(Opus)</td></tr>
+        <tr><td class="key">model.id</td><td class="desc">模型 ID(claude-opus-4-8)</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:var(--blue)"></span><span class="gtitle">workspace — 目錄 / 工作區</span></div>
+      <table>
+        <tr><td class="key">cwd</td><td class="desc">目前工作目錄(同 current_dir)</td></tr>
+        <tr><td class="key">workspace.current_dir</td><td class="desc">目前目錄(建議用這個)</td></tr>
+        <tr><td class="key">workspace.project_dir</td><td class="desc">啟動時的專案根目錄</td></tr>
+        <tr><td class="key">workspace.added_dirs</td><td class="desc">/add-dir 加進來的額外目錄(陣列)</td></tr>
+        <tr><td class="key">workspace.git_worktree <span class="star">★</span></td><td class="desc">在 git worktree 裡時的 worktree 名</td></tr>
+        <tr><td class="key">workspace.repo.host <span class="star">★</span></td><td class="desc">repo 主機(github.com)</td></tr>
+        <tr><td class="key">workspace.repo.owner <span class="star">★</span></td><td class="desc">repo 擁有者(anthropics)</td></tr>
+        <tr><td class="key">workspace.repo.name <span class="star">★</span></td><td class="desc">repo 名稱(claude-code)</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:var(--yellow)"></span><span class="gtitle">cost — 花費 / 時間</span></div>
+      <table>
+        <tr><td class="key">cost.total_cost_usd</td><td class="desc">本 session 估算花費(USD)</td></tr>
+        <tr><td class="key">cost.total_duration_ms</td><td class="desc">session 總時長(ms)</td></tr>
+        <tr><td class="key">cost.total_api_duration_ms</td><td class="desc">等 API 回應的總時間(ms)</td></tr>
+        <tr><td class="key">cost.total_lines_added</td><td class="desc">新增行數</td></tr>
+        <tr><td class="key">cost.total_lines_removed</td><td class="desc">刪除行數</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:var(--green)"></span><span class="gtitle">context_window — Context 用量</span></div>
+      <table>
+        <tr><td class="key">context_window.used_percentage <span class="star">★</span></td><td class="desc">已用 %(最常用)</td></tr>
+        <tr><td class="key">context_window.remaining_percentage <span class="star">★</span></td><td class="desc">剩餘 %</td></tr>
+        <tr><td class="key">context_window.context_window_size</td><td class="desc">上限(200000 或 1000000)</td></tr>
+        <tr><td class="key">context_window.total_input_tokens</td><td class="desc">目前 context 的 input token 數</td></tr>
+        <tr><td class="key">context_window.total_output_tokens</td><td class="desc">目前 output token 數</td></tr>
+        <tr><td class="key">…current_usage.input_tokens <span class="star">★</span></td><td class="desc">input token</td></tr>
+        <tr><td class="key">…current_usage.output_tokens <span class="star">★</span></td><td class="desc">output token</td></tr>
+        <tr><td class="key">…cache_creation_input_tokens <span class="star">★</span></td><td class="desc">寫入 cache 的 token</td></tr>
+        <tr><td class="key">…cache_read_input_tokens <span class="star">★</span></td><td class="desc">讀 cache 的 token</td></tr>
+        <tr><td class="key">exceeds_200k_tokens</td><td class="desc">是否超過 20 萬 token(true/false)</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:var(--cyan)"></span><span class="gtitle">推理 / 思考</span></div>
+      <table>
+        <tr><td class="key">effort.level <span class="star">★</span></td><td class="desc">推理 effort(low/medium/high/xhigh/max)</td></tr>
+        <tr><td class="key">thinking.enabled</td><td class="desc">是否開啟 extended thinking</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:var(--red)"></span><span class="gtitle">rate_limits — 額度 <span style="font-weight:400">(限 Pro/Max)</span></span><span class="gnote">整段 ★</span></div>
+      <table>
+        <tr><td class="key">rate_limits.five_hour.used_percentage</td><td class="desc">5 小時額度已用 %(0–100)</td></tr>
+        <tr><td class="key">rate_limits.five_hour.resets_at</td><td class="desc">5 小時窗口重置(Unix 秒)</td></tr>
+        <tr><td class="key">rate_limits.seven_day.used_percentage</td><td class="desc">7 天額度已用 %</td></tr>
+        <tr><td class="key">rate_limits.seven_day.resets_at</td><td class="desc">7 天窗口重置(Unix 秒)</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:#8b949e"></span><span class="gtitle">Session 資訊</span></div>
+      <table>
+        <tr><td class="key">session_id</td><td class="desc">session 唯一 ID(適合當 cache key)</td></tr>
+        <tr><td class="key">session_name <span class="star">★</span></td><td class="desc">自訂名(--name / /rename 設的)</td></tr>
+        <tr><td class="key">transcript_path</td><td class="desc">對話記錄檔路徑</td></tr>
+        <tr><td class="key">version</td><td class="desc">Claude Code 版本</td></tr>
+        <tr><td class="key">output_style.name</td><td class="desc">目前輸出風格名稱</td></tr>
+      </table>
+    </div>
+
+    <div class="group">
+      <div class="ghead"><span class="ico" style="background:#db6d28"></span><span class="gtitle">其他(特定情境才出現)</span><span class="gnote">整段 ★</span></div>
+      <table>
+        <tr><td class="key">vim.mode</td><td class="desc">vim 模式(NORMAL/INSERT/VISUAL…)</td></tr>
+        <tr><td class="key">agent.name</td><td class="desc">--agent 跑時的 agent 名</td></tr>
+        <tr><td class="key">pr.number</td><td class="desc">目前 branch 的 PR 編號</td></tr>
+        <tr><td class="key">pr.url</td><td class="desc">PR 連結</td></tr>
+        <tr><td class="key">pr.review_state</td><td class="desc">PR 審查狀態(approved/pending…)</td></tr>
+        <tr><td class="key">worktree.name</td><td class="desc">--worktree session 的 worktree 名</td></tr>
+        <tr><td class="key">worktree.path</td><td class="desc">worktree 絕對路徑</td></tr>
+        <tr><td class="key">worktree.branch</td><td class="desc">worktree 的 branch</td></tr>
+        <tr><td class="key">worktree.original_cwd</td><td class="desc">進 worktree 前的目錄</td></tr>
+        <tr><td class="key">worktree.original_branch</td><td class="desc">進 worktree 前的 branch</td></tr>
+      </table>
+    </div>
+
+  </div>
+
+  <h2 style="max-width:1080px;margin:40px auto 4px;font-size:18px;font-weight:700">常見範例 — 實際長相</h2>
+  <p style="max-width:1080px;margin:0 auto 20px;color:var(--dim);font-size:13px">下面每條就是顯示在終端機最底下那一行(無 emoji)。右下標的是它用到的欄位。</p>
+
+  <div style="max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:14px">
+
+    <div class="group">
+      <div class="ex-term">Opus <span style="color:var(--border)">|</span> demo_app <span style="color:var(--border)">|</span> <span class="green">18%</span></div>
+      <div class="ex-foot">最精簡 — 模型 + 資料夾 + 用量<span class="ex-fields">model.display_name · workspace.current_dir · context_window.used_percentage</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term"><span class="dim">model:</span>Opus  <span class="dim">dir:</span>demo_app  <span class="dim">branch:</span><span class="cyan">main</span>  <span class="dim">ctx:</span><span class="green">18%</span></div>
+      <div class="ex-foot">key:value 標籤清楚<span class="ex-fields">model · workspace.current_dir · (git) · context_window</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term">Opus <span style="color:var(--border)">[</span><span class="green">####</span><span style="color:var(--border)">------]</span> 40%    <span class="dim">(74% 轉黃、93% 轉紅)</span></div>
+      <div class="ex-foot">ASCII 進度條,顏色隨用量變<span class="ex-fields">model · context_window.used_percentage</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term">Opus <span style="color:var(--border)">|</span> demo_app <span style="color:var(--border)">|</span> <span class="cyan">main</span> <span class="green">+2</span> <span class="yellow">~5</span></div>
+      <div class="ex-foot">Git 狀態(暫存綠 / 修改黃,需自己跑 git)<span class="ex-fields">model · workspace.current_dir · (git branch/diff)</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term">Opus <span style="color:var(--border)">|</span> <span class="yellow">$0.42</span> <span style="color:var(--border)">|</span> <span class="dim">12m 30s</span></div>
+      <div class="ex-foot">花費 + 時長<span class="ex-fields">model · cost.total_cost_usd · cost.total_duration_ms</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term">Opus <span style="color:var(--border)">|</span> 5h <span class="green">23%</span>  7d <span class="yellow">41%</span></div>
+      <div class="ex-foot">額度用量(限 Pro/Max)<span class="ex-fields">model · rate_limits.five_hour / seven_day .used_percentage</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term"><span class="dim">MODEL</span> <span class="b">Opus</span>   <span class="dim">CTX</span> <span class="green">18%</span>   <span class="dim">COST</span> <span class="yellow">$0.42</span>   <span class="dim">EFFORT</span> <span class="blue">high</span></div>
+      <div class="ex-foot">大寫標籤,資訊密度高<span class="ex-fields">model · context_window · cost · effort.level</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term"><span class="seg" style="background:var(--purple)">Opus</span><span class="seg" style="background:#6e7681">main</span><span class="seg" style="background:var(--blue)">demo_app</span><span class="seg" style="background:var(--green)">18%</span></div>
+      <div class="ex-foot">Powerline 反白色塊,最顯眼<span class="ex-fields">model · (git) · workspace.current_dir · context_window</span></div>
+    </div>
+
+    <div class="group">
+      <div class="ex-term"><span class="cyan b">Opus</span>  demo_app  <span class="dim">on</span> <span class="cyan">main</span> <span class="green">+2</span> <span class="yellow">~5</span>
+ctx <span class="green">18%</span>  <span style="color:var(--border)">|</span>  cost <span class="yellow">$0.42</span>  <span style="color:var(--border)">|</span>  <span class="dim">12m30s</span></div>
+      <div class="ex-foot">多行 — 第一行 git、第二行用量<span class="ex-fields">model · workspace · (git) · context_window · cost</span></div>
+    </div>
+
+  </div>
+
+  <p class="src">Source: <a href="https://code.claude.com/docs/en/statusline">Customize your status line — Claude Code Docs</a></p>
+</body>
+</html>
