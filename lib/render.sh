@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2154  # globals read here are assigned by the sibling collect.sh (see READS header); lint via: shellcheck -x statusline-command.sh
 # render.sh — render output: palette + single-line assembly (left = path/resources/time, right = git/session, right-aligned)
 #
 # READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD) + every global written by collect.sh
@@ -91,6 +93,7 @@ add_rate() {   # $1=used% $2=resets_at → appends "2H2m 76%" to parts (time in 
     fmt_pct "$1"
     [ -n "$_pct" ] || return 0
     local r=$((100 - _pct)) color
+    if [ "$r" -lt 0 ]; then r=0; fi   # used_percentage may exceed 100 → clamp so "remaining" is never a negative number
     if [ "$r" -gt 75 ]; then color="$GR"
     elif [ "$r" -gt 50 ]; then color="$YL"
     elif [ "$r" -gt 25 ]; then color="$OG"
@@ -178,11 +181,27 @@ build_left() {
     add_rate "$five_h" "$five_reset"
     add_rate "$seven_d" "$seven_reset"
 
-    # Last-message time: the per-session file written by the UserPromptSubmit hook (not the current time)
+    # Last-message time: the per-session file written by the UserPromptSubmit hook (not the current time).
+    # session_id is interpolated into a path here, so reject any slash/.. shape first (defense-in-depth: the id is
+    # CC-generated, but a crafted one would otherwise read an arbitrary file's first line — confirmed traversal).
+    # The file content is the ONE external string that does NOT pass parse_input's filter, so strip control chars here too,
+    # restoring the documented "only our own SGR codes reach the terminal" invariant: a raw non-SGR ESC in the file would
+    # otherwise inject into the terminal AND desync vis_width (a non-m-terminated CSI) into a line wrap — the exact bug the
+    # parse_input filter prevents. Glob-strip is zero-fork: C0 0x01-0x1F + DEL 0x7F, plus the 2-byte UTF-8 C1 block 0xC2 0x80..0x9F
+    # (mirroring parse_input's select(. >= 32 and (. < 127 or . > 159))); a final :0:256 byte-cap matches the jq length bound.
+    # Deliberately NOT a jq re-parse, which would add a fork to every frame's hot path for an inert-text cleanup.
     last_msg=""
-    if [ -n "$session_id" ] && [ -f "$HOME/.claude/last-msg/$session_id" ]; then
-        IFS= read -r last_msg < "$HOME/.claude/last-msg/$session_id"
-    fi
+    case "$session_id" in
+        ''|*/*|*..*) ;;   # empty or path-traversal-shaped → skip the read entirely
+        *)
+            if [ -f "$HOME/.claude/last-msg/$session_id" ]; then
+                IFS= read -r last_msg < "$HOME/.claude/last-msg/$session_id"
+                last_msg=${last_msg//[$'\001'-$'\037'$'\177']/}        # C0 + DEL (single bytes)
+                last_msg=${last_msg//$'\302'[$'\200'-$'\237']/}        # 2-byte UTF-8 C1 U+0080-U+009F (U+009B=CSI etc.) — same injection class as a raw ESC
+                last_msg=${last_msg:0:256}                            # bound length (vis_width's strip is O(n^2) under bash 3.2)
+            fi
+            ;;
+    esac
     [ -n "$last_msg" ] && parts+=("${DM}${last_msg}${RS}")
 }
 
@@ -253,9 +272,37 @@ trunc_head() {   # $1=string with color codes $2=visible-width cap (>=2) → _tr
         }
         my $tw=$w + ($cut?1:0);
         print "$tw\n" . $o . "\x1b[0m" . ($cut ? "\x{2026}" : "");   # reset before appending …, so the … is not colored
-    ' "$2")
-    _tw=${out%%$'\n'*}
-    _trunc=${out#*$'\n'}
+    ' -- "$2")   # -- terminates perl option parsing: a negative cap (pathological 1-2 col terminal) is an ARGV value, not an "Unrecognized switch" error to stderr
+    if [ -n "$out" ]; then
+        _tw=${out%%$'\n'*}
+        _trunc=${out#*$'\n'}
+        return
+    fi
+    # perl absent or failed (empty capture; rc ignored — set -e is banned) → width-safe pure-bash degraded fallback.
+    # Never overflows/wraps; keeps the colored original when it fits whole, drops color only on the rare must-cut branch.
+    # Reuses vis_width's over-estimating byte logic so _tw >= true visible width — the safe direction (pad only shrinks).
+    vis_width "$1"
+    if [ "$_w" -le "$2" ]; then _trunc=$1; _tw=$_w; return; fi   # fits whole → keep colored original, no …
+    local p=$1 plain="" best="" L=0 lb       # must cut: strip ANSI (avoids dangling-escape corruption), then grow a
+    while [[ $p == *$'\033['* ]]; do plain+=${p%%$'\033['*}; p=${p#*$'\033['}; p=${p#*m}; done
+    plain+=$p                                #   byte-prefix to the widest visible width that still leaves a cell for …
+    _tw=1                                    # … alone is 1 cell; best stays empty if not even one char fits (loop breaks early, bounded by cap)
+    while [ "$L" -lt "${#plain}" ]; do
+        vis_width "${plain:0:$((L+1))}"
+        [ "$_w" -gt $(( $2 - 1 )) ] && break
+        best=${plain:0:$((L+1))}; _tw=$(( _w + 1 )); L=$((L+1))
+    done
+    # best is a byte-prefix (LC_ALL=C slices bytes); if the byte right after it is a UTF-8 continuation byte (0x80-0xBF)
+    # the cut landed mid-character → peel the partial trailing char off so we never emit invalid UTF-8 (a replacement
+    # glyph + width desync). Width only shrinks, the safe direction: _tw stays an upper bound so the pad never under-fills.
+    case ${plain:${#best}:1} in
+        [$'\200'-$'\277'])
+            while [ -n "$best" ]; do
+                lb=${best: -1}; best=${best%?}
+                case $lb in [$'\200'-$'\277']) ;; *) break ;; esac
+            done ;;
+    esac
+    _trunc="${best}"$'\033[0m'"…"
 }
 
 # Single-line output: left ──gap── right (right-aligned to the drawable right edge at term_cols-EDGE_PAD).
@@ -264,6 +311,7 @@ trunc_head() {   # $1=string with color codes $2=visible-width cap (>=2) → _tr
 # When the line doesn't fit (gap<1): keep the left part whole, truncate the right part (name at the very end) with … to fit exactly, still right-aligned —
 # never lets the whole line exceed the drawable width and get hard-cut by the terminal (the old │-join fallback emitted an over-wide line whose name the terminal ate; fixed).
 # Pathologically narrow terminal where even the left part is wider than the drawable width: drop the right part, head-truncate the left part too to guarantee no overflow.
+# Right empty but width known (non-git dir, no session name): bound the left part alone (same head-truncate) so a long left (deep path / long last-msg) can't overflow/wrap.
 # Fallback: RIGHT_ALIGN off / width unavailable → can't measure width, so do the old │-join; one side empty → print the other.
 render_line() {
     SEP="${SP} │ ${RS}"
@@ -298,6 +346,21 @@ render_line() {
             return
         fi
         # The left part nearly fills the whole terminal: the right has no room → drop it; head-truncate the left only if it's over-wide
+        if [ "$lw" -le "$avail" ]; then
+            printf '%s\n' "$left"
+        else
+            trunc_head "$left" "$avail"; printf '%s\n' "$_trunc"
+        fi
+        return
+    fi
+    # Left-only (right empty) with a known width: still bound the left part. The block above is gated on a non-empty
+    # right, so without this a long left (deep path / long last-msg) on a narrow terminal would fall through to the
+    # unbounded printf below and get hard-wrapped — breaking the "never overflows" guarantee. Mirrors the pathological
+    # left-truncation branch above. (avail can go negative at a 1-2 col terminal; trunc_head handles that gracefully now.)
+    if [ -n "$left" ] && [ -z "$right" ] && $RIGHT_ALIGN \
+       && [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then
+        avail=$(( term_cols - EDGE_PAD ))
+        vis_width "$left"; lw=$_w
         if [ "$lw" -le "$avail" ]; then
             printf '%s\n' "$left"
         else

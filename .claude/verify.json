@@ -1,8 +1,9 @@
 {
-  "description": "接合 │ 只在「合併」時放：左右兩段間隔 <JGAP(預設2) 才放 │（緊貼右段、讀作「 │ 」），間隔 >=JGAP 純空白不放（避免 │ 浮在大片空白中間）。寬度數學扣接合寬，行寬不變量仍恆=COLUMNS-EDGE_PAD、不溢出、單行。",
+  "description": "Multi-agent adversarial review of the statusline tool, then fixed 7 confirmed findings. SEC: parse_input jq filter + last_msg glob strip now also remove the C1 control block U+0080-U+009F (U+009B=8-bit CSI → escape injection on C1-honoring UTF-8 terminals); select is now `>=32 and (.<127 or .>159)`. PERF/DoS: vis_width's ASCII strip is O(n^2) in bash 3.2, so every parsed field is capped to 256 codepoints in jq (and last_msg to 256 bytes) — a 20KB session_name went from ~33s/frame to ~40ms. UX: left-only line (no git/worktree/session) is now width-bounded in render_line so a long left can't overflow/wrap a narrow terminal; perl-absent trunc_head fallback now peels a partial trailing UTF-8 char so it never emits invalid UTF-8 mid-character. ROB: perl gets `-- \"$2\"` so a negative cap at COLUMNS 1-2 is an ARGV value not an 'Unrecognized switch' stderr leak; rate-limit 'remaining' is clamped to 0 when used_percentage>100. Added regression tests N(C1)/O(perf-cap)/P(left-only bound)/Q(perl-absent UTF-8)/R(negative-cap stderr)/S(rate clamp).",
   "verify": [
     "bash -n /Users/will/Downloads/macOS/claude-skills/statusline/statusline-command.sh && bash -n /Users/will/Downloads/macOS/claude-skills/statusline/lib/collect.sh && bash -n /Users/will/Downloads/macOS/claude-skills/statusline/lib/render.sh",
-    "bash /tmp/sl-test/run-tests.sh"
+    "shellcheck -x /Users/will/Downloads/macOS/claude-skills/statusline/statusline-command.sh",
+    "bash /Users/will/Downloads/macOS/claude-skills/statusline/tests/run-tests.sh"
   ],
-  "pass": "第一條 exit 0；第二條 ALL CHECKS PASSED 且 exit 0。測項 K 驗：寬鬆(間隔>=JGAP)中間無 │、擠/截斷有 │、串接退場有 │；A/B/B2/B3/D/J 驗行寬仍恰=COLUMNS-3、不溢出、單行。"
+  "pass": "All three exit 0 and step 3 prints 'ALL CHECKS PASSED' with no ★ lines. New cases: N (C1 byte c2 9b never reaches output from session_name or last-msg, width still exact = no wrap), O (8KB session_name frame <3s = quadratic bounded), P (left-only line at COLUMNS 60..120 stays single-line and width<=COLUMNS-EDGE_PAD), Q (perl-absent CJK truncation is always valid UTF-8 across COLUMNS 90..115), R (COLUMNS 1-2 emits no stderr and one line), S (used_percentage>100 shows 0% not a negative). All pre-existing A..M invariants still hold."
 }

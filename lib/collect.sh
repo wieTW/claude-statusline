@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # globals written here are consumed by the sibling render.sh (see WRITES header); lint via: shellcheck -x statusline-command.sh
 # collect.sh — input collection: stdin JSON parsing + theme / width / git / effort collected concurrently in the background
 #
 # READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript
@@ -62,7 +64,7 @@ read_width() {
 
 # Single jq pass parsing every field; the order must match the reads below one-for-one.
 # Newlines/carriage-returns inside values are first escaped to literal \n \r so each value stays on one line and fields don't misalign;
-# all other control characters (incl. ESC, tab, DEL) are stripped — JSON's \u001b escape is legal input, and a raw ESC leaking out
+# all other control characters are stripped: C0 (incl. ESC, tab), DEL, AND the C1 block U+0080-U+009F (8-bit CSI/OSC/DCS — U+009B = "ESC [" on a UTF-8 terminal honoring C1, same injection class as a raw ESC; select keeps only `. >= 32 and (. < 127 or . > 159)`) — JSON's \u001b escape is legal input, and a raw ESC leaking out
 # gets parsed by the terminal as CSI (injection risk), plus vis_width's width accounting wouldn't match the terminal and would push the single line into a wrap
 # (reproduced in review: a session name containing ESC[1Zm renders as 121 cols at COLUMNS=120 → wraps).
 # This is the only entry point for external strings, so after stripping, downstream can assume the string holds only our own SGR codes.
@@ -70,6 +72,8 @@ read_width() {
 # and a control-character range is treated as a literal character class (where the 0-u range strips almost all ASCII — already hit).
 # jq inside the process substitution inherits the script's stdin (the statusline JSON).
 # The last field (now|floor) also grabs the current Unix seconds for ttl, saving a date +%s fork.
+# Each value is also capped to 256 codepoints (| .[0:256]): vis_width's ASCII-strip in render.sh is O(n^2) under bash 3.2, so an
+# unbounded multi-KB field (e.g. a crafted session_name) would stall every frame (10KB → ~5s); 256 is far above any terminal's visible width, so render's "…" truncation still governs what shows.
 parse_input() {
     {
         IFS= read -r cwd
@@ -104,7 +108,7 @@ parse_input() {
           .transcript_path // "",
           (now | floor)
         ] | map(tostring | gsub("\n"; "\\n") | gsub("\r"; "\\r")
-            | explode | map(select(. >= 32 and . != 127)) | implode)[]
+            | explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode | .[0:256])[]
     ' 2>/dev/null)
 }
 
