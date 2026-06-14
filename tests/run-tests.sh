@@ -248,33 +248,51 @@ JS=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
 sout=$(run 200 "$JS" | sed 's/\x1b\[[0-9;]*m//g')
 case "$sout" in *-[0-9]*%*) echo "  ★ FAIL negative remaining %: [$sout]"; fail=1 ;; *) echo "  no negative % OK" ;; esac
 
-echo "── T. RATE-SYNC: frozen session adopts a fresher session's used% per reset window (cross-session cache); keying / toggle / prune"
+echo "── T. RATE-SYNC: per-window authority = the NEWEST session's value (older sessions can't override) — climb / cap-raise drop / anti-reversal / persistence / keying / toggle / prune / legacy"
 SLC="$FAKE_HOME/.claude/sl-ratelimit-cache"
-rsj() {  # $1=used% $2=resets_at → minimal five_hour-only json (ctx pinned 5% so the only other "%" token is the rate)
-  jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson u "$1" --argjson r "$2" '
+nocol() { sed 's/\x1b\[[0-9;]*m//g'; }
+rsj() {  # $1=used% $2=resets_at $3=session_id → minimal five_hour-only json (ctx pinned 5% so the only other "%" token is the rate)
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --arg sid "${3:-sl-selftest}" --argjson u "$1" --argjson r "$2" '
   { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
-    rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:"sl-selftest", transcript_path:$tp }'; }
-# T1 core: a fresh frame seeds the shared cache; a later FROZEN frame (used=0) on the SAME window shows the synced value, not stale 100%
-rm -f "$SLC"; RT=$(jq -n 'now+9000|floor')      # one fixed 5h-ish reset key, shared by the frames below
-run 120 "$(rsj 37 "$RT")" >/dev/null            # fresh session seeds cache: RT → 37% used
-t1=$(run 120 "$(rsj 0 "$RT")" | sed 's/\x1b\[[0-9;]*m//g')
-case "$t1" in
-  *" 63%"*)  echo "  T1 frozen adopts synced 63% (not 100%) OK" ;;
-  *" 100%"*) echo "  ★ FAIL T1 frozen still stale 100% (cache not consulted)"; fail=1 ;;
-  *)         echo "  ★ FAIL T1 unexpected rate output: [$t1]"; fail=1 ;;
-esac
-# T2 keying: a DIFFERENT window (different resets_at) must NOT inherit the first window's 37%
-t2=$(run 120 "$(rsj 0 "$(jq -n 'now+22000|floor')")" | sed 's/\x1b\[[0-9;]*m//g')
-case "$t2" in *" 100%"*) echo "  T2 separate window not polluted (100%) OK" ;; *) echo "  ★ FAIL T2 window polluted: [$t2]"; fail=1 ;; esac
-# T3 toggle: RL_SYNC=false must ignore the cache entirely → the same frozen used=0 shows the raw 100% (cache still holds RT→37 from T1)
+    rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:$sid, transcript_path:$tp }'; }
+# Scenarios are set up by PRE-SEEDING the cache with controlled first_seen epochs (render-time alone is sub-second so can't order sessions in-test).
+NOW=$(jq -n 'now|floor'); RT=$((NOW + 9000))   # active window key (~2.5h to reset)
+OLD=$((NOW - 5000)); RECENT=$((NOW - 100))     # an old vs a recent session's first_seen
+# T1 climb: authority is an OLD session at 40; a NEW session (first_seen=now > OLD) reports higher 75 → adopt → remaining 25%
+printf 'S sessOld %s\nW %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+t1=$(run 120 "$(rsj 75 "$RT" sessNew)" | nocol)
+case "$t1" in *" 25%"*) echo "  T1 newer session raises (climb) → 25% OK" ;; *) echo "  ★ FAIL T1 expected 25% remaining: [$t1]"; fail=1 ;; esac
+# T2 cap-raise (THE incident): authority OLD at 70; a NEW session reports LOWER 38 → adopt → remaining 62%, not the stale 30%
+printf 'S sessOld %s\nW %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+t2=$(run 120 "$(rsj 38 "$RT" sessNew)" | nocol)
+case "$t2" in *" 62%"*) echo "  T2 newer session lowers (cap raised) → 62%, not stale 30% OK" ;; *" 30%"*) echo "  ★ FAIL T2 stuck on stale high 70 (showed 30%): [$t2]"; fail=1 ;; *) echo "  ★ FAIL T2 expected 62%: [$t2]"; fail=1 ;; esac
+# T3 older can't override + persistence: authority set by a RECENT session at 75; an OLD frozen-low session reports 40 → ignored → stays 25% (setter need not be rendering)
+printf 'S sessRecent %s\nS sessOldFrozen %s\nW %s 75 %s\n' "$RECENT" "$OLD" "$RT" "$RECENT" > "$SLC"
+t3=$(run 120 "$(rsj 40 "$RT" sessOldFrozen)" | nocol)
+case "$t3" in *" 25%"*) echo "  T3 older session can't lower authority (no under-report) → 25% OK" ;; *" 60%"*) echo "  ★ FAIL T3 old frozen-low session overrode authority (showed 60%): [$t3]"; fail=1 ;; *) echo "  ★ FAIL T3 expected 25%: [$t3]"; fail=1 ;; esac
+# T4 anti-reversal: after a newer session lowers 70→38, the OLD frozen-HIGH session rendering again must NOT bounce it back to 30%
+printf 'S sessOld %s\nW %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+run 120 "$(rsj 38 "$RT" sessNew)" >/dev/null     # newer session lowers to 38 (becomes authority @ now)
+t4=$(run 120 "$(rsj 70 "$RT" sessOld)" | nocol)  # the old session reports its stale 70 again
+case "$t4" in *" 62%"*) echo "  T4 stale-high old session can't undo the cap-raise → still 62% OK" ;; *" 30%"*) echo "  ★ FAIL T4 reverted to stale 70 (showed 30%): [$t4]"; fail=1 ;; *) echo "  ★ FAIL T4 expected 62%: [$t4]"; fail=1 ;; esac
+# T5 keying: a DIFFERENT window (different resets_at) must NOT inherit RT's authority
+printf 'S sessOld %s\nW %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+t5=$(run 120 "$(rsj 0 "$((NOW + 22000))" sessOther)" | nocol)
+case "$t5" in *" 100%"*) echo "  T5 separate window not polluted → 100% OK" ;; *) echo "  ★ FAIL T5 window polluted: [$t5]"; fail=1 ;; esac
+# T6 toggle: RL_SYNC=false must ignore the cache entirely → a frozen used=0 shows the raw 100% (cache still holds the RT authority)
+printf 'S sessOld %s\nW %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
 mkdir -p "$WORK/nosync/lib" && cp "$SL"/lib/*.sh "$WORK/nosync/lib/"
 sed 's/^RL_SYNC=true/RL_SYNC=false/' "$SL/statusline-command.sh" > "$WORK/nosync/statusline-command.sh"
-t3=$(printf '%s' "$(rsj 0 "$RT")" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/nosync/statusline-command.sh" | sed 's/\x1b\[[0-9;]*m//g')
-case "$t3" in *" 100%"*) echo "  T3 RL_SYNC=false ignores cache (100%) OK" ;; *) echo "  ★ FAIL T3 false-path consulted cache: [$t3]"; fail=1 ;; esac
-# T4 prune: a frame whose window already expired (resets_at<=now) must NOT be persisted into the cache
-rm -f "$SLC"; RTpast=$(jq -n 'now-100|floor')
-run 120 "$(rsj 90 "$RTpast")" >/dev/null
-if grep -q "^$RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T4 expired window persisted to cache"; fail=1; else echo "  T4 expired window pruned from cache OK"; fi
+t6=$(printf '%s' "$(rsj 0 "$RT" sessOld)" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/nosync/statusline-command.sh" | nocol)
+case "$t6" in *" 100%"*) echo "  T6 RL_SYNC=false ignores cache (100%) OK" ;; *) echo "  ★ FAIL T6 false-path consulted cache: [$t6]"; fail=1 ;; esac
+# T7 prune: a frame whose window already expired (resets_at<=now) must NOT be persisted as a W line
+rm -f "$SLC"; RTpast=$((NOW - 100))
+run 120 "$(rsj 90 "$RTpast" sessX)" >/dev/null
+if grep -q "^W $RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T7 expired window persisted to cache"; fail=1; else echo "  T7 expired window pruned from cache OK"; fi
+# T8 legacy: an old-format "<resets_at> <used>" line is ignored (dropped), not read as an authority
+printf '%s 99\n' "$RT" > "$SLC"
+t8=$(run 120 "$(rsj 10 "$RT" sessZ)" | nocol)
+case "$t8" in *" 90%"*) echo "  T8 legacy 2-col line ignored → own 90% OK" ;; *" 1%"*) echo "  ★ FAIL T8 legacy line treated as authority (showed 1%): [$t8]"; fail=1 ;; *) echo "  ★ FAIL T8 expected 90%: [$t8]"; fail=1 ;; esac
 rm -f "$SLC"
 
 echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format shown verbatim"

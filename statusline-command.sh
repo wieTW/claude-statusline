@@ -21,11 +21,14 @@ EDGE_PAD=3         # CC's statusline drawable area is N cols narrower than the w
                    # measured correction = 3 (aligning to the true terminal width eats 4 cols of the right part, keeping D-1 cols + …); tune here if a future CC build truncates again
 JGAP=2             # minimum whitespace gap for the two parts to count as "separated": gap>=JGAP → plain whitespace, no junction │; <JGAP → the parts are too tight,
                    # so insert a │ separator (truncating the name to make room if needed). Larger → fewer │; set 1 → a │ appears as soon as they nearly touch
-RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a session's start snapshot (upstream limitation): an old
-                   # session keeps showing its stale used%, only the countdown moves. When true, every session records the max used% it
-                   # sees per reset-window in ~/.claude/sl-ratelimit-cache; each render shows the max across all sessions, so a frozen
-                   # session adopts the freshest value any session reported. Sound because fixed-window used% only climbs until resets_at
-                   # (then the window rolls → a new key, usage restarts). false → trust only this session's (possibly frozen) value.
+RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a session's START snapshot (upstream limitation): an old
+                   # session keeps showing its stale used%, only the countdown moves. When true, each reset-window's used% in
+                   # ~/.claude/sl-ratelimit-cache is the value reported by the NEWEST session (latest first-seen) — an older session can
+                   # never override it, a newer one can in either direction. So a frozen session adopts a fresher session's value, and a
+                   # genuine drop (Anthropic raised the cap → % recomputed down) is honoured instead of staying stuck at a stale high.
+                   # false → trust only this session's (possibly frozen) value. See reconcile_rates in lib/collect.sh for the full rule.
+RL_REG_TTL=604800  # session-registry retention (sec): drop a session's first-seen record once it is older than the longest reset window
+                   # (7d) — it can no longer be the authority for any live window. Authority VALUES persist independently of this.
 # last-message age coloring — the time segment shows "HH:MM (Δ)" where Δ = how long since the last prompt; its COLOR signals
 # prompt-cache freshness, NOT just elapsed time. Why these two thresholds (and not arbitrary ones): Anthropic's prompt cache TTL
 # is idle-based and slides on every cache hit — it survives as long as you keep interacting, and only dies after going idle past

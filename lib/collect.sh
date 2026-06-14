@@ -178,34 +178,61 @@ collect_status() {
 }
 
 
-# Cross-session rate-limit sync. Claude Code freezes rate_limits at a session's start snapshot (upstream limitation): a long-lived
-# session keeps reporting its stale used% while only the countdown moves; a fresh session reports the true current value. This shares
-# the freshest value across sessions through a tiny cache, so a frozen session adopts the newest used% any session has reported.
+# Cross-session rate-limit sync. Claude Code freezes rate_limits at a session's START snapshot (upstream limitation): a long-lived
+# session keeps reporting its stale used% while only the countdown moves; a freshly-started session reports the true current value.
+# This shares the truest value across sessions through a tiny cache so a frozen session adopts it.
 #
-# Cache: $HOME/.claude/sl-ratelimit-cache, one "<resets_at> <used>" line per reset-window, keyed by resets_at.
-# Freshness rule: within one window used% only climbs until resets_at (Claude's 5h/7d windows are FIXED, not rolling), so for a given
-#   resets_at the MAX used% ever seen is the most recent. When the window rolls, resets_at becomes a new key and usage restarts there.
-# One awk pass: seed this frame's (resets_at,used) for both windows, fold in every cached line taking the per-key max, drop expired keys
-#   (resets_at <= now) into a fresh temp file, and emit the reconciled used% for our two windows as "<five>|<seven>".
-# Mutates five_h / seven_d in place to the reconciled max; add_rate then renders them exactly as before. Degrades safely: any awk/mv
-#   failure leaves out empty → the guards below keep this session's original values. Per-pid temp + atomic mv tolerates concurrent
-#   sessions (last writer wins; the max re-converges on the next render).
+# Rule — "the newest session is the authority": per reset-window we persist (value, authority_first_seen) = the used% reported by the
+# session with the LATEST first-seen time. A report overrides the stored value only if its session is newer-or-equal (first_seen >=
+# the authority's); an OLDER session can never overwrite it. This is correct in BOTH directions, unlike a plain max:
+#   • used% climbs (normal): a newer session reports higher → adopt it; a stale older session reporting lower is ignored.
+#   • used% drops (Anthropic raised the cap → % recomputed down): a newer session reports lower → adopt it; the obsolete high is dropped.
+# The authority is PERSISTED — not pruned when a session ends. used% is cumulative, so a past high is still real until the window rolls;
+# only a *newer* session may lower it. That is exactly why freshness is keyed on session AGE, not on "is the session still alive": TTL-
+# pruning the authority would let an old frozen-LOW session re-take over and UNDER-report usage (you'd think you have budget and hit the
+# wall — the one direction this display must never get wrong). first_seen is the first render time we saw a session_id (a seconds-grained
+# proxy for session start; the error is sub-second-of-usage, negligible).
+#
+# Cache lines, two kinds (malformed / old-format lines are simply not carried forward on the next write):
+#   S <session_id> <first_seen>             registry of each session's first-seen epoch (used to rank freshness)
+#   W <resets_at>  <used> <auth_first_seen> per-window authority value + the first_seen of the session that set it
+# Pruning on rewrite: W lines with resets_at <= now (window rolled) and S lines older than RL_REG_TTL (past the longest window) are dropped.
+# One awk pass reads both kinds, applies this frame's report per the rule, rewrites survivors to a per-pid temp (atomic mv tolerates
+# concurrent sessions), and emits the reconciled used% for our two windows as "<five>|<seven>". Mutates five_h / seven_d in place; add_rate
+# renders them unchanged. Degrades safely: any awk/mv failure (e.g. read-only HOME) leaves out empty → the guards below keep this frame's
+# own values. An empty session_id contributes nothing (cannot be ranked) but still adopts an existing authority.
 reconcile_rates() {
     $RL_SYNC || return 0
     local cache="$HOME/.claude/sl-ratelimit-cache" src tmpfile out new5 new7
     src="$cache"; [ -f "$src" ] || src=/dev/null   # first run: no cache yet → read nothing, just seed from this frame
     tmpfile="$cache.$$"                            # $$ is unique per session process → no temp collision across sessions
     : > "$tmpfile" 2>/dev/null || return 0         # can't write (e.g. read-only HOME) → leave values untouched
-    out=$(awk -v now="$now" -v r5="$five_reset" -v u5="$five_h" -v r7="$seven_reset" -v u7="$seven_d" -v tmp="$tmpfile" '
+    out=$(awk -v now="$now" -v sid="$session_id" -v r5="$five_reset" -v u5="$five_h" \
+              -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" '
         function isnum(x){ return (x ~ /^[0-9]+(\.[0-9]+)?$/) }
-        BEGIN{
-            if (isnum(r5) && isnum(u5)) m[r5]=u5+0
-            if (isnum(r7) && isnum(u7)) m[r7]=u7+0
+        # apply this frame report (window r, used u): newest-or-equal session wins, older is ignored; expired/non-numeric skipped
+        function applywin(r, u) {
+            if (!isnum(r) || !isnum(u) || r+0 <= now+0) return
+            if (!(r in Wval) || myfs+0 >= Wfs[r]+0) { Wval[r]=u+0; Wfs[r]=myfs }
         }
-        isnum($1) && isnum($2){ if (!($1 in m) || $2+0 > m[$1]+0) m[$1]=$2+0 }
+        $1=="S" && NF==3 {                                              # session registry line
+            if ($2==sid) myfs=$3                                        #   my own first_seen — preserved across renders
+            else if (isnum($3) && $3+0 > now+0 - regttl) Sf[$2]=$3      #   keep other not-too-old sessions
+            next
+        }
+        $1=="W" && NF==4 && isnum($2) && $2+0 > now+0 {                 # unexpired per-window authority
+            Wval[$2]=$3+0; Wfs[$2]=$4; next
+        }
+        # any other / malformed / old-format line: dropped (not written to tmp)
         END{
-            for (k in m) if (k+0 > now+0 && m[k] != "") printf "%s %s\n", k, m[k] >> tmp
-            printf "%s|%s\n", (isnum(r5) ? m[r5]"" : ""), (isnum(r7) ? m[r7]"" : "")
+            if (sid != "") {
+                if (myfs=="" || !isnum(myfs)) myfs=now                  # new session → first seen is now
+                Sf[sid]=myfs
+                applywin(r5, u5); applywin(r7, u7)
+            }
+            for (s in Sf) if (isnum(Sf[s]) && Sf[s]+0 > now+0 - regttl) printf "S %s %s\n", s, Sf[s] >> tmp
+            for (k in Wval) if (isnum(k) && k+0 > now+0) printf "W %s %s %s\n", k, Wval[k], Wfs[k] >> tmp
+            printf "%s|%s\n", ((isnum(r5) && (r5 in Wval)) ? Wval[r5]"" : ""), ((isnum(r7) && (r7 in Wval)) ? Wval[r7]"" : "")
         }
     ' "$src" 2>/dev/null)
     mv -f "$tmpfile" "$cache" 2>/dev/null
