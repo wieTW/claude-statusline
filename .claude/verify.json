@@ -1,9 +1,9 @@
 {
   "description": "last-message 顯示從『MM-DD HH:MM』改成『HH:MM (Δ)』。Δ=距上次 prompt 多久,顏色當作 prompt-cache 新鮮度信號(門檻=兩個真實 cache TTL):<1m 不顯示 Δ、<5m 暗灰(cache warm)、5m–1h 黃(預設 5m cache idle-cold)、≥1h 紅(連 1h 延長 cache 都過期,接續=全額 cache write)。全域 hook ~/.claude/hooks/session-time.sh 改成寫 'HH:MM <epoch>';render.sh build_left 解析尾端 epoch、用既有的 now 零 fork 算 delta 並上色;舊『MM-DD HH:MM』格式(無 epoch 尾)向後相容原樣顯示。statusline-command.sh 新增 LASTMSG_WARN=300 / LASTMSG_STALE=3600 config(含 cache-TTL 依據註解)。新增回歸測試 U。文字維持誠實的 elapsed 時間,只有顏色承載 cache 解讀(腳本讀不到 CC 真實 cache 狀態,不在文字上斷言)。",
   "verify": [
-    "bash -n /Users/will/Downloads/macOS/claude-skills/statusline/statusline-command.sh && bash -n /Users/will/Downloads/macOS/claude-skills/statusline/lib/collect.sh && bash -n /Users/will/Downloads/macOS/claude-skills/statusline/lib/render.sh && bash -n /Users/will/.claude/hooks/session-time.sh",
-    "shellcheck -x /Users/will/Downloads/macOS/claude-skills/statusline/statusline-command.sh",
-    "bash /Users/will/Downloads/macOS/claude-skills/statusline/tests/run-tests.sh"
+    "bash -n /Users/will/Downloads/macOS/claude-statusline/statusline-command.sh && bash -n /Users/will/Downloads/macOS/claude-statusline/lib/collect.sh && bash -n /Users/will/Downloads/macOS/claude-statusline/lib/render.sh && bash -n /Users/will/.claude/hooks/session-time.sh",
+    "shellcheck -x /Users/will/Downloads/macOS/claude-statusline/statusline-command.sh",
+    "bash /Users/will/Downloads/macOS/claude-statusline/tests/run-tests.sh"
   ],
   "pass": "四個 bash -n + shellcheck + 測試套件都 exit 0,印出 ALL CHECKS PASSED。新增 U:U1 Δ<1min 只顯示 09:30、U2 ~10min 顯示 (10m)、U3 ~2h 顯示 (2H0m)、U4 三個 cache-TTL 顏色階層(warm/5m-1h/≥1h)彼此不同、U5 舊 MM-DD HH:MM 格式仍原樣顯示。既有 A..T 全不變(舊格式 last-msg 顯示寬度不變)。"
 }
