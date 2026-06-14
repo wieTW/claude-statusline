@@ -26,6 +26,17 @@ RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a 
                    # sees per reset-window in ~/.claude/sl-ratelimit-cache; each render shows the max across all sessions, so a frozen
                    # session adopts the freshest value any session reported. Sound because fixed-window used% only climbs until resets_at
                    # (then the window rolls → a new key, usage restarts). false → trust only this session's (possibly frozen) value.
+# last-message age coloring — the time segment shows "HH:MM (Δ)" where Δ = how long since the last prompt; its COLOR signals
+# prompt-cache freshness, NOT just elapsed time. Why these two thresholds (and not arbitrary ones): Anthropic's prompt cache TTL
+# is idle-based and slides on every cache hit — it survives as long as you keep interacting, and only dies after going idle past
+# the TTL. There are exactly two TTLs: 5 min (default) and 1 h (extended). So idle time IS the cache-liveness clock, and these two
+# TTLs are the real breakpoints: <5m the (default) cache is still warm → continuing is near-free; 5m–1h the 5m cache has expired,
+# the 1h one may still hold → next turn re-writes cache; ≥1h even the extended cache is gone → continuing costs a full cache write,
+# same as a fresh session (consider starting one). Δ under 1 min is hidden (just "HH:MM"). The timestamp itself stays dim; only Δ colors.
+# We deliberately show the honest elapsed time as text and let colour carry the cache meaning — the script can't read CC's actual
+# cache TTL/state (no such field exists anywhere it can reach), so it must not assert a literal "cache cold"; the duration is a fact, the colour is the read.
+LASTMSG_WARN=300   # Δ ≥ this (sec) → yellow: default 5-min prompt cache has gone idle-cold (5 min)
+LASTMSG_STALE=3600 # Δ ≥ this (sec) → red: even the 1-hour extended cache is gone; continuing pays a full cache write (1 h)
 
 case $0 in */*) SL_DIR=${0%/*} ;; *) SL_DIR=. ;; esac   # pure-bash dirname, saves a fork
 . "$SL_DIR/lib/collect.sh"

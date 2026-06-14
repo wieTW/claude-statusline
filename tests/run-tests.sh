@@ -276,6 +276,32 @@ run 120 "$(rsj 90 "$RTpast")" >/dev/null
 if grep -q "^$RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T4 expired window persisted to cache"; fail=1; else echo "  T4 expired window pruned from cache OK"; fi
 rm -f "$SLC"
 
+echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format shown verbatim"
+NOWS=$(jq -n 'now|floor')
+LMF="$FAKE_HOME/.claude/last-msg/sl-selftest"
+lmrun() { printf '09:30 %s\n' "$(( NOWS - $1 ))" > "$LMF"; run 200 "$J"; }      # $1=age sec → render with that last-msg age
+pcode() { sed -E 's/.*\x1b\[([0-9;]*)m\(.*/\1/'; }    # SGR code right before the LAST "(" (the Δ segment)
+strip()  { sed 's/\x1b\[[0-9;]*m//g'; }
+# U1 Δ<1min suppressed → clock time only (no "(" after the time)
+u1=$(lmrun 30 | strip)
+case "$u1" in *"09:30 ("*) echo "  ★ FAIL U1 <1min should hide Δ: [$u1]"; fail=1 ;; *"09:30"*) echo "  U1 <1min: time only OK" ;; *) echo "  ★ FAIL U1 time missing"; fail=1 ;; esac
+# U2 ~10min → minutes Δ (5m–1h yellow tier)
+u2raw=$(lmrun 600); u2=$(printf '%s' "$u2raw" | strip)
+case "$u2" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  U2 10min: (10m) Δ OK" ;; *) echo "  ★ FAIL U2 expected (10m): [$u2]"; fail=1 ;; esac
+# U3 ~2h → H/m Δ (≥1h red tier)
+u3raw=$(lmrun 7200); u3=$(printf '%s' "$u3raw" | strip)
+case "$u3" in *"09:30 (2H0m)"*|*"09:30 (1H59m)"*) echo "  U3 2h: (2H0m) Δ OK" ;; *) echo "  ★ FAIL U3 expected (2H0m): [$u3]"; fail=1 ;; esac
+# U4 the three TTL tiers (warm <5m / 5m–1h / ≥1h) must be coloured differently
+cw=$(lmrun 120 | pcode); cm=$(printf '%s' "$u2raw" | pcode); cc=$(printf '%s' "$u3raw" | pcode)
+if [ -n "$cw" ] && [ -n "$cm" ] && [ -n "$cc" ] && [ "$cw" != "$cm" ] && [ "$cm" != "$cc" ] && [ "$cw" != "$cc" ]; then
+  echo "  U4 three cache-TTL colour tiers distinct OK"
+else echo "  ★ FAIL U4 tiers not distinct: warm=[$cw] mid=[$cm] cold=[$cc]"; fail=1; fi
+# U5 backward compat — old "MM-DD HH:MM" (no epoch tail) shown verbatim
+printf '06-07 19:38\n' > "$LMF"
+u5=$(run 200 "$J" | strip)
+case "$u5" in *"06-07 19:38"*) echo "  U5 old format verbatim OK" ;; *) echo "  ★ FAIL U5 old format dropped: [$u5]"; fail=1 ;; esac
+printf '06-07 19:38\n' > "$LMF"   # restore baseline
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 

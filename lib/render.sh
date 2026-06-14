@@ -190,7 +190,7 @@ build_left() {
     # parse_input filter prevents. Glob-strip is zero-fork: C0 0x01-0x1F + DEL 0x7F, plus the 2-byte UTF-8 C1 block 0xC2 0x80..0x9F
     # (mirroring parse_input's select(. >= 32 and (. < 127 or . > 159))); a final :0:256 byte-cap matches the jq length bound.
     # Deliberately NOT a jq re-parse, which would add a fork to every frame's hot path for an inert-text cleanup.
-    last_msg=""
+    last_msg=""; lm_epoch=""
     case "$session_id" in
         ''|*/*|*..*) ;;   # empty or path-traversal-shaped → skip the read entirely
         *)
@@ -199,10 +199,40 @@ build_left() {
                 last_msg=${last_msg//[$'\001'-$'\037'$'\177']/}        # C0 + DEL (single bytes)
                 last_msg=${last_msg//$'\302'[$'\200'-$'\237']/}        # 2-byte UTF-8 C1 U+0080-U+009F (U+009B=CSI etc.) — same injection class as a raw ESC
                 last_msg=${last_msg:0:256}                            # bound length (vis_width's strip is O(n^2) under bash 3.2)
+                # File is now "HH:MM <epoch>" (hook writes both). Split off the trailing all-digit epoch so we can age it into a Δ;
+                # an old "MM-DD HH:MM" file (no numeric tail) leaves lm_epoch empty and is shown verbatim — backward compatible for
+                # sessions whose file the updated hook hasn't rewritten yet.
+                lm_epoch=${last_msg##* }
+                case "$lm_epoch" in
+                    ''|*[!0-9]*) lm_epoch="" ;;                       # no epoch tail → keep last_msg as the whole raw string
+                    *) last_msg=${last_msg% *} ;;                     # time label = everything before the last space
+                esac
             fi
             ;;
     esac
-    [ -n "$last_msg" ] && parts+=("${DM}${last_msg}${RS}")
+    # Render "HH:MM (Δ)": timestamp always dim; Δ ("how long since the last prompt") colored as a prompt-cache-freshness signal
+    # (thresholds = the two real cache TTLs, see LASTMSG_WARN/STALE in statusline-command.sh). Δ under a minute is hidden. The text
+    # is the honest elapsed time; only the color encodes the cache read — the script can't see CC's real cache state, so it won't claim one in words.
+    if [ -n "$last_msg" ]; then
+        if [ -n "$lm_epoch" ]; then
+            lm_age=$(( now - lm_epoch ))
+            if [ "$lm_age" -lt 0 ]; then lm_age=0; fi
+            if [ "$lm_age" -ge 60 ]; then
+                lm_d=$(( lm_age/86400 )); lm_h=$(( (lm_age%86400)/3600 )); lm_m=$(( (lm_age%3600)/60 ))
+                if   [ "$lm_d" -gt 0 ]; then lm_delta="${lm_d}D${lm_h}H"
+                elif [ "$lm_h" -gt 0 ]; then lm_delta="${lm_h}H${lm_m}m"
+                else lm_delta="${lm_m}m"; fi
+                if   [ "$lm_age" -ge "$LASTMSG_STALE" ]; then lm_col="$RD"   # ≥1h: even the extended cache is gone
+                elif [ "$lm_age" -ge "$LASTMSG_WARN"  ]; then lm_col="$YL"   # ≥5m: default cache has gone idle-cold
+                else lm_col="$DM"; fi                                        # <5m: cache still warm → dim, matches the timestamp
+                parts+=("${DM}${last_msg}${RS} ${lm_col}(${lm_delta})${RS}")
+            else
+                parts+=("${DM}${last_msg}${RS}")                            # <1 min → clock time only, no Δ
+            fi
+        else
+            parts+=("${DM}${last_msg}${RS}")                                # old/unknown format → show the raw string as-is
+        fi
+    fi
 }
 
 
