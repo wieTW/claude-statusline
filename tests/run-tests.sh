@@ -247,6 +247,35 @@ JS=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
 sout=$(run 200 "$JS" | sed 's/\x1b\[[0-9;]*m//g')
 case "$sout" in *-[0-9]*%*) echo "  ★ FAIL negative remaining %: [$sout]"; fail=1 ;; *) echo "  no negative % OK" ;; esac
 
+echo "── T. RATE-SYNC: frozen session adopts a fresher session's used% per reset window (cross-session cache); keying / toggle / prune"
+SLC="$FAKE_HOME/.claude/sl-ratelimit-cache"
+rsj() {  # $1=used% $2=resets_at → minimal five_hour-only json (ctx pinned 5% so the only other "%" token is the rate)
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson u "$1" --argjson r "$2" '
+  { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
+    rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:"sl-selftest", transcript_path:$tp }'; }
+# T1 core: a fresh frame seeds the shared cache; a later FROZEN frame (used=0) on the SAME window shows the synced value, not stale 100%
+rm -f "$SLC"; RT=$(jq -n 'now+9000|floor')      # one fixed 5h-ish reset key, shared by the frames below
+run 120 "$(rsj 37 "$RT")" >/dev/null            # fresh session seeds cache: RT → 37% used
+t1=$(run 120 "$(rsj 0 "$RT")" | sed 's/\x1b\[[0-9;]*m//g')
+case "$t1" in
+  *" 63%"*)  echo "  T1 frozen adopts synced 63% (not 100%) OK" ;;
+  *" 100%"*) echo "  ★ FAIL T1 frozen still stale 100% (cache not consulted)"; fail=1 ;;
+  *)         echo "  ★ FAIL T1 unexpected rate output: [$t1]"; fail=1 ;;
+esac
+# T2 keying: a DIFFERENT window (different resets_at) must NOT inherit the first window's 37%
+t2=$(run 120 "$(rsj 0 "$(jq -n 'now+22000|floor')")" | sed 's/\x1b\[[0-9;]*m//g')
+case "$t2" in *" 100%"*) echo "  T2 separate window not polluted (100%) OK" ;; *) echo "  ★ FAIL T2 window polluted: [$t2]"; fail=1 ;; esac
+# T3 toggle: RL_SYNC=false must ignore the cache entirely → the same frozen used=0 shows the raw 100% (cache still holds RT→37 from T1)
+mkdir -p "$WORK/nosync/lib" && cp "$SL"/lib/*.sh "$WORK/nosync/lib/"
+sed 's/^RL_SYNC=true/RL_SYNC=false/' "$SL/statusline-command.sh" > "$WORK/nosync/statusline-command.sh"
+t3=$(printf '%s' "$(rsj 0 "$RT")" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/nosync/statusline-command.sh" | sed 's/\x1b\[[0-9;]*m//g')
+case "$t3" in *" 100%"*) echo "  T3 RL_SYNC=false ignores cache (100%) OK" ;; *) echo "  ★ FAIL T3 false-path consulted cache: [$t3]"; fail=1 ;; esac
+# T4 prune: a frame whose window already expired (resets_at<=now) must NOT be persisted into the cache
+rm -f "$SLC"; RTpast=$(jq -n 'now-100|floor')
+run 120 "$(rsj 90 "$RTpast")" >/dev/null
+if grep -q "^$RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T4 expired window persisted to cache"; fail=1; else echo "  T4 expired window pruned from cache OK"; fi
+rm -f "$SLC"
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 

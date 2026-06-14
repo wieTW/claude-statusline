@@ -176,3 +176,40 @@ collect_status() {
         fi
     fi
 }
+
+
+# Cross-session rate-limit sync. Claude Code freezes rate_limits at a session's start snapshot (upstream limitation): a long-lived
+# session keeps reporting its stale used% while only the countdown moves; a fresh session reports the true current value. This shares
+# the freshest value across sessions through a tiny cache, so a frozen session adopts the newest used% any session has reported.
+#
+# Cache: $HOME/.claude/sl-ratelimit-cache, one "<resets_at> <used>" line per reset-window, keyed by resets_at.
+# Freshness rule: within one window used% only climbs until resets_at (Claude's 5h/7d windows are FIXED, not rolling), so for a given
+#   resets_at the MAX used% ever seen is the most recent. When the window rolls, resets_at becomes a new key and usage restarts there.
+# One awk pass: seed this frame's (resets_at,used) for both windows, fold in every cached line taking the per-key max, drop expired keys
+#   (resets_at <= now) into a fresh temp file, and emit the reconciled used% for our two windows as "<five>|<seven>".
+# Mutates five_h / seven_d in place to the reconciled max; add_rate then renders them exactly as before. Degrades safely: any awk/mv
+#   failure leaves out empty → the guards below keep this session's original values. Per-pid temp + atomic mv tolerates concurrent
+#   sessions (last writer wins; the max re-converges on the next render).
+reconcile_rates() {
+    $RL_SYNC || return 0
+    local cache="$HOME/.claude/sl-ratelimit-cache" src tmpfile out new5 new7
+    src="$cache"; [ -f "$src" ] || src=/dev/null   # first run: no cache yet → read nothing, just seed from this frame
+    tmpfile="$cache.$$"                            # $$ is unique per session process → no temp collision across sessions
+    : > "$tmpfile" 2>/dev/null || return 0         # can't write (e.g. read-only HOME) → leave values untouched
+    out=$(awk -v now="$now" -v r5="$five_reset" -v u5="$five_h" -v r7="$seven_reset" -v u7="$seven_d" -v tmp="$tmpfile" '
+        function isnum(x){ return (x ~ /^[0-9]+(\.[0-9]+)?$/) }
+        BEGIN{
+            if (isnum(r5) && isnum(u5)) m[r5]=u5+0
+            if (isnum(r7) && isnum(u7)) m[r7]=u7+0
+        }
+        isnum($1) && isnum($2){ if (!($1 in m) || $2+0 > m[$1]+0) m[$1]=$2+0 }
+        END{
+            for (k in m) if (k+0 > now+0 && m[k] != "") printf "%s %s\n", k, m[k] >> tmp
+            printf "%s|%s\n", (isnum(r5) ? m[r5]"" : ""), (isnum(r7) ? m[r7]"" : "")
+        }
+    ' "$src" 2>/dev/null)
+    mv -f "$tmpfile" "$cache" 2>/dev/null
+    new5=${out%%|*}; new7=${out#*|}                # awk emits exactly one "|"; robust to command-sub trailing-newline stripping
+    case "$new5" in ''|*[!0-9.]*) ;; *) five_h="$new5" ;; esac
+    case "$new7" in ''|*[!0-9.]*) ;; *) seven_d="$new7" ;; esac
+}

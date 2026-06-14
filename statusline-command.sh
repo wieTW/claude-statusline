@@ -21,6 +21,11 @@ EDGE_PAD=3         # CC's statusline drawable area is N cols narrower than the w
                    # measured correction = 3 (aligning to the true terminal width eats 4 cols of the right part, keeping D-1 cols + …); tune here if a future CC build truncates again
 JGAP=2             # minimum whitespace gap for the two parts to count as "separated": gap>=JGAP → plain whitespace, no junction │; <JGAP → the parts are too tight,
                    # so insert a │ separator (truncating the name to make room if needed). Larger → fewer │; set 1 → a │ appears as soon as they nearly touch
+RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a session's start snapshot (upstream limitation): an old
+                   # session keeps showing its stale used%, only the countdown moves. When true, every session records the max used% it
+                   # sees per reset-window in ~/.claude/sl-ratelimit-cache; each render shows the max across all sessions, so a frozen
+                   # session adopts the freshest value any session reported. Sound because fixed-window used% only climbs until resets_at
+                   # (then the window rolls → a new key, usage restarts). false → trust only this session's (possibly frozen) value.
 
 case $0 in */*) SL_DIR=${0%/*} ;; *) SL_DIR=. ;; esac   # pure-bash dirname, saves a fork
 . "$SL_DIR/lib/collect.sh"
@@ -32,6 +37,7 @@ parse_input        # main shell blocks parsing the stdin JSON (the only reader o
 collect_status     # git×3 + effort scan collected concurrently, blocking until the slowest job finishes
 read_theme         # the theme/width jobs are long done by now (covered by the two steps above), zero wait
 read_width
+reconcile_rates    # cross-session rate-limit sync: adopt the freshest used% any session has seen for this window
 
 load_palette
 build_left
