@@ -5,6 +5,7 @@
 # Work dir is a fresh mktemp (NOT /tmp/sl-test — that hardcoded path is exactly why the old harness vanished on tmp-clear).
 set -u
 SL=$(cd "$(dirname "$0")/.." && pwd)
+SLDIR=$(basename "$SL")   # project-dir basename, shown as the path segment; derived (not hardcoded) so the order check survives a repo rename
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/sl-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 FAKE_HOME="$WORK/home"
@@ -70,7 +71,7 @@ chk check exact $((W+20-EDGE_PAD)) < <(run $((W+20)) "$J")
 echo "── A2. content order dir→model→ultra→ctx→quota→time→git→session"
 plain=$(run $((W+20)) "$J" | python3 -c 'import sys,re;sys.stdout.write(re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read()))')
 case "$plain" in
-  statusline*"Opus 4.8 (1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*main*"Consolidate statusline from two rows to one") echo "  order OK" ;;
+  "$SLDIR"*"Opus 4.8 (1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*main*"Consolidate statusline from two rows to one") echo "  order OK" ;;
   *) echo "  ★ FAIL order mismatch: [$plain]"; fail=1 ;;
 esac
 
