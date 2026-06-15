@@ -78,15 +78,22 @@ fmt_pct() {
     esac
 }
 
+# Shared seconds→duration formatter: D/H/m cascade. Single source for ttl() (reset countdown) and the last-message Δ,
+# which previously carried byte-identical arithmetic in two places (silent-drift risk if only one were ever edited).
+fmt_dur() {   # $1=seconds (non-negative integer) → _dur="1D3H"/"2H2m"/"5m"
+    local s=$1 d h m
+    d=$((s/86400)); h=$(((s%86400)/3600)); m=$(((s%3600)/60))
+    if [ "$d" -gt 0 ]; then _dur="${d}D${h}H"
+    elif [ "$h" -gt 0 ]; then _dur="${h}H${m}m"
+    else _dur="${m}m"; fi
+}
+
 ttl() {   # $1=resets_at (Unix seconds) → _ttl="1D3H"/"2H2m"/"5m"; non-numeric returns empty
     _ttl=""
     case "$1" in ''|*[!0-9]*) return ;; esac
-    local s=$(( $1 - now )) d h m
+    local s=$(( $1 - now ))
     if [ "$s" -le 0 ]; then _ttl="0m"; return; fi
-    d=$((s/86400)); h=$(((s%86400)/3600)); m=$(((s%3600)/60))
-    if [ "$d" -gt 0 ]; then _ttl="${d}D${h}H"
-    elif [ "$h" -gt 0 ]; then _ttl="${h}H${m}m"
-    else _ttl="${m}m"; fi
+    fmt_dur "$s"; _ttl="$_dur"
 }
 
 add_rate() {   # $1=used% $2=resets_at → appends "2H2m 76%" to parts (time in white, % colored: >75 green, >50 yellow, >25 orange, <=25 red)
@@ -218,10 +225,7 @@ build_left() {
             lm_age=$(( now - lm_epoch ))
             if [ "$lm_age" -lt 0 ]; then lm_age=0; fi
             if [ "$lm_age" -ge 60 ]; then
-                lm_d=$(( lm_age/86400 )); lm_h=$(( (lm_age%86400)/3600 )); lm_m=$(( (lm_age%3600)/60 ))
-                if   [ "$lm_d" -gt 0 ]; then lm_delta="${lm_d}D${lm_h}H"
-                elif [ "$lm_h" -gt 0 ]; then lm_delta="${lm_h}H${lm_m}m"
-                else lm_delta="${lm_m}m"; fi
+                fmt_dur "$lm_age"; lm_delta="$_dur"
                 if   [ "$lm_age" -ge "$LASTMSG_STALE" ]; then lm_col="$RD"   # ≥1h: even the extended cache is gone
                 elif [ "$lm_age" -ge "$LASTMSG_WARN"  ]; then lm_col="$YL"   # ≥5m: default cache has gone idle-cold
                 else lm_col="$DM"; fi                                        # <5m: cache still warm → dim, matches the timestamp
@@ -335,6 +339,14 @@ trunc_head() {   # $1=string with color codes $2=visible-width cap (>=2) → _tr
     _trunc="${best}"$'\033[0m'"…"
 }
 
+# Print one part bounded to $2 visible columns: print whole if it fits, else head-truncate with … . Single source for the
+# left-only / right-empty width-bounding tiers in render_line (previously two byte-identical blocks → fix-one-forget-the-other risk).
+emit_bounded() {   # $1=string with color codes $2=visible-width cap
+    vis_width "$1"
+    if [ "$_w" -le "$2" ]; then printf '%s\n' "$1"
+    else trunc_head "$1" "$2"; printf '%s\n' "$_trunc"; fi
+}
+
 # Single-line output: left ──gap── right (right-aligned to the drawable right edge at term_cols-EDGE_PAD).
 # The junction │ appears only when "merged" — placed only when the gap between the two parts is <JGAP (otherwise a │ floating in a big whitespace gap looks odd);
 # when the gap is >=JGAP, plain whitespace separates them with no │. When placed, the │ hugs the right part, its leading space coming from the gap, reading as " │ ".
@@ -376,11 +388,7 @@ render_line() {
             return
         fi
         # The left part nearly fills the whole terminal: the right has no room → drop it; head-truncate the left only if it's over-wide
-        if [ "$lw" -le "$avail" ]; then
-            printf '%s\n' "$left"
-        else
-            trunc_head "$left" "$avail"; printf '%s\n' "$_trunc"
-        fi
+        emit_bounded "$left" "$avail"
         return
     fi
     # Left-only (right empty) with a known width: still bound the left part. The block above is gated on a non-empty
@@ -390,12 +398,7 @@ render_line() {
     if [ -n "$left" ] && [ -z "$right" ] && $RIGHT_ALIGN \
        && [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then
         avail=$(( term_cols - EDGE_PAD ))
-        vis_width "$left"; lw=$_w
-        if [ "$lw" -le "$avail" ]; then
-            printf '%s\n' "$left"
-        else
-            trunc_head "$left" "$avail"; printf '%s\n' "$_trunc"
-        fi
+        emit_bounded "$left" "$avail"
         return
     fi
     if [ -n "$left" ] && [ -n "$right" ]; then
