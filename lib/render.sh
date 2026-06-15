@@ -210,13 +210,26 @@ build_left() {
         [ -n "$seg_thinking" ] && parts+=("$seg_thinking")
     fi
 
-    # ctx %: Raymond's rule — the % number is normally white, turns red as a warning only when >80%
+    # ctx %: the % number is normally white, turns red as a warning only near the model's context limit. The red threshold is
+    # BUDGET-AWARE, not a fixed 80%: a 1M-context model (display name carries the "1M context" marker, same signal build_left
+    # already keys on for the model-name compaction above) has ~5x the budget, so 80% there is still huge headroom — applying the
+    # 200k-class 80% rule would falsely flag it red. So pick the threshold from the model's context budget: 80% for 200k-class
+    # models, 92% for 1M-context models (a value that keeps 85% — the spec's worked example — in normal colour while still warning
+    # as the 1M window genuinely nears full). Defaults to the 200k threshold when no extended-context marker is present.
     # When CTX_BAR=true, a 12-cell gradient bar is prepended: used portion colored in four zones (green→yellow→orange→red), unused drawn as gray track
     fmt_pct "$used_pct"
     if [ -n "$_pct" ]; then
-        if [ "$_pct" -gt 80 ]; then ctx_color="$RD"; else ctx_color="$WH"; fi
+        case "$model" in *"1M context"*|*"(1M)"*) ctx_red_at=92 ;; *) ctx_red_at=80 ;; esac
+        if [ "$_pct" -gt "$ctx_red_at" ]; then ctx_color="$RD"; else ctx_color="$WH"; fi
+        # 200k cost/cache cliff marker: appended iff the upstream over-200k indicator (exceeds_200k_tokens) is true. It is DECOUPLED
+        # from the percentage colour above — driven solely by the indicator, independent of used_percentage or which budget the colour
+        # threshold selected (so a normal-coloured 1M frame can still show the cliff, and a red 200k frame may or may not). The marker
+        # rides as a red alert "⚑" (the RD role applied below), emitted only on the established build_left path; its own colour is the
+        # alert red so the crossed-cliff reads at a glance without coupling to the % colour. exceeds_200k is read through parse_input (sanitized, capped).
+        ctx_cliff=""
+        [ "$exceeds_200k" = "true" ] && ctx_cliff="${RD}⚑${RS}"
         # Compact ctx form (degrade step 4): plain "N%" text, no bar — the % itself is part of the core and is never dropped.
-        seg_ctx_compact="${ctx_color}${_pct}%${RS}"
+        seg_ctx_compact="${ctx_color}${_pct}%${RS}${ctx_cliff}"
         if $CTX_BAR; then
             # Solid bar: background color (48;2) + a space fills the whole cell, no font gaps; the unfilled part uses the gray background as a track
             BAR_W=12
@@ -235,9 +248,9 @@ build_left() {
                     bar="${bar}${TRK} "
                 fi
             done
-            seg_ctx_full="${bar}${RS} ${ctx_color}${_pct}%${RS}"
+            seg_ctx_full="${bar}${RS} ${ctx_color}${_pct}%${RS}${ctx_cliff}"
         else
-            seg_ctx_full="${ctx_color}ctx:${_pct}%${RS}"   # CTX_BAR off: full == "ctx:N%"; compact drops the "ctx:" prefix to plain N%
+            seg_ctx_full="${ctx_color}ctx:${_pct}%${RS}${ctx_cliff}"   # CTX_BAR off: full == "ctx:N%"; compact drops the "ctx:" prefix to plain N%
         fi
         parts+=("$seg_ctx_full")
     fi
@@ -274,6 +287,9 @@ build_left() {
     # parse_input filter prevents. Glob-strip is zero-fork: C0 0x01-0x1F + DEL 0x7F, plus the 2-byte UTF-8 C1 block 0xC2 0x80..0x9F
     # (mirroring parse_input's select(. >= 32 and (. < 127 or . > 159))); a final :0:256 byte-cap matches the jq length bound.
     # Deliberately NOT a jq re-parse, which would add a fork to every frame's hot path for an inert-text cleanup.
+    # (Glob range starts at 0x01, not 0x00: bash's $'\000' expands to the empty string — a leading "-" in the bracket class — so it
+    # cannot encode NUL; range would silently strip every literal "-" (breaks "MM-DD" labels). Safe anyway: `read` drops NUL bytes,
+    # so a C-string `last_msg` can never hold one, leaving the 0x01.. range equivalent to parse_input's select(. >= 32 ...) here.)
     last_msg=""; lm_epoch=""
     case "$session_id" in
         ''|*/*|*..*) ;;   # empty or path-traversal-shaped → skip the read entirely
@@ -297,6 +313,17 @@ build_left() {
     # Render "HH:MM (Δ)": timestamp always dim; Δ ("how long since the last prompt") colored as a prompt-cache-freshness signal
     # (thresholds = the two real cache TTLs, see LASTMSG_WARN/STALE in statusline-command.sh). Δ under a minute is hidden. The text
     # is the honest elapsed time; only the color encodes the cache read — the script can't see CC's real cache state, so it won't claim one in words.
+    # Cross-day correctness: lm_epoch is a UTC Unix time but the stored "HH:MM" label is LOCAL — a prompt from a prior local calendar
+    # day would be misread as today. So when lm_epoch and now fall on DIFFERENT local calendar days, prepend the local date ("MM-DD HH:MM").
+    # The comparison is a calendar-DAY difference (not a fixed 24h age): a 23:50 prompt rendered at 00:10 next day is cross-day at Δ=20m.
+    # The local date is resolved with `date -r <epoch>` (BSD/macOS, same family as the script's stat -f) which formats an epoch in the
+    # local zone, so DST is handled correctly with no manual offset math. To keep the hot path light, the date fork only runs inside the
+    # Δ>=60 branch (a sub-minute prompt is unambiguously same-day → zero fork); within that branch at most two `date` forks resolve both
+    # local dates. (Deliberate: design.md's "Δ>=1h gate" is superseded by spec.md last-message-age's NORMATIVE scenario
+    # "cross-midnight prompt under one hour" — lm_epoch 23:50 / now 00:10 MUST render "06-14 23:50" with a yellow (20m) Δ.
+    # A Δ>=3600 gate would drop that date prefix and violate the spec, so the gate is Δ>=60s. design.md/tasks.md 6.5 carry the
+    # stale "Δ>=1h" wording from before that scenario was pinned; spec.md is the authority. A sub-minute prompt is unambiguously
+    # same-day, so gating at >=60s still keeps the common case fork-free.)
     if [ -n "$last_msg" ]; then
         if [ -n "$lm_epoch" ]; then
             lm_age=$(( now - lm_epoch ))
@@ -306,9 +333,16 @@ build_left() {
                 if   [ "$lm_age" -ge "$LASTMSG_STALE" ]; then lm_col="$RD"   # ≥1h: even the extended cache is gone
                 elif [ "$lm_age" -ge "$LASTMSG_WARN"  ]; then lm_col="$YL"   # ≥5m: default cache has gone idle-cold
                 else lm_col="$DM"; fi                                        # <5m: cache still warm → dim, matches the timestamp
-                seg_lastmsg="${DM}${last_msg}${RS} ${lm_col}(${lm_delta})${RS}"
+                lm_label="$last_msg"
+                local lm_day now_day
+                lm_day=$(date -r "$lm_epoch" '+%Y-%m-%d' 2>/dev/null)        # local calendar day of the prompt
+                now_day=$(date -r "$now" '+%Y-%m-%d' 2>/dev/null)           # local calendar day of the render
+                if [ -n "$lm_day" ] && [ -n "$now_day" ] && [ "$lm_day" != "$now_day" ]; then
+                    lm_label="${lm_day:5} $last_msg"                         # different local day → prefix "MM-DD" (strip the leading "YYYY-")
+                fi
+                seg_lastmsg="${DM}${lm_label}${RS} ${lm_col}(${lm_delta})${RS}"
             else
-                seg_lastmsg="${DM}${last_msg}${RS}"                         # <1 min → clock time only, no Δ
+                seg_lastmsg="${DM}${last_msg}${RS}"                         # <1 min → clock time only, no Δ (always same local day)
             fi
         else
             seg_lastmsg="${DM}${last_msg}${RS}"                             # old/unknown format → show the raw string as-is
@@ -397,7 +431,7 @@ vis_width() {   # $1=string with color codes → _w=visible column width
         s=${s#*$'\033['}; s=${s#*m}     # an SGR code always ends with m, the shortest match eats exactly one code
     done
     t+=$s
-    t=${t//│/N}; t=${t//·/N}; t=${t//…/N}; t=${t//⊂/N}; t=${t//↘/N}   # fold the narrow multibyte chars we emit (junction │ · … ⊂ token, ↘ burn) back to 1 byte
+    t=${t//│/N}; t=${t//·/N}; t=${t//…/N}; t=${t//⊂/N}; t=${t//↘/N}; t=${t//⚑/N}   # fold the narrow multibyte chars we emit (junction │ · … ⊂ token, ↘ burn, ⚑ 200k cliff) back to 1 byte
     na=${t//[$'\001'-$'\177']/}         # strip all ASCII, leaving only non-ASCII bytes
     _w=$(( ${#t} - ${#na} + (${#na} * 2 + 2) / 3 ))
 }

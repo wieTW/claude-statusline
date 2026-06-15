@@ -38,11 +38,11 @@
 
 ## 6. context 與 last-message 修正(context-meter, last-message-age)
 
-- [ ] 6.1 依 design「context 門檻改用 context_window_size / exceeds_200k_tokens」實作 spec「Model-context-size-aware usage alerting」:依 context window 大小判斷警示,1M 模型不因 used%>80% 轉紅。行為:門檻隨模型 context 大小調整。驗證:1M 模型 + 85% fixture 斷言非紅。
-- [ ] 6.2 實作 spec「200k cost/cache cliff marker」:跨越 200k 成本懸崖時顯示標記。行為:越界顯示懸崖標記。驗證:exceeds_200k_tokens=true fixture 斷言標記出現。
-- [ ] 6.3 實作 spec「Coloring and cliff marker are decoupled」:百分比上色與懸崖標記彼此獨立。行為:兩者互不影響。驗證:組合 fixture(高%/低% × 越界/未越界)斷言兩者獨立呈現。
-- [ ] 6.4 實作 spec「Last-message timestamp with cache-freshness-colored delta」:HH:MM 加 Δ,顏色沿用快取新鮮度三階(LASTMSG_WARN/LASTMSG_STALE)。行為:既有顏色語意不變。驗證:既有 U 段測項保留並全綠。
-- [ ] 6.5 依 design「跨日時鐘修正」實作 spec「Cross-day timestamps include the date」:當上次訊息與現在不同本地日曆日時前綴日期(僅 Δ≥1h 才取本地時區 fork)。行為:跨日不被誤讀為今天。驗證:26h 前 fixture 斷言渲染含日期、非裸 HH:MM;同日 fixture 斷言僅 HH:MM。
+- [x] 6.1 依 design「context 門檻改用 context_window_size / exceeds_200k_tokens」實作 spec「Model-context-size-aware usage alerting」:依 context window 大小判斷警示,1M 模型不因 used%>80% 轉紅。行為:門檻隨模型 context 大小調整。驗證:1M 模型 + 85% fixture 斷言非紅。
+- [x] 6.2 實作 spec「200k cost/cache cliff marker」:跨越 200k 成本懸崖時顯示標記。行為:越界顯示懸崖標記。驗證:exceeds_200k_tokens=true fixture 斷言標記出現。
+- [x] 6.3 實作 spec「Coloring and cliff marker are decoupled」:百分比上色與懸崖標記彼此獨立。行為:兩者互不影響。驗證:組合 fixture(高%/低% × 越界/未越界)斷言兩者獨立呈現。
+- [x] 6.4 實作 spec「Last-message timestamp with cache-freshness-colored delta」:HH:MM 加 Δ,顏色沿用快取新鮮度三階(LASTMSG_WARN/LASTMSG_STALE)。行為:既有顏色語意不變。驗證:既有 U 段測項保留並全綠。
+- [x] 6.5 依 design「跨日時鐘修正」實作 spec「Cross-day timestamps include the date」:當上次訊息與現在不同本地日曆日時前綴日期(date fork gated 在 Δ≥60s——比的是本地日曆日相異而非固定 24h,跨午夜 23:50→00:10 Δ 僅 20m 也必須補日期;spec 的 normative scenario「cross-midnight prompt under one hour」為準,Δ≥1h gate 會違規)。行為:跨日不被誤讀為今天。驗證:26h 前 fixture 斷言渲染含日期、非裸 HH:MM;同日 fixture 斷言僅 HH:MM。
 
 ## 7. 收尾與驗證
 

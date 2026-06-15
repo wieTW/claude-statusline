@@ -424,7 +424,7 @@ T2C=$(grep -c 'reconcile_start\|reconcile_read' "$SL/lib/collect.sh")
 grep -q 'exec [0-9]*< <(_reconcile.*</dev/null)' "$SL/lib/collect.sh" && echo "  T2.6 reconcile bg job has </dev/null (stdin hard rule) OK" || { echo "  ★ FAIL T2.6 reconcile bg job missing </dev/null"; fail=1; }
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
 
-echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format shown verbatim"
+echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format verbatim, cross-day date prefix"
 NOWS=$(jq -n 'now|floor')
 LMF="$FAKE_HOME/.claude/last-msg/sl-selftest"
 lmrun() { printf '09:30 %s\n' "$(( NOWS - $1 ))" > "$LMF"; run 200 "$J"; }      # $1=age sec → render with that last-msg age
@@ -448,6 +448,21 @@ else echo "  ★ FAIL U4 tiers not distinct: warm=[$cw] mid=[$cm] cold=[$cc]"; f
 printf '06-07 19:38\n' > "$LMF"
 u5=$(run 200 "$J" | strip)
 case "$u5" in *"06-07 19:38"*) echo "  U5 old format verbatim OK" ;; *) echo "  ★ FAIL U5 old format dropped: [$u5]"; fail=1 ;; esac
+# U6 cross-day (26h ago): different local calendar day → the timestamp gains a "MM-DD" date prefix (not a bare HH:MM)
+U6AGE=$(( 26*3600 )); U6EP=$(( NOWS - U6AGE )); U6MD=$(date -r "$U6EP" '+%m-%d' 2>/dev/null)
+u6=$(lmrun "$U6AGE" | strip)
+case "$u6" in *"$U6MD 09:30 ("*) echo "  U6 cross-day (26h) date-prefixed $U6MD 09:30 OK" ;;
+  *"09:30 ("*) echo "  ★ FAIL U6 cross-day NOT date-prefixed (expected $U6MD): [$u6]"; fail=1 ;;
+  *) echo "  ★ FAIL U6 time segment missing: [$u6]"; fail=1 ;; esac
+# U7 same-day (10 min ago, already U2): the timestamp stays a BARE HH:MM — no date prefix
+u7=$(lmrun 600 | strip)
+case "$u7" in *[0-9][0-9]-[0-9][0-9]" 09:30 ("*) echo "  ★ FAIL U7 same-day wrongly date-prefixed: [$u7]"; fail=1 ;;
+  *"09:30 ("*) echo "  U7 same-day bare HH:MM (no date prefix) OK" ;;
+  *) echo "  ★ FAIL U7 time segment missing: [$u7]"; fail=1 ;; esac
+# U8 cross-day prefix does NOT alter the delta colour tier: 26h ≥ LASTMSG_STALE → still the red (≥1h) tier, same as a bare-time ≥1h delta
+u8cross=$(lmrun "$U6AGE" | pcode); u8bare=$(printf '%s' "$u3raw" | pcode)
+if [ -n "$u8cross" ] && [ "$u8cross" = "$u8bare" ]; then echo "  U8 date prefix keeps the same Δ colour tier (red) OK";
+else echo "  ★ FAIL U8 date prefix changed the Δ colour tier (cross=[$u8cross] bare=[$u8bare])"; fail=1; fi
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
 
 echo "── W. TOKENS: cumulative in+out, subagent ⊂ only when >0, foreground reads cache (never blocks)"
@@ -475,7 +490,7 @@ echo "── V. parse_input positional contract: each field lands in its own glo
 VFEED=$(jq -cn '{
   workspace:{current_dir:"S_cwd", project_dir:"S_proj"},
   model:{display_name:"S_model"}, session_name:"S_sname",
-  context_window:{used_percentage:"S_used"}, worktree:{name:"S_wt"},
+  context_window:{used_percentage:"S_used", exceeds_200k_tokens:true}, worktree:{name:"S_wt"},
   effort:{level:"S_effort"}, thinking:{enabled:false},
   rate_limits:{ five_hour:{used_percentage:"S_5h", resets_at:"S_5r"},
                 seven_day:{used_percentage:"S_7d", resets_at:"S_7r"} },
@@ -490,8 +505,54 @@ if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
    chkv five_h "$five_h" S_5h;            chkv seven_d "$seven_d" S_7d
    chkv five_reset "$five_reset" S_5r;    chkv seven_reset "$seven_reset" S_7r
    chkv session_id "$session_id" S_sid;   chkv transcript_path "$transcript_path" S_tp
+   chkv exceeds_200k "$exceeds_200k" true
    case "$now" in ''|*[!0-9]*) echo "  ★ FAIL now not numeric: [$now]"; rc=1 ;; esac
-   exit $rc ); then echo "  all 15 fields land in their own global OK"; else fail=1; fi
+   exit $rc ); then echo "  all 16 fields land in their own global OK"; else fail=1; fi
+
+echo "── CTX. CONTEXT-METER: budget-aware red threshold (1M model not red at 85%, 200k model is) + decoupled 200k cliff marker ⚑"
+# mkctx: build a statusline JSON with controllable model / used% / exceeds_200k. Width is roomy (no degrade) so the ctx% renders full.
+# ctxpcode extracts the SGR colour code on the segment IMMEDIATELY preceding "N%" — that is ctx_color, so we can assert red-or-not
+# without hardcoding the theme's exact red triple. RD (tokyo-night-claude) = 38;2;247;118;142 ; WH = 38;2;222;214;202.
+mkctx() {  # $1=model display_name $2=used% $3=exceeds(true|false|omit)
+  if [ "$3" = "omit" ]; then
+    jq -cn --arg cwd "$SL" --arg m "$1" --argjson up "$2" --arg tp "$TP" \
+      '{workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:$m}, context_window:{used_percentage:$up}, session_id:"sl-selftest", transcript_path:$tp}'
+  else
+    jq -cn --arg cwd "$SL" --arg m "$1" --argjson up "$2" --argjson ex "$3" --arg tp "$TP" \
+      '{workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:$m}, context_window:{used_percentage:$up, exceeds_200k_tokens:$ex}, session_id:"sl-selftest", transcript_path:$tp}'
+  fi
+}
+# ctxpcode: the SGR code that colours the "N%" token — grab the code from the last "\e[<code>mNN%" match. That is ctx_color.
+ctxpcode() { perl -ne 'while(/\x1b\[([0-9;]*)m([0-9]+)%/g){$c=$1} END{print $c}'; }
+# Derive the palette's red/normal ctx codes EMPIRICALLY (theme-agnostic): a 200k model far over threshold is guaranteed red,
+# a 1M model far under threshold is guaranteed normal. No colour triple is hardcoded — the asserts track the live palette.
+RDCODE=$(run 200 "$(mkctx 'Sonnet 4.6' 99 omit)" | ctxpcode)             # guaranteed-red reference (200k @99%)
+NMCODE=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 10 omit)" | ctxpcode)  # guaranteed-normal reference (1M @10%)
+if [ -n "$RDCODE" ] && [ -n "$NMCODE" ] && [ "$RDCODE" != "$NMCODE" ]; then echo "  CTX0 red/normal ctx colours derived OK"
+else echo "  ★ FAIL CTX0 could not derive distinct red/normal colours (red=[$RDCODE] normal=[$NMCODE])"; fail=1; fi
+# CTX1 1M model at 85% → NOT red (the spec worked example)
+c1=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 85 omit)" | ctxpcode)
+if [ "$c1" != "$RDCODE" ]; then echo "  CTX1 1M @85% ctx% NOT red OK"; else echo "  ★ FAIL CTX1 1M @85% wrongly red ([$c1] == RD)"; fail=1; fi
+# CTX2 200k model (no 1M marker) at 85% → red
+c2=$(run 200 "$(mkctx 'Sonnet 4.6' 85 omit)" | ctxpcode)
+if [ "$c2" = "$RDCODE" ]; then echo "  CTX2 200k @85% ctx% red OK"; else echo "  ★ FAIL CTX2 200k @85% not red ([$c2] != RD [$RDCODE])"; fail=1; fi
+# CTX3 threshold is budget-driven, not a constant: identical 85% differs in colour only by the 1M marker (CTX1 vs CTX2)
+if [ "$c1" != "$c2" ]; then echo "  CTX3 budget-driven threshold (1M≠200k at same 85%) OK"; else echo "  ★ FAIL CTX3 1M and 200k coloured identically at 85% ([$c1]=[$c2])"; fail=1; fi
+# CTX4 over-200k indicator TRUE at 70% on a 1M model → cliff ⚑ present, % still normal (decoupled)
+c4out=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 70 true)"); c4=$(printf '%s' "$c4out" | ctxpcode)
+case "$c4out" in *"⚑"*) if [ "$c4" != "$RDCODE" ]; then echo "  CTX4 ⚑ shown + % normal (decoupled) OK"; else echo "  ★ FAIL CTX4 % unexpectedly red"; fail=1; fi ;;
+  *) echo "  ★ FAIL CTX4 ⚑ cliff marker missing when exceeds_200k=true"; fail=1 ;; esac
+# CTX5 over-200k indicator FALSE at 95% → NO ⚑ even at high %
+c5out=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 95 false)")
+case "$c5out" in *"⚑"*) echo "  ★ FAIL CTX5 ⚑ shown when exceeds_200k=false: present"; fail=1 ;; *) echo "  CTX5 no ⚑ when exceeds_200k=false OK" ;; esac
+# CTX6 absent indicator → no ⚑ (default off)
+c6out=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 95 omit)")
+case "$c6out" in *"⚑"*) echo "  ★ FAIL CTX6 ⚑ shown when indicator absent"; fail=1 ;; *) echo "  CTX6 no ⚑ when indicator absent OK" ;; esac
+# CTX7 decoupled matrix: 200k @85% true → BOTH red % AND ⚑ (coloring and marker independent)
+c7out=$(run 200 "$(mkctx 'Sonnet 4.6' 85 true)"); c7=$(printf '%s' "$c7out" | ctxpcode)
+if [ "$c7" = "$RDCODE" ]; then case "$c7out" in *"⚑"*) echo "  CTX7 200k @85% true → red % + ⚑ (both independent) OK" ;;
+  *) echo "  ★ FAIL CTX7 ⚑ missing"; fail=1 ;; esac
+else echo "  ★ FAIL CTX7 % not red ([$c7])"; fail=1; fi
 
 echo "── X. _sum_inout dedups by message.id (CC logs one row per content block, each repeating the same message usage)"
 # m1 appears 3× with the same usage (10+5), m2 once (100+20); a naive per-row sum = 165, the correct dedup = 135.

@@ -111,9 +111,9 @@ P <resets_at> <timestamp> <used>
 
 ### 跨日時鐘修正
 
-「上次訊息」目前只存/顯示 `HH:MM`,昨天的 prompt 會被當成今天。修正:當 last-message 的本地日曆日與當前本地日曆日**不同**時,於時間前補上日期前綴(如 `MM-DD HH:MM`)。epoch 為 UTC、而 hook 寫的是本地 `HH:MM`,故需要**一次 `date +%z` 取本地 offset**才能正確判斷跨日;此 fork **gated 在 Δ ≥ 1h** 之後才執行,確保同日(絕大多數)情境**零 fork**。
+「上次訊息」目前只存/顯示 `HH:MM`,昨天的 prompt 會被當成今天。修正:當 last-message 的本地日曆日與當前本地日曆日**不同**時,於時間前補上日期前綴(如 `MM-DD HH:MM`)。判跨日用 `date -r <epoch>` 直接把 UTC epoch 格式化成**本地日曆日**比對(BSD/macOS,免手動 offset、DST 正確);此 fork **gated 在 Δ ≥ 60s** 之後才執行,確保 sub-minute(必為同日)情境**零 fork**。
 
-**Rationale**:跨日誤導是真實正確性 bug;但每幀多一個 `date` fork 不可接受,因此用 Δ ≥ 1h 當廉價前置條件——不可能跨日的近期訊息根本不取 offset,維持熱路徑零 fork。
+**Rationale**:跨日誤導是真實正確性 bug;每幀多一個 `date` fork 不可接受,故用 Δ 當廉價前置條件。**門檻是 Δ ≥ 60s,不是 Δ ≥ 1h**——因為比的是「本地日曆日是否相異」而非固定 24h 年齡(spec 已明訂),23:50→00:10 的跨午夜情境 Δ 僅 20m 卻必須補日期前綴(見 spec last-message-age 的 normative scenario「cross-midnight prompt under one hour」)。只有 sub-minute 訊息可確定同日 → 維持熱路徑對該常見情境零 fork。
 
 **Alternatives**:(a) 每幀都取 offset 判跨日 — 多餘 fork,否決;(b) 讓 hook 直接寫完整日期 — 需改 hook 且對既有未重寫的 last-msg 檔不相容,本設計在 statusline 端處理並保留對舊格式的向後相容。
 
