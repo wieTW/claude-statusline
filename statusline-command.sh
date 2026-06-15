@@ -55,10 +55,11 @@ start_theme_job    # t=0: kick off the theme background job first; it overlaps t
 start_width_job    # at the same instant, start the terminal-width job (for the right-align gap); also never touches stdin
 parse_input        # main shell blocks parsing the stdin JSON (the only reader of stdin)
 start_tokens_job   # fire-and-forget: detached, gated token re-sum updates the cache for the next frame (never blocks this one)
+reconcile_start    # cross-session rate-limit sync as a background FD job — its serialized cache read+awk+mv overlaps the git stage below
 collect_status     # git×3 + effort scan collected concurrently, blocking until the slowest job finishes
 read_theme         # the theme/width jobs are long done by now (covered by the two steps above), zero wait
 read_width
-reconcile_rates    # cross-session rate-limit sync: adopt the freshest used% any session has seen for this window
+reconcile_read     # reap the reconcile job: adopt the freshest used% any session has seen for this window (numeric-guarded)
 read_tokens        # read this session's cached token totals (tiny file; the heavy sum runs only in the bg job above)
 
 load_palette

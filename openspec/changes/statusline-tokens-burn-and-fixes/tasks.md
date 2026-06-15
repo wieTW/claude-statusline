@@ -31,10 +31,10 @@
 
 ## 5. rate-limit 同步正確性(rate-limit-sync)
 
-- [ ] 5.1 依 design「reconcile 併發鎖與空 session 跳過」實作 spec「Serialized read-modify-write with safe degradation on lock failure」與「Newest-session authority survives concurrent renders」:以 mkdir spin-lock(有界重試 + staleness 偷鎖)序列化 read+awk+mv,取不到鎖則安全跳過寫入但仍顯示正確採用值。行為:併發不丟更新。驗證:新增併發測項(背景多開 render 後 wait),斷言每個 session 的 W line 皆存活。
-- [ ] 5.2 實作 spec「Empty session id adopts read-only without destructive rewrite」:session_id 為空時跳過 mv(唯讀採用、不寫回)。行為:匿名幀不破壞快取。驗證:空 sid render 後快取 inode/mtime 不變,但仍正確採用 authority 值。
-- [ ] 5.3 實作 spec「Reconciliation respects the parse_input sanitization and cap contract」:reconcile 路徑沿用 parse_input 消毒、256 cap 與數值守門。行為:對畸形輸入不崩。驗證:torn/binary 快取 fixture render 後仍單行、含有效百分比、stderr 為空。
-- [ ] 5.4 依 design「reconcile 背景化(效能)」將 reconcile 改為背景 FD job 與 git 階段重疊(維持 </dev/null 硬規則)。行為:每幀省去序列成本、結果不變。驗證:section T 全綠(行為等同)、單幀計時較改前下降。
+- [x] 5.1 依 design「reconcile 併發鎖與空 session 跳過」實作 spec「Serialized read-modify-write with safe degradation on lock failure」與「Newest-session authority survives concurrent renders」:以 mkdir spin-lock(有界重試 + staleness 偷鎖)序列化 read+awk+mv,取不到鎖則安全跳過寫入但仍顯示正確採用值。行為:併發不丟更新。驗證:新增併發測項(背景多開 render 後 wait),斷言每個 session 的 W line 皆存活。
+- [x] 5.2 實作 spec「Empty session id adopts read-only without destructive rewrite」:session_id 為空時跳過 mv(唯讀採用、不寫回)。行為:匿名幀不破壞快取。驗證:空 sid render 後快取 inode/mtime 不變,但仍正確採用 authority 值。
+- [x] 5.3 實作 spec「Reconciliation respects the parse_input sanitization and cap contract」:reconcile 路徑沿用 parse_input 消毒、256 cap 與數值守門。行為:對畸形輸入不崩。驗證:torn/binary 快取 fixture render 後仍單行、含有效百分比、stderr 為空。
+- [x] 5.4 依 design「reconcile 背景化(效能)」將 reconcile 改為背景 FD job 與 git 階段重疊(維持 </dev/null 硬規則)。行為:每幀省去序列成本、結果不變。驗證:section T 全綠(行為等同)、單幀計時較改前下降。
 
 ## 6. context 與 last-message 修正(context-meter, last-message-age)
 

@@ -214,15 +214,79 @@ collect_status() {
 # × Δt / Δused). Both gates are mandatory and live here (they need now/resets_at); the sensitivity ceiling + colour live in render's
 # build_burn. <2 in-horizon samples → no slope → empty. Sampling the reconciled authority (not the frozen snapshot) is what makes the
 # slope reflect the true cross-session climb instead of a stuck value.
-reconcile_rates() {
-    burn_tte=""                                    # always defined (sync-off path returns before the awk that would set it)
+#
+# Concurrency / serialization (the read-modify-write must NOT lose updates): the whole read+awk+mv is guarded by an mkdir spin-lock at
+# "<cache>.lock" (stock macOS has no flock; mkdir is the POSIX-atomic create-a-dir primitive). Acquisition is bounded-retry with a
+# staleness steal (a lock dir older than RL_LOCK_STALE means a holder died mid-frame). Two safe-degradation rules, both per the spec:
+#   • lock NOT acquired (another writer holds it within our bounded attempt) → SKIP the mv (leave the on-disk cache untouched by this
+#     frame) but STILL run the awk read-only so this frame DISPLAYS the correct adopted authority it read — never a stale/empty number.
+#   • empty session_id (cannot be ranked for freshness → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line
+#     left intact) but STILL adopt the existing authority read-only. No lock is taken on this path (we never write).
+# The awk ALWAYS writes survivors to a per-pid temp and emits "<five>|<seven>|<burn_tte>"; only the mv is conditional. So the emitted
+# (adopted) values are computed identically on every path; whether we persist them is the only difference. reconcile_start launches this
+# as a background FD job overlapping the git stage (</dev/null per the stdin hard rule — reconcile reads/writes only the cache file, never
+# the stdin JSON); reconcile_read reaps the FD and applies the numeric adoption guards. Degrades safely: any awk/mv/lock failure leaves
+# the emitted fields empty → the guards in reconcile_read keep this frame's own parse_input values and raise no alarm (never set -e).
+RL_LOCK_STALE=10    # steal the reconcile lock dir if it is older than this many seconds (a holder that died mid-frame)
+RL_LOCK_TRIES=50    # bounded acquisition attempts before giving up and degrading to a read-only (skip-write) frame
+RL_LOCK_WAIT=0.01   # backoff (sec) between failed attempts: the critical section is a few-ms read+awk+mv, so a short wait lets a
+                    # genuine concurrent writer take its turn (no busy-spin starving a peer) while keeping the bounded total wait small.
+                    # This runs in the background reconcile job overlapping the ~20ms git stage, so the wait is hidden from the frame.
+
+# Background FD job: kick off the cross-session reconcile so it overlaps the git stage. </dev/null is mandatory (hard rule): the job must
+# not consume the stdin JSON pipe it would otherwise inherit. The FD read in reconcile_read is the sync point (no wait / temp signalling).
+reconcile_start() {
+    burn_tte=""                                    # always defined (sync-off path never reaches the awk that would set it)
     $RL_SYNC || return 0
-    local cache="$HOME/.claude/sl-ratelimit-cache" src tmpfile out rest new5 new7
-    src="$cache"; [ -f "$src" ] || src=/dev/null   # first run: no cache yet → read nothing, just seed from this frame
+    exec 9< <(_reconcile_core </dev/null)
+}
+
+# Reap the reconcile FD job and adopt its result. Numeric guards (digits + at most one dot) gate adoption: an empty/non-numeric reconciled
+# value (awk/mv/lock failure, read-only HOME, torn cache) leaves this frame's own parse_input value unchanged — and never errors out.
+reconcile_read() {
+    $RL_SYNC || return 0
+    local out rest new5 new7
+    IFS= read -r out <&9 || :                      # EOF with no trailing newline returns rc=1 as a normal path (never set -e)
+    exec 9<&-
+    new5=${out%%|*}; rest=${out#*|}; new7=${rest%%|*}; burn_tte=${rest#*|}   # _reconcile_core emits exactly two "|"; robust to newline stripping
+    case "$new5" in ''|*[!0-9.]*|*.*.*) ;; *) five_h="$new5" ;; esac          # adopt only a clean numeric (digits + ≤1 dot; *.*.* rejects ≥2 dots)
+    case "$new7" in ''|*[!0-9.]*|*.*.*) ;; *) seven_d="$new7" ;; esac
+    case "$burn_tte" in ''|*[!0-9]*) burn_tte="" ;; esac                     # non-numeric / empty → no alarm
+}
+
+# The serialized worker. Emits "<five>|<seven>|<burn_tte>" on stdout. Acquires the mkdir lock (bounded retry + stale steal) around the
+# read+awk+mv; on lock failure OR empty session_id it still runs the awk read-only and emits the adopted value but skips the mv.
+_reconcile_core() {
+    local cache="$HOME/.claude/sl-ratelimit-cache" lock="$HOME/.claude/sl-ratelimit-cache.lock"
+    local src tmpfile have_lock=0 tries lmt
     tmpfile="$cache.$$"                            # $$ is unique per session process → no temp collision across sessions
-    : > "$tmpfile" 2>/dev/null || return 0         # can't write (e.g. read-only HOME) → leave values untouched, no alarm
+    # Only contend for the lock when we actually intend to write (a non-empty sid). An empty sid is read-only (skip mv), so it needs no
+    # lock — taking one would only add a contention source for a frame that can never be the authority.
+    if [ -n "$session_id" ]; then
+        tries=0
+        while [ "$tries" -lt "${RL_LOCK_TRIES:-50}" ]; do
+            if mkdir "$lock" 2>/dev/null; then have_lock=1; break; fi
+            lmt=$(stat -f '%m' "$lock" 2>/dev/null)   # steal a stale lock (holder died) older than RL_LOCK_STALE, else back off and retry
+            if [ -n "$lmt" ] && [ "$(( now - lmt ))" -gt "${RL_LOCK_STALE:-10}" ]; then
+                rmdir "$lock" 2>/dev/null
+                if mkdir "$lock" 2>/dev/null; then have_lock=1; break; fi
+            fi
+            sleep "${RL_LOCK_WAIT:-0.01}" 2>/dev/null   # yield the CPU so a concurrent holder can finish its read+awk+mv (no busy-spin)
+            tries=$(( tries + 1 ))
+        done
+    fi
+    # The cache-existence probe MUST happen AFTER lock acquisition so the read reflects the cache state at lock-hold time: probing it
+    # before the lock would freeze src=/dev/null for a writer that then waits behind a peer who creates/updates the cache, making this
+    # writer's awk read NOTHING and its mv clobber the peer's authority (the exact lost-update the lock exists to prevent).
+    src="$cache"; [ -f "$src" ] || src=/dev/null   # first run / read-only: no cache yet → read nothing, just seed/adopt from this frame
+    : > "$tmpfile" 2>/dev/null || { [ "$have_lock" = 1 ] && rmdir "$lock" 2>/dev/null; printf '%s|%s|%s\n' '' '' ''; return 0; }
+    # writable = this frame will persist (lock held AND a rankable non-empty sid). A read-only frame (lock-contention or empty-sid) must
+    # adopt the EXISTING authority it read and NOT fold in its own (possibly frozen) report — the spec is explicit that a contention frame
+    # displays the value it READ (e.g. 47), never its own (e.g. 12). So `writable` gates whether the awk applies this frame's report.
+    local writable=0; [ "$have_lock" = 1 ] && [ -n "$session_id" ] && writable=1
+    local out
     out=$(awk -v now="$now" -v sid="$session_id" -v r5="$five_reset" -v u5="$five_h" \
-              -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" '
+              -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" -v writable="$writable" '
         function isnum(x){ return (x ~ /^[0-9]+(\.[0-9]+)?$/) }
         # apply this frame report (window r, used u): newest-or-equal session wins, older is ignored; expired/non-numeric skipped
         function applywin(r, u) {
@@ -244,7 +308,10 @@ reconcile_rates() {
         }
         # any other / malformed / old-format line: dropped (not written to tmp)
         END{
-            if (sid != "") {
+            # Only a WRITABLE frame (lock held + rankable non-empty sid) folds its own report into the authority and registers itself.
+            # A read-only frame (lock-contention or empty-sid) leaves Wval exactly as read from cache, so it adopts/displays the value it
+            # READ (never its own possibly-frozen report) and contributes no S/W mutation — matching the spec safe-degradation rules.
+            if (writable+0 == 1 && sid != "") {
                 if (myfs=="" || !isnum(myfs)) myfs=now                  # new session → first seen is now
                 Sf[sid]=myfs
                 applywin(r5, u5); applywin(r7, u7)
@@ -279,11 +346,16 @@ reconcile_rates() {
             printf "%s|%s|%s\n", ((isnum(r5) && (r5 in Wval)) ? Wval[r5]"" : ""), ((isnum(r7) && (r7 in Wval)) ? Wval[r7]"" : ""), tte
         }
     ' "$src" 2>/dev/null)
-    mv -f "$tmpfile" "$cache" 2>/dev/null
-    new5=${out%%|*}; rest=${out#*|}; new7=${rest%%|*}; burn_tte=${rest#*|}   # awk emits exactly two "|"; robust to trailing-newline stripping
-    case "$new5" in ''|*[!0-9.]*) ;; *) five_h="$new5" ;; esac
-    case "$new7" in ''|*[!0-9.]*) ;; *) seven_d="$new7" ;; esac
-    case "$burn_tte" in ''|*[!0-9]*) burn_tte="" ;; esac                # non-numeric / empty → no alarm
+    # Persist ONLY when this frame both holds the lock AND has a rankable (non-empty) sid; otherwise this is a read-only frame:
+    # skip the mv (leave the on-disk cache untouched), drop the temp, but still emit the adopted value computed above. This is the
+    # safe-degradation path for both lock-contention and empty-sid, and it never errors out (no set -e).
+    if [ "$have_lock" = 1 ] && [ -n "$session_id" ]; then
+        mv -f "$tmpfile" "$cache" 2>/dev/null
+        rmdir "$lock" 2>/dev/null
+    else
+        rm -f "$tmpfile" 2>/dev/null
+    fi
+    printf '%s\n' "$out"
 }
 
 

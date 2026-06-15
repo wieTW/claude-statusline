@@ -145,8 +145,12 @@ case "$kc" in *"│"*) echo "  │-join fallback has │ OK" ;; *) echo "  ★ F
 echo "── F. RIGHT_ALIGN=false → output byte-for-byte identical to the 'no width' fallback"
 mkdir -p "$WORK/noalign/lib" && cp "$SL"/lib/*.sh "$WORK/noalign/lib/"
 sed 's/^RIGHT_ALIGN=true/RIGHT_ALIGN=false/' "$SL/statusline-command.sh" > "$WORK/noalign/statusline-command.sh"
-out_f=$(printf '%s' "$J" | env COLUMNS=140 HOME="$FAKE_HOME" bash "$WORK/noalign/statusline-command.sh")
-out_c=$(run 0 "$J")
+# The two runs are independent processes that each read their own wall-clock `now`, so the rate-limit countdown token (e.g. 1H6m → 1H5m
+# across a minute tick) can legitimately differ by one unit between them — that is a clock boundary, NOT a right-align divergence. Canonicalise
+# every ttl token (runs of <digits><D|H|m>) before comparing so the assertion targets the right-align/fallback structure it actually tests.
+ttlnorm() { sed -E 's/[0-9]+[DHm]/_/g'; }
+out_f=$(printf '%s' "$J" | env COLUMNS=140 HOME="$FAKE_HOME" bash "$WORK/noalign/statusline-command.sh" | ttlnorm)
+out_c=$(run 0 "$J" | ttlnorm)
 if [ "$out_f" = "$out_c" ]; then echo "  identical OK"; else echo "  ★ FAIL the two fallbacks differ"; fail=1; fi
 
 echo "── H. ESC injection: session_name with \\u001b[1Zm → control chars stripped, exact align no wrap"
@@ -321,6 +325,104 @@ printf '%s 99\n' "$RT" > "$SLC"
 t8=$(run 120 "$(rsj 10 "$RT" sessZ)" | nocol)
 case "$t8" in *" 90%"*) echo "  T8 legacy 2-col line ignored → own 90% OK" ;; *" 1%"*) echo "  ★ FAIL T8 legacy line treated as authority (showed 1%): [$t8]"; fail=1 ;; *) echo "  ★ FAIL T8 expected 90%: [$t8]"; fail=1 ;; esac
 rm -f "$SLC"
+
+echo "── T2. RATE-SYNC CONCURRENCY: mkdir-lock serialises read+awk+mv (no lost-update), lock-contention safe-skip, empty-sid read-only, torn-cache survives"
+LOCK="$SLC.lock"
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
+# T2.0 spec Example (5.1): now≈now, window unexpired, OLD first_seen far back reports frozen-low 12, NEW first_seen recent reports 47 →
+# the persisted W must be NEW's (47, NEW first_seen); the OLD frame must DISPLAY 47 (adopt), never its own 12. (relative first_seen mirrors the now=1000 example)
+RTc=$((NOW + 9000)); OLDc=$((NOW - 5000)); NEWc=$((NOW - 100))
+printf 'S sNew %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"     # NEW already wrote authority 47
+t20=$(run 120 "$(rsj 12 "$RTc" sOldLow)" | nocol)                    # OLD frozen-low (first render → first_seen=now>OLDc? no: not seeded, defaults to now) reports 12
+# sOldLow has no S line → its first_seen defaults to `now` (this render), which is NEWER than NEW's NEWc → by the rule it WOULD become authority.
+# To honour the spec example (OLD must be the older one), pre-seed sOldLow as the genuinely-older session:
+printf 'S sNew %s\nS sOldLow %s\nW %s 47 %s\n' "$NEWc" "$OLDc" "$RTc" "$NEWc" > "$SLC"
+t20=$(run 120 "$(rsj 12 "$RTc" sOldLow)" | nocol)
+case "$t20" in *" 53%"*) echo "  T2.0 old frozen-low adopts newer authority 47 → remaining 53% OK" ;;
+  *" 88%"*) echo "  ★ FAIL T2.0 old session used its own frozen 12 (showed 88%): [$t20]"; fail=1 ;;
+  *) echo "  ★ FAIL T2.0 expected 53% remaining: [$t20]"; fail=1 ;; esac
+wline=$(grep "^W $RTc " "$SLC")
+case "$wline" in "W $RTc 47 $NEWc") echo "  T2.0 persisted W = newer session's value+first_seen (47 $NEWc), old frame didn't clobber OK" ;;
+  *) echo "  ★ FAIL T2.0 W line clobbered by older session: [$wline]"; fail=1 ;; esac
+
+# T2.1 (5.1) Two sessions render CONCURRENTLY with DISTINCT windows → both W authority lines survive (no lost-update from racing rewrites)
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
+WA=$((NOW + 9000)); WB=$((NOW + 18000))                              # two distinct unexpired 5h-style windows
+N=16
+for i in $(seq 1 $N); do
+  run 120 "$(rsj 30 "$WA" sConcA)" >/dev/null 2>&1 &
+  run 120 "$(rsj 55 "$WB" sConcB)" >/dev/null 2>&1 &
+done
+wait
+ca=$(grep -c "^W $WA " "$SLC" 2>/dev/null); ca=${ca:-0}
+cb=$(grep -c "^W $WB " "$SLC" 2>/dev/null); cb=${cb:-0}
+if [ "$ca" -ge 1 ] && [ "$cb" -ge 1 ]; then echo "  T2.1 concurrent distinct-window renders: both authority lines survive (no lost-update) OK"
+else echo "  ★ FAIL T2.1 lost-update under concurrency: WA-lines=$ca WB-lines=$cb"; fail=1; fi
+rm -rf "$LOCK" 2>/dev/null
+
+# T2.2 (5.1) Lock CONTENTION: a held (fresh) lock makes the frame SKIP the write, but it STILL displays the adopted authority value.
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
+printf 'S sNew %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"     # cache holds authority 47
+mkdir "$LOCK" 2>/dev/null                                           # another writer "holds" the lock (fresh mtime → not stealable)
+szbefore=$(wc -c < "$SLC"); szbefore=${szbefore// /}; mtbefore=$(stat -f '%m' "$SLC")
+t22=$(run 120 "$(rsj 12 "$RTc" sContend)" | nocol)                  # this frame can't get the lock → must read-only adopt 47
+case "$t22" in *" 53%"*) echo "  T2.2 lock-contention frame still adopts authority 47 -> 53% OK" ;;
+  *" 88%"*) echo "  ★ FAIL T2.2 contention frame fell back to its own 12 (showed 88%): [$t22]"; fail=1 ;;
+  *) echo "  ★ FAIL T2.2 expected 53%: [$t22]"; fail=1 ;; esac
+szafter=$(wc -c < "$SLC"); szafter=${szafter// /}; mtafter=$(stat -f '%m' "$SLC")
+if [ "$szbefore" = "$szafter" ] && [ "$mtbefore" = "$mtafter" ]; then echo "  T2.2 contention frame did NOT rewrite the cache (skipped write) OK"
+else echo "  ★ FAIL T2.2 contention frame rewrote the cache (size $szbefore-$szafter mtime $mtbefore-$mtafter)"; fail=1; fi
+rm -rf "$LOCK" 2>/dev/null
+
+# T2.3 (5.1) STALE lock (older than the steal horizon) is stolen → the frame proceeds with its write
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
+printf 'S sNew %s\nW %s 47 %s\n' "$OLDc" "$RTc" "$OLDc" > "$SLC"    # authority owned by an OLD session
+mkdir "$LOCK" 2>/dev/null
+touch -t 200001010000 "$LOCK" 2>/dev/null                          # make the lock ancient → stealable
+t23=$(run 120 "$(rsj 60 "$RTc" sFresh)" | nocol)                   # a fresh session reports 60 → after stealing the lock it becomes authority
+case "$t23" in *" 40%"*) echo "  T2.3 stale lock stolen → fresh session writes authority 60 → 40% OK" ;;
+  *) echo "  ★ FAIL T2.3 stale lock not stolen / wrong value: [$t23]"; fail=1 ;; esac
+[ -d "$LOCK" ] && { echo "  ★ FAIL T2.3 lock dir leaked after a successful write"; fail=1; } || echo "  T2.3 lock released after the serialized write OK"
+
+# T2.4 (5.2) EMPTY session_id: read-only adopt — must display the authority but NOT rewrite the cache (inode/size/mtime unchanged)
+# Built inline (NOT via rsj, whose ${3:-default} would turn an empty sid into a real one) so session_id is genuinely "".
+rsjempty() {  # $1=used% $2=resets_at → five_hour-only json with an EMPTY session_id
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson u "$1" --argjson r "$2" '
+  { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
+    rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:"", transcript_path:$tp }'; }
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
+printf 'S sessA %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"
+inob=$(stat -f '%i' "$SLC"); szb=$(wc -c < "$SLC"); szb=${szb// /}; mtb=$(stat -f '%m' "$SLC")
+t24=$(run 120 "$(rsjempty 80 "$RTc")" | nocol)                     # empty sid reporting a HIGHER 80 — must be ignored, 47 adopted
+case "$t24" in *" 53%"*) echo "  T2.4 empty-sid frame adopts authority 47 (ignores its own 80) -> 53% OK" ;;
+  *" 20%"*) echo "  ★ FAIL T2.4 empty-sid overrode authority with its own 80 (showed 20%): [$t24]"; fail=1 ;;
+  *) echo "  ★ FAIL T2.4 expected 53%: [$t24]"; fail=1 ;; esac
+inoa=$(stat -f '%i' "$SLC"); sza=$(wc -c < "$SLC"); sza=${sza// /}; mta=$(stat -f '%m' "$SLC")
+cafter=$(cat "$SLC")
+if [ "$inob" = "$inoa" ] && [ "$szb" = "$sza" ] && [ "$mtb" = "$mta" ]; then echo "  T2.4 empty-sid did NOT rewrite the cache (inode/size/mtime unchanged) OK"
+else echo "  ★ FAIL T2.4 empty-sid rewrote the cache (inode $inob-$inoa size $szb-$sza mtime $mtb-$mta)"; fail=1; fi
+case "$cafter" in "S sessA $NEWc"*"W $RTc 47 $NEWc"*) echo "  T2.4 empty-sid left S and W lines intact OK" ;;
+  *) echo "  ★ FAIL T2.4 empty-sid mutated cache contents: [$cafter]"; fail=1 ;; esac
+
+# T2.5 (5.3) TORN / BINARY cache fixture: reconcile must not crash, frame stays single-line with a valid %, stderr clean
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
+{ printf 'S sNew %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc"; printf 'W garbage notnum xx\n'; head -c 64 /dev/urandom; printf '\nP %s notime nope\n' "$RTc"; } > "$SLC"
+t25o=$(run 120 "$(rsj 33 "$RTc" sTorn)" 2>/dev/null)
+t25e=$(run 120 "$(rsj 33 "$RTc" sTorn)" 2>&1 >/dev/null)
+t25nl=$(printf '%s' "$t25o" | grep -c ''); t25p=$(printf '%s' "$t25o" | nocol)
+t25bad=0
+[ "$t25nl" -eq 1 ] || { echo "  ★ FAIL T2.5 torn cache → not single line ($t25nl)"; t25bad=1; }
+[ -z "$t25e" ]     || { echo "  ★ FAIL T2.5 torn cache → stderr noise: [$t25e]"; t25bad=1; }
+case "$t25p" in *%*) ;; *) echo "  ★ FAIL T2.5 torn cache → no valid % rendered: [$t25p]"; t25bad=1 ;; esac
+[ "$t25bad" -eq 0 ] && echo "  T2.5 torn/binary cache survives: single line, valid %, clean stderr OK" || fail=1
+
+# T2.6 (5.4) reconcile is BACKGROUNDED (overlapped with git): a function named reconcile_start must open an FD job and reconcile_read must reap it,
+# both honouring the </dev/null hard rule (the bg job must NOT read the stdin JSON pipe). Behaviour-equivalent to the old sync path (T section above stays green).
+T2C=$(grep -c 'reconcile_start\|reconcile_read' "$SL/lib/collect.sh")
+[ "$T2C" -ge 2 ] && echo "  T2.6 reconcile split into start/read FD-job pair OK" || { echo "  ★ FAIL T2.6 reconcile not backgrounded (reconcile_start/reconcile_read absent)"; fail=1; }
+# the bg reconcile job must redirect stdin from /dev/null (hard rule) — assert a reconcile procsub job carries </dev/null
+grep -q 'exec [0-9]*< <(_reconcile.*</dev/null)' "$SL/lib/collect.sh" && echo "  T2.6 reconcile bg job has </dev/null (stdin hard rule) OK" || { echo "  ★ FAIL T2.6 reconcile bg job missing </dev/null"; fail=1; }
+rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
 
 echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format shown verbatim"
 NOWS=$(jq -n 'now|floor')
