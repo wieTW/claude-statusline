@@ -23,11 +23,11 @@
 
 ## 4. 漸進式壓縮排版(adaptive-layout)
 
-- [ ] 4.1 實作 spec「Drawable-width invariant」與「Width-tiered rendering scenarios」:任何寬度下輸出單行、不超過可繪寬、不換行。行為:永不溢出。驗證:沿用既有 J/P/M 測法掃描多個 COLUMNS,斷言單行且寬度 ≤ 邊界。
-- [ ] 4.2 依 design「壓縮排版犧牲順序」實作 spec「Per-segment priority and forms」:為各區段定義優先級與緊湊/完整兩形態。行為:渲染依優先級表決定形態。驗證:內容審查 priority 表與渲染一致 + 對應測項。
-- [ ] 4.3 實作 spec「Fixed sacrifice order」:依固定 14 段順序逐步降級(① junction → … → ⑭ 核心)。行為:寬度遞減時依序降級。驗證:逐寬度遞減,斷言每段在預期寬度消失或縮短。
-- [ ] 4.4 實作 spec「Shrink and truncate preferred over drop」:截斷/縮短優先於丟棄,優先級丟棄為最後手段。行為:中等寬度時 session 變 `…` 而非直接消失。驗證:中等寬度 fixture 斷言出現截斷標記。
-- [ ] 4.5 實作 spec「Core always remains」:path basename 與 ctx% 永遠保留。行為:極窄仍保核心。驗證:COLUMNS 1–2 fixture 斷言仍含 path 與百分比、不崩、單行。
+- [x] 4.1 實作 spec「Drawable-width invariant」與「Width-tiered rendering scenarios」:任何寬度下輸出單行、不超過可繪寬、不換行。行為:永不溢出。驗證:沿用既有 J/P/M 測法掃描多個 COLUMNS,斷言單行且寬度 ≤ 邊界。
+- [x] 4.2 依 design「壓縮排版犧牲順序」實作 spec「Per-segment priority and forms」:為各區段定義優先級與緊湊/完整兩形態。行為:渲染依優先級表決定形態。驗證:內容審查 priority 表與渲染一致 + 對應測項。
+- [x] 4.3 實作 spec「Fixed sacrifice order」:依固定 14 段順序逐步降級(① junction → … → ⑭ 核心)。行為:寬度遞減時依序降級。驗證:逐寬度遞減,斷言每段在預期寬度消失或縮短。
+- [x] 4.4 實作 spec「Shrink and truncate preferred over drop」:截斷/縮短優先於丟棄,優先級丟棄為最後手段。行為:中等寬度時 session 變 `…` 而非直接消失。驗證:中等寬度 fixture 斷言出現截斷標記。
+- [x] 4.5 實作 spec「Core always remains」:path basename 與 ctx% 永遠保留。行為:極窄仍保核心。驗證:COLUMNS 1–2 fixture 斷言仍含 path 與百分比、不崩、單行。
 
 ## 5. rate-limit 同步正確性(rate-limit-sync)
 

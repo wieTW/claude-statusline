@@ -61,6 +61,24 @@ print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in p))'
 J=$(mkjson "$SL" "$SL" "Consolidate statusline from two rows to one")
 JCJK=$(mkjson "$SL" "$SL" "把狀態列整成一行測試")
 JNOGIT=$(mkjson /private/tmp /private/tmp "")
+# JLONG: hermetic GREPO (branch-only git, no dirty/diffstat) + a long session name. Defined here (not in J's section) so the earlier
+# K / adaptive-layout sections can also use it — git + a wide session name keep the right half populated across squeezed widths.
+JLONG=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" --arg tp "$TP" '
+  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:3},
+    rate_limits:{ five_hour:{used_percentage:40, resets_at:(now+500|floor)},
+                  seven_day:{used_percentage:86, resets_at:(now+108000|floor)} },
+    effort:{level:"high"}, session_id:"sl-selftest", transcript_path:$tp,
+    session_name:"Consolidate statusline from two rows to one" }')
+# JXLONG: GREPO git + an extra-long session name so the right half can't fit with a >=JGAP gap at mid widths — this forces the junction
+# tier (│ placed, session head-truncated with …), exercising the "shrink (truncate) before drop" path that the fixed sacrifice order needs.
+JXLONG=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" --arg tp "$TP" '
+  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:3},
+    rate_limits:{ five_hour:{used_percentage:40, resets_at:(now+500|floor)},
+                  seven_day:{used_percentage:86, resets_at:(now+108000|floor)} },
+    effort:{level:"high"}, session_id:"sl-selftest", transcript_path:$tp,
+    session_name:"a very very very very very very very very very very long session name that forces right truncation" }')
 
 fail=0
 chk() { if "$@"; then :; else echo "  ★ FAIL"; fail=1; fi; }
@@ -91,24 +109,36 @@ chk check exact $((W+1-EDGE_PAD)) < <(run $((W+1)) "$J")
 echo "── C. COLUMNS=0 (invalid width, unmeasurable) → cannot bound, fall back to │-join (width=W)"
 chk check exact "$W" < <(run 0 "$J")
 
-echo "── D. COLUMNS=50 (left part wider than drawable) → head-truncate left, no overflow (width=$((50-EDGE_PAD)))"
+echo "── D. COLUMNS=50 (full set far wider than drawable) → degrade by the fixed sacrifice order, single line ≤ drawable, core (path+ctx%) kept"
+# Post-adaptive-layout: instead of char-truncating the whole left blob to exactly fill the width (old behaviour), the renderer now
+# drops/compacts segments in the fixed sacrifice order until the line fits — so it may sit BELOW the drawable width (≤, not ==), and the
+# path basename + ctx% (the core) always survive. Width-bounded + single-line is the invariant (the J/P/M method); exact-fill no longer is.
 out_d=$(run 50 "$J")
-chk check exact $((50-EDGE_PAD)) <<<"$out_d"
-case "$out_d" in *"…"*) echo "  left has … truncation marker OK" ;; *) echo "  ★ FAIL expected … marker"; fail=1 ;; esac
+chk check max $((50-EDGE_PAD)) <<<"$out_d"
+out_dp=$(printf '%s' "$out_d" | sed 's/\x1b\[[0-9;]*m//g')
+case "$out_dp" in "$SLDIR"*"6%"*) echo "  core path + ctx% retained OK" ;; *) echo "  ★ FAIL core path/ctx% lost: [$out_dp]"; fail=1 ;; esac
+[ "$(printf '%s' "$out_d" | grep -c '')" -eq 1 ] || { echo "  ★ FAIL D not single line"; fail=1; }
 
 echo "── E. non-git + no session → right part empty, print left only, single line"
 out_e=$(run 140 "$JNOGIT")
 chk check max $((140-1)) <<<"$out_e"
 case "$out_e" in *main*) echo "  ★ FAIL should have no git segment"; fail=1 ;; *) echo "  no git segment OK" ;; esac
 
-echo "── K. junction │ only when 'merged': roomy(gap>=JGAP) no │, squeezed/truncated has │, │-join fallback has │"
+echo "── K. junction │ only when 'merged': roomy(gap>=JGAP) plain whitespace gap, squeezed (right-truncated) keeps the │ junction, │-join fallback has │"
+# Post-adaptive-layout the left/right junction is reached only when the right half (git + a wide session name) can't fit with a >=JGAP gap
+# even after the in-order left drops — so the squeezed case uses JXLONG (extra-long name) and asserts the junction │ rides next to the
+# … -truncated session, exercising step 11 (truncate before drop). roomy / fallback use JLONG. The roomy gap before the session is plain
+# whitespace (no │); the in-segment │ separators inside each half are unaffected — the marker is the gap immediately before the right half.
 kbad=0
-mid() { sed 's/\x1b\[[0-9;]*m//g' | grep -oE '19:38.*main' | sed -E 's/^19:38(.*)main$/\1/'; }  # extract between time and main
-ka=$(run $((W+30)) "$J" | mid)
-case "$ka" in *"│"*) echo "  ★ FAIL roomy should not have junction │: mid=[$ka]"; kbad=1 ;; *) echo "  roomy no │ OK" ;; esac
-kt=$(run 125 "$J" | mid)
-case "$kt" in *"│"*) echo "  squeezed/truncated has │ OK" ;; *) echo "  ★ FAIL truncated path missing junction │: mid=[$kt]"; kbad=1 ;; esac
-kc=$(run 0 "$J" | mid)
+ka=$(run 200 "$JLONG" | sed 's/\x1b\[[0-9;]*m//g')   # very wide: roomy, plain whitespace gap before the right half (git), no junction
+# The right half starts with the git segment "main"; the gap before it is the left/right junction region. Roomy ⇒ only spaces there
+# (the │ between main and the session is the right half's INTERNAL separator, not the junction — so we test the gap before "main").
+case "$ka" in *"  main"*) echo "  roomy plain-whitespace gap (no junction) OK" ;; *"│ main"*) echo "  ★ FAIL roomy placed a junction │ before the right half: [$ka]"; kbad=1 ;; *) echo "  ★ FAIL roomy unexpected layout: [$ka]"; kbad=1 ;; esac
+kt=$(run 120 "$JXLONG" | sed 's/\x1b\[[0-9;]*m//g')  # squeezed: junction │ placed, session head-truncated with …
+case "$kt" in *"│ a very"*) ktj=1 ;; *) ktj=0 ;; esac
+case "$kt" in *"…"*) ktt=1 ;; *) ktt=0 ;; esac
+if [ "$ktj" -eq 1 ] && [ "$ktt" -eq 1 ]; then echo "  squeezed: junction │ + … -truncated session (shrink before drop) OK"; else echo "  ★ FAIL squeezed missing junction/… (junc=$ktj trunc=$ktt): [$kt]"; kbad=1; fi
+kc=$(run 0 "$JLONG" | sed 's/\x1b\[[0-9;]*m//g')     # width unmeasurable → │-join fallback
 case "$kc" in *"│"*) echo "  │-join fallback has │ OK" ;; *) echo "  ★ FAIL │-join fallback missing │"; kbad=1 ;; esac
 [ "$kbad" -eq 0 ] || fail=1
 
@@ -168,13 +198,6 @@ JKANA=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
 chk check max 120 < <(run 120 "$JKANA")
 
 echo "── J. long name + narrow terminal (original bug scenario): sweep 80..150, never overflow, name segment always present"
-JLONG=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" --arg tp "$TP" '
-  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
-    context_window:{used_percentage:3},
-    rate_limits:{ five_hour:{used_percentage:40, resets_at:(now+500|floor)},
-                  seven_day:{used_percentage:86, resets_at:(now+108000|floor)} },
-    effort:{level:"high"}, session_id:"sl-selftest", transcript_path:$tp,
-    session_name:"Consolidate statusline from two rows to one" }')
 jbad=0
 for cols in 80 100 110 120 125 130 135 140 145 150; do
   o=$(run "$cols" "$JLONG")
@@ -529,6 +552,96 @@ for cols in 60 90 120 160; do
 done
 [ "$wbad" -eq 0 ] && echo "  Y11 burn-active frame single-line + width-bounded 60..160 OK" || fail=1
 rm -f "$SLC" "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
+
+echo "── Z. ADAPTIVE-LAYOUT: fixed 14-step sacrifice order — width invariant, segment forms/priority, monotonic drop order, shrink-before-drop, core always remains"
+# Full-set fixture on the hermetic GREPO (deterministic git segment: branch "grepo"/basename, no dirty/diffstat) so the degrade widths
+# don't flake on this checkout's working tree. ctx=42% (bar present), worktree, both quotas, last-msg, long session name all populated.
+JZ=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" --arg tp "$TP" '
+  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:42}, worktree:{name:"wt1"},
+    rate_limits:{ five_hour:{used_percentage:40, resets_at:(now+9000|floor)},
+                  seven_day:{used_percentage:86, resets_at:(now+108000|floor)} },
+    effort:{level:"high"}, session_id:"sl-selftest", transcript_path:$tp,
+    session_name:"Consolidate statusline from two rows to one" }')
+barcells() { python3 -c 'import sys; print(sys.stdin.buffer.read().decode("utf-8","replace").count("48;2"))'; }   # ctx bar = 12 bg cells
+
+# Z1 (task 4.1) Drawable-width invariant + width-tiered: sweep many COLUMNS (incl. 1-2 col pathological) → always single line, width ≤ edge.
+echo "── Z1. drawable-width invariant: every width emits ONE line ≤ term_cols-EDGE_PAD, no wrap (J/P/M method over the full degrade range)"
+# Sweep down to cols=EDGE_PAD+1 (drawable width 1), the smallest POSITIVE drawable width — the strict width≤edge invariant. The
+# pathological cols≤EDGE_PAD case (drawable width ≤0, where any glyph overflows) is the degraded "as far as drawable allows" fallback,
+# asserted no-crash/single-line in Z5 and test R, not against an impossible ≤0 width bound.
+z1bad=0
+for cols in 200 160 140 130 120 110 100 90 80 70 60 50 40 30 24 20 17 10 5 $((EDGE_PAD+1)); do
+  o=$(run "$cols" "$JZ"); nl=$(printf '%s' "$o" | grep -c ''); w=$(printf '%s' "$o" | vw)
+  [ "$nl" -eq 1 ]                 || { echo "  ★ FAIL Z1 C=$cols not single line: $nl"; z1bad=1; }
+  [ "$w" -le $((cols-EDGE_PAD)) ] || { echo "  ★ FAIL Z1 C=$cols overflow width=$w > $((cols-EDGE_PAD))"; z1bad=1; }
+done
+[ "$z1bad" -eq 0 ] && echo "  Z1 200..$((EDGE_PAD+1)) cols: single line, never exceeds drawable width OK" || fail=1
+
+# Z2 (task 4.2) Per-segment forms: model compacts "Opus 4.8 (1M)"→"Opus", ctx bar collapses to plain N%, 5h collapses to remaining% only.
+echo "── Z2. per-segment compact forms: model→Opus, ctx bar→plain N%, 5h→remaining% (compact preferred over drop)"
+z2bad=0
+z2full=$(run 200 "$JZ"); z2fp=$(printf '%s' "$z2full" | nocol)
+[ "$(printf '%s' "$z2full" | barcells)" -eq 12 ] || { echo "  ★ FAIL Z2 wide: ctx bar (12 cells) absent"; z2bad=1; }
+case "$z2fp" in *"Opus 4.8 (1M)"*) ;; *) echo "  ★ FAIL Z2 wide: full model name absent"; z2bad=1 ;; esac
+z2c=$(run 130 "$JZ"); z2cp=$(printf '%s' "$z2c" | nocol)
+[ "$(printf '%s' "$z2c" | barcells)" -eq 0 ] || { echo "  ★ FAIL Z2 mid: ctx bar not collapsed to plain N%"; z2bad=1; }
+case "$z2cp" in *"42%"*) ;; *) echo "  ★ FAIL Z2 mid: ctx % lost"; z2bad=1 ;; esac
+z2m=$(run 90 "$JZ" | nocol)
+case "$z2m" in *"grepo │ Opus │"*) ;; *) echo "  ★ FAIL Z2 model not compacted to 'Opus': [$z2m]"; z2bad=1 ;; esac
+case "$z2m" in *"Opus 4.8"*) echo "  ★ FAIL Z2 model still in full form at C=90: [$z2m]"; z2bad=1 ;; esac
+z2q=$(run 30 "$JZ" | nocol)   # 5h collapsed to remaining% only (countdown "2H..m" dropped), session gone
+case "$z2q" in *"2H"*m*) echo "  ★ FAIL Z2 5h countdown not dropped at C=30: [$z2q]"; z2bad=1 ;; esac
+case "$z2q" in *"60%"*) ;; *) echo "  ★ FAIL Z2 5h remaining% lost at C=30: [$z2q]"; z2bad=1 ;; esac
+[ "$z2bad" -eq 0 ] && echo "  Z2 model/ctx/5h compact forms render at their tiers OK" || fail=1
+
+# Z3 (task 4.3) Fixed sacrifice order: as width decreases, segments disappear/compact in the exact 14-step order; the visible set is monotonic.
+echo "── Z3. fixed sacrifice order: diffstat→worktree→ctx→git→last-msg→7d→model→session-trunc→session-drop→5h-compact, monotonic"
+z3bad=0
+has() { case "$1" in *"$2"*) echo y ;; *) echo n ;; esac; }   # $1=plain line $2=needle → y/n
+p200=$(run 200 "$JZ" | nocol); p130=$(run 130 "$JZ" | nocol); p120=$(run 120 "$JZ" | nocol)
+p110=$(run 110 "$JZ" | nocol); p95=$(run 95 "$JZ" | nocol);  p80=$(run 80 "$JZ" | nocol)
+# step 2/3: diffstat present full, gone by 130; worktree present full, gone by 130
+[ "$(has "$p200" "[wt:wt1]")" = y ] || { echo "  ★ FAIL Z3 worktree absent at full width"; z3bad=1; }
+[ "$(has "$p130" "[wt:wt1]")" = n ] || { echo "  ★ FAIL Z3 worktree not dropped by C=130 (step 3)"; z3bad=1; }
+# step 4: ctx bar present full, collapsed by 130 (checked in Z2); step 5: git "grepo │"-as-right gone by 120 but last-msg still there
+[ "$(has "$p130" " main")" = y ] || { echo "  ★ FAIL Z3 git not present at C=130"; z3bad=1; }
+[ "$(has "$p120" " main")" = n ] || { echo "  ★ FAIL Z3 git not dropped by C=120 (step 5)"; z3bad=1; }
+[ "$(has "$p120" "19:38")" = y ] || { echo "  ★ FAIL Z3 last-msg dropped too early (before git): order violated at C=120"; z3bad=1; }
+# step 6: last-msg gone by 110; step 7: 7d "1D" gone by 95
+[ "$(has "$p110" "19:38")" = n ] || { echo "  ★ FAIL Z3 last-msg not dropped by C=110 (step 6)"; z3bad=1; }
+[ "$(has "$p110" "1D")" = y ]    || { echo "  ★ FAIL Z3 7d dropped before last-msg: order violated at C=110"; z3bad=1; }
+[ "$(has "$p95"  "1D")" = n ]    || { echo "  ★ FAIL Z3 7d quota not dropped by C=95 (step 7)"; z3bad=1; }
+# step 10: model fully gone by 80 (compact step 9 verified in Z2)
+[ "$(has "$p80" "Opus")" = n ]   || { echo "  ★ FAIL Z3 model not dropped by C=80 (step 10)"; z3bad=1; }
+[ "$z3bad" -eq 0 ] && echo "  Z3 segments vanish/compact in the fixed 14-step order, monotonically OK" || fail=1
+
+# Z4 (task 4.4) Shrink-before-drop: at a mid width the session is head-truncated with … (not dropped); JXLONG forces the right-truncation tier.
+echo "── Z4. shrink before drop: mid-width session is … -truncated (not vanished), junction │ retained"
+z4=$(run 120 "$JXLONG" | nocol); z4bad=0
+case "$z4" in *"a very"*) ;; *) echo "  ★ FAIL Z4 session vanished instead of truncating: [$z4]"; z4bad=1 ;; esac
+case "$z4" in *"…"*) ;; *) echo "  ★ FAIL Z4 no … truncation marker on the session: [$z4]"; z4bad=1 ;; esac
+case "$z4" in *"truncation"*) echo "  ★ FAIL Z4 session shown whole (not truncated) at C=120: [$z4]"; z4bad=1 ;; esac
+[ "$z4bad" -eq 0 ] && echo "  Z4 session truncates with … before being dropped OK" || fail=1
+
+# Z5 (task 4.5) Core always remains: at the narrowest widths (incl. 1-2 col, perl present and absent) path basename + ctx% survive, single line.
+echo "── Z5. core always remains: path basename + ctx% kept at the narrowest widths (1-2 col pathological), single line, no crash"
+z5bad=0
+for cols in 20 17 10; do   # core "grepo 42%" tier: both the path (head-truncated as needed) and the ctx% must be present
+  o=$(run "$cols" "$JZ"); pl=$(printf '%s' "$o" | nocol); nl=$(printf '%s' "$o" | grep -c ''); w=$(printf '%s' "$o" | vw)
+  [ "$nl" -eq 1 ]                 || { echo "  ★ FAIL Z5 C=$cols not single line"; z5bad=1; }
+  [ "$w" -le $((cols-EDGE_PAD)) ] || { echo "  ★ FAIL Z5 C=$cols overflow width=$w"; z5bad=1; }
+  case "$pl" in *"42%"*) ;; *) echo "  ★ FAIL Z5 C=$cols ctx% removed from core: [$pl]"; z5bad=1 ;; esac
+  case "$pl" in g*) ;; *) echo "  ★ FAIL Z5 C=$cols path basename head not retained: [$pl]"; z5bad=1 ;; esac   # path basename head ("g…")
+done
+# 1-2 col pathological + perl absent (reuse the failing perl stub at $WORK/bin/perl planted by test M): no crash, single line, clean stderr
+for cols in 1 2; do
+  err=$(printf '%s' "$JZ" | env PATH="$WORK/bin:$PATH" COLUMNS="$cols" HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" 2>&1 >/dev/null)
+  o=$(printf '%s' "$JZ" | env PATH="$WORK/bin:$PATH" COLUMNS="$cols" HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" 2>/dev/null)
+  [ -z "$err" ]                              || { echo "  ★ FAIL Z5 C=$cols (perl absent) stderr noise: [$err]"; z5bad=1; }
+  [ "$(printf '%s' "$o" | grep -c '')" -eq 1 ] || { echo "  ★ FAIL Z5 C=$cols (perl absent) not single line"; z5bad=1; }
+done
+[ "$z5bad" -eq 0 ] && echo "  Z5 core (path basename + ctx%) survives 20..1 cols, perl present/absent, single line OK" || fail=1
 
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)

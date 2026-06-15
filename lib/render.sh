@@ -2,9 +2,11 @@
 # shellcheck disable=SC2154  # globals read here are assigned by the sibling collect.sh (see READS header); lint via: shellcheck -x statusline-command.sh
 # render.sh — render output: palette + single-line assembly (left = path/resources/time, right = git/session, right-aligned)
 #
-# READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD BURN_SENS) + every global written by collect.sh
+# READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD JGAP BURN_SENS LASTMSG_WARN LASTMSG_STALE) + every global written by collect.sh
 # WRITES: stdout (single colored status line). The palette (WH MD GR…TRK) must be global so it's reachable across functions;
-#         the assembly working variables (parts parts2 _pct _ttl _line bar display_dir git_seg…)
+#         the assembly working variables (parts parts2 _pct _ttl _dur _tok _rate_full _rate_compact _line bar display_dir git_seg…)
+#         and the per-segment handles built by build_left/build_right for degrade_layout (seg_path seg_model_full/compact seg_effort
+#         seg_thinking seg_ctx_full/compact seg_tok seg_5h_full/compact seg_7d seg_lastmsg seg_git_full/nodiff seg_worktree seg_session)
 #         are deliberately not local (this module is the terminal stage, nobody reads them afterward); external code should not depend on them
 #
 # Pure-bash string concatenation throughout, zero forks; $'..' stores the ESC byte directly, no printf fork needed.
@@ -106,7 +108,11 @@ ttl() {   # $1=resets_at (Unix seconds) → _ttl="1D3H"/"2H2m"/"5m"; non-numeric
     fmt_dur "$s"; _ttl="$_dur"
 }
 
-add_rate() {   # $1=used% $2=resets_at $3=burn indicator (optional, appended inside the segment) → appends "2H2m 76% ↘33m" to parts
+# Build a rate-limit segment into _rate_full (countdown + remaining% + optional burn) and _rate_compact (remaining% + burn only, countdown
+# dropped). Both empty when the used% is non-numeric. The caller pushes _rate_full to parts and keeps _rate_compact for degrade step 13
+# (collapse the 5h quota to remaining-percent only while RETAINING any burn alarm — the alarm lives in $3 and is in both forms).
+build_rate() {   # $1=used% $2=resets_at $3=burn indicator (optional) → _rate_full / _rate_compact ("2H2m 76% ↘33m" / "76% ↘33m")
+    _rate_full=""; _rate_compact=""
     fmt_pct "$1"
     [ -n "$_pct" ] || return 0
     local r=$((100 - _pct)) color
@@ -116,7 +122,13 @@ add_rate() {   # $1=used% $2=resets_at $3=burn indicator (optional, appended ins
     elif [ "$r" -gt 25 ]; then color="$OG"
     else color="$RD"; fi
     ttl "$2"
-    parts+=("${_ttl:+${WH}${_ttl}${RS} }${color}${r}%${RS}${3:+ $3}")   # burn indicator (if any) rides inside the 5h segment, adjacent to %
+    _rate_compact="${color}${r}%${RS}${3:+ $3}"                          # burn alarm kept; countdown dropped
+    _rate_full="${_ttl:+${WH}${_ttl}${RS} }${_rate_compact}"            # full = countdown prefix + compact
+}
+
+add_rate() {   # $1=used% $2=resets_at $3=burn indicator (optional, appended inside the segment) → appends "2H2m 76% ↘33m" to parts
+    build_rate "$1" "$2" "$3"
+    [ -n "$_rate_full" ] && parts+=("$_rate_full")
 }
 
 # Rate-limit burn-projection alarm (5h window). reconcile_rates' awk emits burn_tte = projected seconds-to-exhaust, ALREADY gated on
@@ -141,8 +153,13 @@ build_burn() {   # uses globals burn_tte + config BURN_SENS → _burn ("" when h
 
 
 # Left: path + resource state (model / effort / thinking / ctx / quota) + last-message time
+# Besides building parts[] (the full-form left half used by the roomy / junction render paths), each segment is also captured into a
+# named global with, where a shorter rendering exists, a compact form (seg_*_compact). render_line's degrade_layout (the fixed 14-step
+# sacrifice order) reassembles parts[] from these handles when the full line overflows: shrink before drop, core (path + ctx%) never cut.
 build_left() {
     parts=()
+    seg_path=""; seg_model_full=""; seg_model_compact=""; seg_effort=""; seg_thinking=""
+    seg_ctx_full=""; seg_ctx_compact=""; seg_tok=""; seg_5h_full=""; seg_5h_compact=""; seg_7d=""; seg_lastmsg=""
 
     # Path display: cwd under project_dir → project name + relative path, otherwise basename
     display_dir=""
@@ -155,9 +172,15 @@ build_left() {
             esac
         fi
     fi
-    [ -n "$display_dir" ] && parts+=("${CY}${BOLD}${display_dir}${RS}")
+    # Core path segment: the basename is the never-dropped anchor (degrade_layout head-truncates it only at the core-only tier).
+    [ -n "$display_dir" ] && { seg_path="${CY}${BOLD}${display_dir}${RS}"; parts+=("$seg_path"); }
 
-    [ -n "$model" ] && parts+=("${MD}${model/ (1M context)/ (1M)}${RS}")
+    # Model name carries a compact form ("Opus 4.8 (1M)" → "Opus", the leading word) so degrade_layout shrinks before dropping (steps 9/10).
+    if [ -n "$model" ]; then
+        seg_model_full="${MD}${model/ (1M context)/ (1M)}${RS}"
+        seg_model_compact="${MD}${model%% *}${RS}"   # first whitespace-delimited word, e.g. "Opus"
+        parts+=("$seg_model_full")
+    fi
 
     # effort coloring (all 5 levels: low/medium/high/xhigh/max): warm = below the normal high;
     # xhigh/max are upward deviations that self-evidence via the text, same gray as high; unknown new values aren't colored arbitrarily.
@@ -173,16 +196,18 @@ build_left() {
             medium) effort_color="$OG" ;;
             *)      effort_color="$DM" ;;
         esac
-        parts+=("${effort_color}${effort_disp}${RS}")
+        seg_effort="${effort_color}${effort_disp}${RS}"
+        parts+=("$seg_effort")
     fi
 
     # thinking shown only when abnormal: normally-on → red warning when off; normally-off → calm gray text when on; missing JSON value stays silent, no false alarm
     if [ -n "$thinking" ]; then
         if $NORM_THINKING; then
-            [ "$thinking" = "false" ] && parts+=("${RD}no-think${RS}")
+            [ "$thinking" = "false" ] && seg_thinking="${RD}no-think${RS}"
         else
-            [ "$thinking" = "true" ] && parts+=("${DM}thinking${RS}")
+            [ "$thinking" = "true" ] && seg_thinking="${DM}thinking${RS}"
         fi
+        [ -n "$seg_thinking" ] && parts+=("$seg_thinking")
     fi
 
     # ctx %: Raymond's rule — the % number is normally white, turns red as a warning only when >80%
@@ -190,6 +215,8 @@ build_left() {
     fmt_pct "$used_pct"
     if [ -n "$_pct" ]; then
         if [ "$_pct" -gt 80 ]; then ctx_color="$RD"; else ctx_color="$WH"; fi
+        # Compact ctx form (degrade step 4): plain "N%" text, no bar — the % itself is part of the core and is never dropped.
+        seg_ctx_compact="${ctx_color}${_pct}%${RS}"
         if $CTX_BAR; then
             # Solid bar: background color (48;2) + a space fills the whole cell, no font gaps; the unfilled part uses the gray background as a track
             BAR_W=12
@@ -208,10 +235,11 @@ build_left() {
                     bar="${bar}${TRK} "
                 fi
             done
-            parts+=("${bar}${RS} ${ctx_color}${_pct}%${RS}")
+            seg_ctx_full="${bar}${RS} ${ctx_color}${_pct}%${RS}"
         else
-            parts+=("${ctx_color}ctx:${_pct}%${RS}")
+            seg_ctx_full="${ctx_color}ctx:${_pct}%${RS}"   # CTX_BAR off: full == "ctx:N%"; compact drops the "ctx:" prefix to plain N%
         fi
+        parts+=("$seg_ctx_full")
     fi
 
     # Token usage (cumulative in+out, cache excluded): session total shown once there is real usage; subagent total appended
@@ -223,14 +251,19 @@ build_left() {
         if [ -n "$subagent_tokens" ] && [ "$subagent_tokens" -gt 0 ] 2>/dev/null; then
             fmt_tok "$subagent_tokens"; tok_part="${tok_part}${DM} ⊂${RS}${YL}${_tok}${RS}"
         fi
-        parts+=("$tok_part")
+        seg_tok="$tok_part"   # session + subagent are one indivisible unit: degrade step 8 drops both together
+        parts+=("$seg_tok")
     fi
 
     # Rate limit: reset countdown + remaining %. The 5h segment also carries the burn-projection alarm (↘<ttl>) when the budget
     # is on track to run dry before the window resets; build_burn returns "" otherwise so the common case adds nothing.
     build_burn
-    add_rate "$five_h" "$five_reset" "$_burn"
-    add_rate "$seven_d" "$seven_reset"
+    build_rate "$five_h" "$five_reset" "$_burn"
+    seg_5h_full="$_rate_full"; seg_5h_compact="$_rate_compact"   # compact (step 13) keeps the burn alarm, drops only the reset countdown
+    [ -n "$seg_5h_full" ] && parts+=("$seg_5h_full")
+    build_rate "$seven_d" "$seven_reset"
+    seg_7d="$_rate_full"
+    [ -n "$seg_7d" ] && parts+=("$seg_7d")
 
     # Last-message time: the per-session file written by the UserPromptSubmit hook (not the current time).
     # session_id is interpolated into a path here, so reject any slash/.. shape first (defense-in-depth: the id is
@@ -273,13 +306,14 @@ build_left() {
                 if   [ "$lm_age" -ge "$LASTMSG_STALE" ]; then lm_col="$RD"   # ≥1h: even the extended cache is gone
                 elif [ "$lm_age" -ge "$LASTMSG_WARN"  ]; then lm_col="$YL"   # ≥5m: default cache has gone idle-cold
                 else lm_col="$DM"; fi                                        # <5m: cache still warm → dim, matches the timestamp
-                parts+=("${DM}${last_msg}${RS} ${lm_col}(${lm_delta})${RS}")
+                seg_lastmsg="${DM}${last_msg}${RS} ${lm_col}(${lm_delta})${RS}"
             else
-                parts+=("${DM}${last_msg}${RS}")                            # <1 min → clock time only, no Δ
+                seg_lastmsg="${DM}${last_msg}${RS}"                         # <1 min → clock time only, no Δ
             fi
         else
-            parts+=("${DM}${last_msg}${RS}")                                # old/unknown format → show the raw string as-is
+            seg_lastmsg="${DM}${last_msg}${RS}"                             # old/unknown format → show the raw string as-is
         fi
+        parts+=("$seg_lastmsg")
     fi
 }
 
@@ -288,18 +322,56 @@ build_left() {
 # so it goes at the very end of the line, minimizing what's sacrificed when the terminal can't fit it and truncates.
 build_right() {
     parts2=()
+    seg_git_full=""; seg_git_nodiff=""; seg_worktree=""; seg_session=""
 
     if [ -n "$git_branch" ]; then
-        git_seg="${WH}${git_branch}${git_dirty}${RS}"
+        seg_git_nodiff="${WH}${git_branch}${git_dirty}${RS}"   # branch + dirty marker, no diffstat (degrade step 2 drops only the +N/-N)
+        git_seg="$seg_git_nodiff"
         if [ -n "$git_ins" ]; then git_seg="${git_seg} ${GR}+${git_ins}${RS}"; fi
         if [ -n "$git_del" ]; then
             if [ -n "$git_ins" ]; then git_seg="${git_seg}${SP}/${RS}${RD_DATA}-${git_del}${RS}"
             else git_seg="${git_seg} ${RD_DATA}-${git_del}${RS}"; fi
         fi
-        parts2+=("$git_seg")
+        seg_git_full="$git_seg"
+        parts2+=("$seg_git_full")
     fi
-    [ -n "$worktree_name" ] && parts2+=("${DM}[wt:${worktree_name}]${RS}")
-    [ -n "$session_name" ] && parts2+=("${DM}${session_name}${RS}")
+    [ -n "$worktree_name" ] && { seg_worktree="${DM}[wt:${worktree_name}]${RS}"; parts2+=("$seg_worktree"); }
+    [ -n "$session_name" ] && { seg_session="${DM}${session_name}${RS}"; parts2+=("$seg_session"); }
+}
+
+
+# Rebuild parts[] / parts2[] applying the fixed sacrifice order CUMULATIVELY up to step $1 (an integer 2..14). The 14-step order
+# (spec "Fixed sacrifice order") degrades from the widest configuration down to the narrowest; render_line increments the step until
+# the assembled line fits the drawable width, applying each step only when the prior step still overflows (earliest sufficient step).
+# Steps map: 1 = gap→junction (done by render_line's junction tier, not here); 2 drop diffstat; 3 drop worktree; 4 ctx→compact;
+# 5 drop git branch; 6 drop last-msg; 7 drop 7d; 8 drop token (session+subagent as one unit); 9 model→compact; 10 drop model;
+# 11 truncate session with … (done by render_line's right-truncation tier); 12 drop session; 13 5h→compact (keep burn, drop countdown);
+# 14 core only = path + ctx%. Shrink precedes drop for every segment that has both forms (4<later ctx drop never happens since % is core;
+# 9<10 model; 11<12 session; 13 collapses 5h, never dropped — it stays as the core-adjacent resource). Core (path + ctx%) is never dropped.
+degrade_layout() {   # $1 = sacrifice step (2..14) → rebuild parts[] / parts2[]
+    local step=$1
+    # Left half, in display order. Each segment included unless its drop step has been reached; ctx/model/5h swap to compact at their step.
+    parts=()
+    [ -n "$seg_path" ] && parts+=("$seg_path")                                  # core: always present
+    if   [ -n "$seg_model_full" ] && [ "$step" -lt 9 ]; then parts+=("$seg_model_full")     # step 9 compacts, 10 drops
+    elif [ -n "$seg_model_compact" ] && [ "$step" -lt 10 ]; then parts+=("$seg_model_compact"); fi
+    [ -n "$seg_effort" ] && [ "$step" -lt 14 ] && parts+=("$seg_effort")        # effort/thinking carry no own step; the core-only tier (14) clears all non-core left segments
+    [ -n "$seg_thinking" ] && [ "$step" -lt 14 ] && parts+=("$seg_thinking")
+    if   [ "$step" -lt 4 ] && [ -n "$seg_ctx_full" ]; then parts+=("$seg_ctx_full")         # step 4 collapses bar→plain N%; the % survives every tier (core)
+    elif [ -n "$seg_ctx_compact" ]; then parts+=("$seg_ctx_compact"); fi
+    [ -n "$seg_tok" ] && [ "$step" -lt 8 ] && parts+=("$seg_tok")               # step 8 drops session+subagent together
+    if   [ "$step" -lt 13 ] && [ -n "$seg_5h_full" ]; then parts+=("$seg_5h_full")          # step 13 collapses 5h to remaining% (+burn); never dropped
+    elif [ -n "$seg_5h_compact" ]; then parts+=("$seg_5h_compact"); fi
+    [ -n "$seg_7d" ] && [ "$step" -lt 7 ] && parts+=("$seg_7d")                 # step 7 drops the 7d quota
+    [ -n "$seg_lastmsg" ] && [ "$step" -lt 6 ] && parts+=("$seg_lastmsg")       # step 6 drops the last-message time
+
+    # Right half. git: full→nodiff at step 2, dropped at step 5; worktree dropped at step 3; session dropped at step 12
+    # (step 11 = truncate session is delegated to render_line's right-truncation tier, which keeps git and cuts the name tail).
+    parts2=()
+    if   [ "$step" -lt 2 ] && [ -n "$seg_git_full" ]; then parts2+=("$seg_git_full")
+    elif [ "$step" -lt 5 ] && [ -n "$seg_git_nodiff" ]; then parts2+=("$seg_git_nodiff"); fi
+    [ -n "$seg_worktree" ] && [ "$step" -lt 3 ] && parts2+=("$seg_worktree")
+    [ -n "$seg_session" ] && [ "$step" -lt 12 ] && parts2+=("$seg_session")
 }
 
 
@@ -391,6 +463,31 @@ emit_bounded() {   # $1=string with color codes $2=visible-width cap
     else trunc_head "$1" "$2"; printf '%s\n' "$_trunc"; fi
 }
 
+# Core-only tier (sacrifice step 14): emit just the path basename + context percentage, NEVER dropping either (spec "Core always remains").
+# When even "<path> <ctx%>" exceeds the drawable width, the PATH is head-truncated to free room while the ctx% rides at the tail intact —
+# the percentage is the one piece that must survive a 1-2 column terminal. With no ctx% present (no usage), this degrades to bounding the
+# path alone. Width-safe with perl absent (trunc_head's pure-bash fallback). avail can be <=0 at a 1-2 col terminal; trunc_head handles it.
+render_core_only() {   # $1=avail (drawable width)
+    local avail=$1 core ctxw
+    if [ -n "$seg_ctx_compact" ]; then
+        vis_width "$seg_ctx_compact"; ctxw=$_w
+        # reserve the % (+1 gap) at the tail; head-truncate the path into whatever is left, then re-join with a single space
+        if [ -n "$seg_path" ]; then
+            local pbudget=$(( avail - ctxw - 1 ))
+            if [ "$pbudget" -ge 2 ]; then
+                trunc_head "$seg_path" "$pbudget"
+                printf '%s %s\n' "$_trunc" "$seg_ctx_compact"
+            else
+                emit_bounded "$seg_ctx_compact" "$avail"   # not even one path cell + % fits → keep the % alone, bounded
+            fi
+        else
+            emit_bounded "$seg_ctx_compact" "$avail"
+        fi
+    else
+        emit_bounded "${seg_path:-$left}" "$avail"        # no ctx% to protect → just bound the path (or whatever the left holds)
+    fi
+}
+
 # Single-line output: left ──gap── right (right-aligned to the drawable right edge at term_cols-EDGE_PAD).
 # The junction │ appears only when "merged" — placed only when the gap between the two parts is <JGAP (otherwise a │ floating in a big whitespace gap looks odd);
 # when the gap is >=JGAP, plain whitespace separates them with no │. When placed, the │ hugs the right part, its leading space coming from the gap, reading as " │ ".
@@ -404,6 +501,47 @@ render_line() {
     local JSEP="${SP}│ ${RS}" JSEP_W=2   # junction separator: │ + trailing space (2 visible cells), the leading space comes from the gap
     join_parts "${parts[@]}";  left="$_line"
     join_parts "${parts2[@]}"; right="$_line"
+
+    # Fixed sacrifice order (spec "Fixed sacrifice order" / "Width-tiered rendering"): when width is measurable and the full set
+    # doesn't fit even at the junction tier, walk degrade_layout in the fixed 14-step order — applying each step only when the prior
+    # step still overflows — until the line fits. Steps split across two helpers so SHRINK precedes DROP for the session:
+    #  • Phase A (steps 2..11): drop diffstat / worktree / ctx-compact / git / last-msg / 7d / token / model-compact / model-drop,
+    #    then at step 11 the session is still PRESENT — the fall-through right-truncation tier head-truncates it with … (step 11's action).
+    #    The loop breaks at the earliest step whose junction/roomy layout fits, OR (at step 11) when a … -truncated session is still viable
+    #    (rbudget>=2) so the session is TRUNCATED before it is ever dropped (spec "Shrink and truncate preferred over drop").
+    #  • Phase B (steps 12..13): only if even a 2-cell-truncated session can't fit — drop the session, then collapse the 5h quota to
+    #    remaining% (keeping any burn alarm). Step 14 (core only) is the final guarantee that path + ctx% survive.
+    # The full set still fits → the loop body never runs, so the roomy / junction tiers below handle the wide common case unchanged
+    # (existing A/A2/B/J/K behaviours preserved). Step 1 (gap→junction) and 11/14 (truncate) are realised by the tiers below.
+    if [ -n "$left" ] && $RIGHT_ALIGN && [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then
+        local _avail=$(( term_cols - EDGE_PAD )) _step _lw _rw _jw _rb
+        vis_width "$left"; _lw=$_w; vis_width "$right"; _rw=$_w
+        # junction-tier width = left + " │ " (JSEP_W) + right, with the leading gap; fits when there's room for at least a 1-cell gap.
+        if [ $(( _avail - _lw - ( _rw>0 ? JSEP_W : 0 ) - _rw )) -lt "$JGAP" ]; then
+            _step=2
+            while [ "$_step" -le 13 ]; do
+                degrade_layout "$_step"
+                join_parts "${parts[@]}";  left="$_line";  vis_width "$left";  _lw=$_w
+                join_parts "${parts2[@]}"; right="$_line"; vis_width "$right"; _rw=$_w
+                if [ -n "$right" ]; then _jw=$(( _lw + JSEP_W + _rw )); else _jw=$_lw; fi
+                [ $(( _avail - _jw )) -ge 1 ] && break          # earliest step whose junction/roomy layout leaves >=1 gap → done
+                # At step 11 the session is still present: prefer truncating it (fall-through right-truncation) over dropping it (step 12).
+                # rbudget mirrors the fall-through tier's budget; >=2 means a … -truncated right still fits, so stop here and let it render.
+                if [ "$_step" -eq 11 ] && [ -n "$right" ]; then
+                    _rb=$(( _avail - _lw - JSEP_W - 1 ))
+                    [ "$_rb" -ge 2 ] && break
+                fi
+                _step=$(( _step + 1 ))
+            done
+            # Core-only tier (step 14): if even step 13's left (path + ctx% + collapsed 5h) overflows, drop to the bare core
+            # path + ctx% and head-truncate the PATH (not the %) so the context percentage always survives (spec "Core always remains").
+            if [ -z "$right" ] && [ $(( _avail - _lw )) -lt 1 ]; then
+                render_core_only "$_avail"
+                return
+            fi
+        fi
+    fi
+
     if [ -n "$left" ] && [ -n "$right" ] && $RIGHT_ALIGN \
        && [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then
         local avail=$(( term_cols - EDGE_PAD ))
