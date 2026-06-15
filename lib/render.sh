@@ -78,6 +78,16 @@ fmt_pct() {
     esac
 }
 
+# token count → human: <1000 raw integer, <1e6 "Nk" (integer thousands), else "N.NM" (one decimal). Pure integer math
+# (LC_ALL=C, bash 3.2 — no float printf): the M form derives one decimal from n/100000 (e.g. 1100000→11→"1.1M", 33400000→334→"33.4M").
+fmt_tok() {   # $1=integer → _tok ; empty on non-numeric
+    local n=$1 t
+    case "$n" in ''|*[!0-9]*) _tok=""; return ;; esac
+    if   [ "$n" -lt 1000 ];    then _tok="$n"
+    elif [ "$n" -lt 1000000 ]; then _tok="$(( n / 1000 ))k"
+    else t=$(( n / 100000 )); _tok="$(( t / 10 )).$(( t % 10 ))M"; fi
+}
+
 # Shared seconds→duration formatter: D/H/m cascade. Single source for ttl() (reset countdown) and the last-message Δ,
 # which previously carried byte-identical arithmetic in two places (silent-drift risk if only one were ever edited).
 fmt_dur() {   # $1=seconds (non-negative integer) → _dur="1D3H"/"2H2m"/"5m"
@@ -184,6 +194,18 @@ build_left() {
         fi
     fi
 
+    # Token usage (cumulative in+out, cache excluded): session total shown once there is real usage; subagent total appended
+    # with ⊂ only when > 0. Values come from read_tokens (the bg-job-updated cache) — the frame never blocks on summation;
+    # absent cache or a zero-usage session (e.g. the first frame) → segment omitted, matching the "first frame shows nothing" spec.
+    # Placed before the rate-limit windows so the line reads "…ctx · tokens · 5h · 7d · time".
+    if [ -n "$session_tokens" ] && [ "$session_tokens" -gt 0 ] 2>/dev/null; then
+        fmt_tok "$session_tokens"; tok_part="${WH}${_tok}${RS}"
+        if [ -n "$subagent_tokens" ] && [ "$subagent_tokens" -gt 0 ] 2>/dev/null; then
+            fmt_tok "$subagent_tokens"; tok_part="${tok_part}${DM} ⊂${RS}${YL}${_tok}${RS}"
+        fi
+        parts+=("$tok_part")
+    fi
+
     # Rate limit: reset countdown + remaining %
     add_rate "$five_h" "$five_reset"
     add_rate "$seven_d" "$seven_reset"
@@ -281,7 +303,7 @@ vis_width() {   # $1=string with color codes → _w=visible column width
         s=${s#*$'\033['}; s=${s#*m}     # an SGR code always ends with m, the shortest match eats exactly one code
     done
     t+=$s
-    t=${t//│/N}; t=${t//·/N}; t=${t//…/N}   # fold the narrow multibyte chars we emit (incl. the truncation suffix …) back to 1 byte
+    t=${t//│/N}; t=${t//·/N}; t=${t//…/N}; t=${t//⊂/N}   # fold the narrow multibyte chars we emit (junction │ · … and the token ⊂ marker) back to 1 byte
     na=${t//[$'\001'-$'\177']/}         # strip all ASCII, leaving only non-ASCII bytes
     _w=$(( ${#t} - ${#na} + (${#na} * 2 + 2) / 3 ))
 }

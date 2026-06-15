@@ -13,6 +13,10 @@ TP="$WORK/transcript.jsonl"
 mkdir -p "$FAKE_HOME/.claude/last-msg"
 printf '06-07 19:38\n' > "$FAKE_HOME/.claude/last-msg/sl-selftest"
 printf '{"type":"user","content":"<local-command-stdout>Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration</local-command-stdout>"}\n' > "$TP"
+# Hermetic git repo for width-sensitive git-segment fixtures: a clean, commit-less repo yields a deterministic
+# "branch only, no dirty, no diffstat" segment. Using the live repo ($SL) would make the segment width track this
+# checkout's uncommitted diff, flaking name-budget asserts (e.g. J) whenever the working tree is dirty.
+GREPO="$WORK/grepo"; git init -q "$GREPO" >/dev/null 2>&1 || mkdir -p "$GREPO"
 
 # Pull EDGE_PAD / JGAP from the script so the asserts track the real config instead of hardcoding 3 / 2.
 EDGE_PAD=$(sed -n 's/^EDGE_PAD=\([0-9][0-9]*\).*/\1/p' "$SL/statusline-command.sh"); EDGE_PAD=${EDGE_PAD:-3}
@@ -164,7 +168,7 @@ JKANA=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
 chk check max 120 < <(run 120 "$JKANA")
 
 echo "── J. long name + narrow terminal (original bug scenario): sweep 80..150, never overflow, name segment always present"
-JLONG=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
+JLONG=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" --arg tp "$TP" '
   { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
     context_window:{used_percentage:3},
     rate_limits:{ five_hour:{used_percentage:40, resets_at:(now+500|floor)},
@@ -320,6 +324,74 @@ printf '06-07 19:38\n' > "$LMF"
 u5=$(run 200 "$J" | strip)
 case "$u5" in *"06-07 19:38"*) echo "  U5 old format verbatim OK" ;; *) echo "  ★ FAIL U5 old format dropped: [$u5]"; fail=1 ;; esac
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
+
+echo "── W. TOKENS: cumulative in+out, subagent ⊂ only when >0, foreground reads cache (never blocks)"
+# Seed the token cache with the transcript's REAL size/mtime so the detached bg job hits its gate (sources unchanged →
+# no recompute) and the seeded token VALUES are preserved; this makes the assertions deterministic despite the bg job.
+TKC="$FAKE_HOME/.claude/sl-tokens-cache"
+TSZ=$(stat -f '%z' "$TP" 2>/dev/null); TMT=$(stat -f '%m' "$TP" 2>/dev/null)
+printf 'T sl-selftest 562000 0 %s %s 0 0\n' "$TSZ" "$TMT" > "$TKC"      # W1: session-only → 562k, no ⊂
+w1=$(run 200 "$J" | nocol)
+case "$w1" in *"⊂"*) echo "  ★ FAIL W1 ⊂ shown with zero subagent: [$w1]"; fail=1 ;;
+  *"562k"*) echo "  W1 session-only 562k, no ⊂ OK" ;; *) echo "  ★ FAIL W1 expected 562k: [$w1]"; fail=1 ;; esac
+printf 'T sl-selftest 562000 1100000 %s %s 0 0\n' "$TSZ" "$TMT" > "$TKC"  # W2: subagent>0 → 562k ⊂1.1M
+w2=$(run 200 "$J" | nocol)
+case "$w2" in *"562k"*"⊂1.1M"*) echo "  W2 session 562k + subagent ⊂1.1M OK" ;; *) echo "  ★ FAIL W2 expected 562k ⊂1.1M: [$w2]"; fail=1 ;; esac
+printf 'T sl-selftest 950 0 %s %s 0 0\n' "$TSZ" "$TMT" > "$TKC"           # W3: fmt_tok sub-1000 raw
+w3=$(run 200 "$J" | nocol)
+case "$w3" in *"950"*) echo "  W3 sub-1000 raw count OK" ;; *) echo "  ★ FAIL W3 expected raw 950: [$w3]"; fail=1 ;; esac
+rm -f "$TKC"                                                              # W4: no cache → token segment omitted, frame still one line
+chk check max $((200-1)) < <(run 200 "$J")
+rm -f "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
+
+echo "── V. parse_input positional contract: each field lands in its own global (sentinel)"
+# Source collect.sh and feed a JSON where every field carries a distinct value; assert each global got its own.
+# A jq-array / read-block misalignment (the codebase's most fragile spot) makes one field's value land in another → caught here.
+VFEED=$(jq -cn '{
+  workspace:{current_dir:"S_cwd", project_dir:"S_proj"},
+  model:{display_name:"S_model"}, session_name:"S_sname",
+  context_window:{used_percentage:"S_used"}, worktree:{name:"S_wt"},
+  effort:{level:"S_effort"}, thinking:{enabled:false},
+  rate_limits:{ five_hour:{used_percentage:"S_5h", resets_at:"S_5r"},
+                seven_day:{used_percentage:"S_7d", resets_at:"S_7r"} },
+  session_id:"S_sid", transcript_path:"S_tp" }')
+if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
+   rc=0
+   chkv() { [ "$2" = "$3" ] || { echo "  ★ FAIL $1=[$2] expected [$3]"; rc=1; }; }
+   chkv cwd "$cwd" S_cwd;                 chkv project_dir "$project_dir" S_proj
+   chkv model "$model" S_model;           chkv session_name "$session_name" S_sname
+   chkv used_pct "$used_pct" S_used;      chkv worktree_name "$worktree_name" S_wt
+   chkv effort "$effort" S_effort;        chkv thinking "$thinking" false
+   chkv five_h "$five_h" S_5h;            chkv seven_d "$seven_d" S_7d
+   chkv five_reset "$five_reset" S_5r;    chkv seven_reset "$seven_reset" S_7r
+   chkv session_id "$session_id" S_sid;   chkv transcript_path "$transcript_path" S_tp
+   case "$now" in ''|*[!0-9]*) echo "  ★ FAIL now not numeric: [$now]"; rc=1 ;; esac
+   exit $rc ); then echo "  all 15 fields land in their own global OK"; else fail=1; fi
+
+echo "── X. _sum_inout dedups by message.id (CC logs one row per content block, each repeating the same message usage)"
+# m1 appears 3× with the same usage (10+5), m2 once (100+20); a naive per-row sum = 165, the correct dedup = 135.
+# A user row (no .message.usage) must be ignored. _sum_inout reads stdin only, so HOME is irrelevant here.
+xdedup=$(printf '%s\n' \
+  '{"message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":5}}}' \
+  '{"message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":5}}}' \
+  '{"message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":5}}}' \
+  '{"message":{"id":"m2","usage":{"input_tokens":100,"output_tokens":20}}}' \
+  '{"type":"user","message":{"role":"user"}}' \
+  | ( . "$SL/lib/collect.sh"; _sum_inout ))
+case "$xdedup" in 135) echo "  X dedup by message.id → 135 (not 165) OK" ;; *) echo "  ★ FAIL X expected 135 got [$xdedup]"; fail=1 ;; esac
+
+echo "── X2. tokens_update prunes T-lines whose main_mtime is older than RL_REG_TTL, exact-matches sid (no regex over-delete)"
+# HOME=FAKE_HOME so TOKENS_CACHE resolves into the sandbox, NOT the real ~/.claude cache. 'ancient' mtime=1 → pruned;
+# 'fresh' mtime=now → kept; 'xupd' has no seeded line → gate misses → the rewrite path (the code under test) runs.
+NOWX=$(date +%s)
+printf 'T ancient 100 0 10 1 0 0\nT fresh 200 0 10 %s 0 0\n' "$NOWX" > "$TKC"
+( export HOME="$FAKE_HOME"; . "$SL/lib/collect.sh"; tokens_update "$TP" xupd "$NOWX" )
+xp=$(cat "$TKC" 2>/dev/null); xok=1
+case "$xp" in *"T ancient"*) echo "  ★ FAIL X2 stale 'ancient' line not pruned: [$xp]"; fail=1; xok=0 ;; esac
+case "$xp" in *"T fresh "*) ;; *) echo "  ★ FAIL X2 'fresh' line wrongly dropped: [$xp]"; fail=1; xok=0 ;; esac
+case "$xp" in *"T xupd "*) ;; *) echo "  ★ FAIL X2 own line not written: [$xp]"; fail=1; xok=0 ;; esac
+[ "$xok" = 1 ] && echo "  X2 prune stale + keep fresh + write own line OK"
+rm -f "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
 
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)

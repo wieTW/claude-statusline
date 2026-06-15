@@ -48,10 +48,12 @@ case $0 in */*) SL_DIR=${0%/*} ;; *) SL_DIR=. ;; esac   # pure-bash dirname, sav
 start_theme_job    # t=0: kick off the theme background job first; it overlaps the stdin parse in the next step
 start_width_job    # at the same instant, start the terminal-width job (for the right-align gap); also never touches stdin
 parse_input        # main shell blocks parsing the stdin JSON (the only reader of stdin)
+start_tokens_job   # fire-and-forget: detached, gated token re-sum updates the cache for the next frame (never blocks this one)
 collect_status     # git×3 + effort scan collected concurrently, blocking until the slowest job finishes
 read_theme         # the theme/width jobs are long done by now (covered by the two steps above), zero wait
 read_width
 reconcile_rates    # cross-session rate-limit sync: adopt the freshest used% any session has seen for this window
+read_tokens        # read this session's cached token totals (tiny file; the heavy sum runs only in the bg job above)
 
 load_palette
 build_left

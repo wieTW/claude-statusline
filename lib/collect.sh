@@ -6,6 +6,7 @@
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
 #         five_h seven_d five_reset seven_reset session_id transcript_path now
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
+#         session_tokens subagent_tokens
 #
 # Sync model: background jobs run via process substitution opening an FD; a read blocks until that job hits EOF, which is the
 # sync point — no wait / temp file needed. Jobs are independent and run in parallel, so wall-clock = the slowest one, not the sum.
@@ -76,37 +77,40 @@ read_width() {
 # unbounded multi-KB field (e.g. a crafted session_name) would stall every frame (10KB → ~5s); 256 is far above any terminal's visible width, so render's "…" truncation still governs what shows.
 parse_input() {
     {
-        IFS= read -r cwd
-        IFS= read -r project_dir
-        IFS= read -r model
-        IFS= read -r session_name
-        IFS= read -r used_pct
-        IFS= read -r worktree_name
-        IFS= read -r effort
-        IFS= read -r thinking
-        IFS= read -r five_h
-        IFS= read -r seven_d
-        IFS= read -r five_reset
-        IFS= read -r seven_reset
-        IFS= read -r session_id
-        IFS= read -r transcript_path
-        IFS= read -r now
+        IFS= read -r cwd               # 01 cwd
+        IFS= read -r project_dir       # 02 project_dir
+        IFS= read -r model             # 03 model
+        IFS= read -r session_name      # 04 session_name
+        IFS= read -r used_pct          # 05 used_pct
+        IFS= read -r worktree_name     # 06 worktree_name
+        IFS= read -r effort            # 07 effort
+        IFS= read -r thinking          # 08 thinking
+        IFS= read -r five_h            # 09 five_h
+        IFS= read -r seven_d           # 10 seven_d
+        IFS= read -r five_reset        # 11 five_reset
+        IFS= read -r seven_reset       # 12 seven_reset
+        IFS= read -r session_id        # 13 session_id
+        IFS= read -r transcript_path   # 14 transcript_path
+        IFS= read -r now               # 15 now
+        # NOTE: this read order is positional one-for-one with the jq array below. Each line carries a "# NN field"
+        # number that MUST match the same-numbered jq element. Inserting/removing a field means editing BOTH lists at
+        # the same position. Section V (sentinel test) in tests/run-tests.sh asserts every field lands in its own global.
     } < <(jq -r '
-        [ .workspace.current_dir // .cwd // "",
-          .workspace.project_dir // "",
-          .model.display_name // "",
-          .session_name // "",
-          .context_window.used_percentage // "",
-          .worktree.name // "",
-          .effort.level // "",
-          (if .thinking.enabled == null then "" else .thinking.enabled end),
-          .rate_limits.five_hour.used_percentage // "",
-          .rate_limits.seven_day.used_percentage // "",
-          .rate_limits.five_hour.resets_at // "",
-          .rate_limits.seven_day.resets_at // "",
-          .session_id // "",
-          .transcript_path // "",
-          (now | floor)
+        [ .workspace.current_dir // .cwd // "",                              # 01 cwd
+          .workspace.project_dir // "",                                      # 02 project_dir
+          .model.display_name // "",                                         # 03 model
+          .session_name // "",                                               # 04 session_name
+          .context_window.used_percentage // "",                            # 05 used_pct
+          .worktree.name // "",                                              # 06 worktree_name
+          .effort.level // "",                                               # 07 effort
+          (if .thinking.enabled == null then "" else .thinking.enabled end), # 08 thinking
+          .rate_limits.five_hour.used_percentage // "",                     # 09 five_h
+          .rate_limits.seven_day.used_percentage // "",                     # 10 seven_d
+          .rate_limits.five_hour.resets_at // "",                            # 11 five_reset
+          .rate_limits.seven_day.resets_at // "",                            # 12 seven_reset
+          .session_id // "",                                                 # 13 session_id
+          .transcript_path // "",                                            # 14 transcript_path
+          (now | floor)                                                      # 15 now
         ] | map(tostring | gsub("\n"; "\\n") | gsub("\r"; "\\r")
             | explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode | .[0:256])[]
     ' 2>/dev/null)
@@ -239,4 +243,94 @@ reconcile_rates() {
     new5=${out%%|*}; new7=${out#*|}                # awk emits exactly one "|"; robust to command-sub trailing-newline stripping
     case "$new5" in ''|*[!0-9.]*) ;; *) five_h="$new5" ;; esac
     case "$new7" in ''|*[!0-9.]*) ;; *) seven_d="$new7" ;; esac
+}
+
+
+# Token usage: cumulative input+output tokens (cache tokens EXCLUDED) for this session and its subagents, shown left.
+# The foreground only reads a tiny one-line cache (never blocks the frame); a DETACHED background job recomputes the heavy
+# JSONL sums (~60ms over ~6MB) only when the source files' size/mtime changed (gate), single-flighted by an mkdir lock.
+# So a re-sum happens at most once per turn, off the hot path; this frame shows the previous result (first-ever frame: nothing).
+# in+out is deliberately cache-free so the number is stable across prompt-cache expiry/rewrite (that churn lands in cache_creation).
+# Cache (one line per session):  T <sid> <session_tokens> <subagent_tokens> <main_size> <main_mtime> <sub_size> <sub_mtime>
+# On rewrite, stale lines (main_mtime older than RL_REG_TTL) are pruned so the file can't grow without bound across sessions.
+# subagent transcripts live alongside the main one: <transcript_path without extension>/subagents/**/agent-*.jsonl
+TOKENS_CACHE="$HOME/.claude/sl-tokens-cache"
+
+# in+out (cache excluded) summed over a stream of transcript JSONL on stdin; streamed (reduce inputs), not slurped.
+# Dedup by .message.id: CC writes one JSONL row per assistant content block (text/thinking/tool_use), each repeating the
+# SAME message-level usage, so a naive per-row sum multiplies every message by its block count (measured ~10x on real logs).
+# A streamed seen-set keyed on message.id counts each message once; a row with no id (none in practice) falls through and counts.
+_sum_inout() { jq -n 'reduce inputs as $l ({s:0,seen:{}};
+    ($l.message.usage) as $u
+    | if $u == null then .
+      else ($l.message.id) as $id
+        | if ($id != null) and (.seen[$id] == true) then .
+          else (if $id != null then .seen[$id] = true else . end)
+               | .s += (($u.input_tokens // 0) + ($u.output_tokens // 0))
+          end
+      end) | .s' 2>/dev/null; }
+
+# Foreground: read this session's cached totals (fast, tiny file). Empty when no clean sid or no cache line yet.
+read_tokens() {
+    session_tokens=""; subagent_tokens=""
+    case "$session_id" in ''|*/*|*..*) return 0 ;; esac   # need a clean sid to key the line (same posture as last-msg)
+    [ -f "$TOKENS_CACHE" ] || return 0
+    local tag s st sat rest
+    while IFS=' ' read -r tag s st sat rest; do
+        [ "$tag" = "T" ] && [ "$s" = "$session_id" ] || continue
+        case "$st"  in ''|*[!0-9]*) ;; *) session_tokens="$st"  ;; esac
+        case "$sat" in ''|*[!0-9]*) ;; *) subagent_tokens="$sat" ;; esac
+        break
+    done < "$TOKENS_CACHE"
+}
+
+# Kick off the detached recompute (gated). Fire-and-forget: the frame never waits on it. </dev/null per the stdin hard rule
+# (it must not consume the stdin JSON pipe inherited by &); stdout/stderr to /dev/null so nothing interleaves with the line.
+start_tokens_job() {
+    case "$session_id" in ''|*/*|*..*) return 0 ;; esac
+    [ -n "$transcript_path" ] && [ -f "$transcript_path" ] || return 0
+    tokens_update "$transcript_path" "$session_id" "$now" >/dev/null 2>&1 </dev/null &
+}
+
+tokens_update() {   # $1=transcript_path $2=sid $3=now — detached worker: gate on size/mtime, recompute + rewrite this sid's line
+    local tp=$1 sid=$2 nowsec=$3 cache="$TOKENS_CACHE" lock="$TOKENS_CACHE.lock"
+    local _b=${1##*/} subdir                              # strip the extension from the BASENAME only — NOT the last dot
+    subdir="${1%/*}/${_b%.*}/subagents"                   # anywhere in the path, so a dotted parent dir can't misdirect find
+    if ! mkdir "$lock" 2>/dev/null; then            # single-flight: at most one recompute in flight
+        local lmt
+        lmt=$(stat -f '%m' "$lock" 2>/dev/null)     # steal a stale lock (writer died) older than 30s, else skip this frame
+        if [ -n "$lmt" ] && [ "$(( nowsec - lmt ))" -gt 30 ]; then
+            rmdir "$lock" 2>/dev/null; mkdir "$lock" 2>/dev/null || return 0
+        else
+            return 0
+        fi
+    fi
+    local msig mz mt sig sz st
+    msig=$(stat -f '%z %m' "$tp" 2>/dev/null); mz=${msig%% *}; mt=${msig##* }; mz=${mz:-0}; mt=${mt:-0}
+    sig=$(find "$subdir" -type f -name 'agent-*.jsonl' -exec stat -f '%z %m' {} + 2>/dev/null \
+          | awk '{s+=$1; if ($2+0>m+0) m=$2} END{printf "%d %d", s+0, m+0}')   # subagent aggregate: total bytes + latest mtime
+    sz=${sig%% *}; st=${sig##* }; sz=${sz:-0}; st=${st:-0}
+    local ctag csid cstok csat cmz cmt csz cst
+    IFS=' ' read -r ctag csid cstok csat cmz cmt csz cst < <(awk -v s="$sid" '$1=="T" && $2==s {print; exit}' "$cache" 2>/dev/null)
+    if [ "$ctag" = "T" ] && [ "$cmz" = "$mz" ] && [ "$cmt" = "$mt" ] && [ "$csz" = "$sz" ] && [ "$cst" = "$st" ]; then
+        rmdir "$lock" 2>/dev/null; return 0          # sources unchanged → keep the cached totals (gate hit)
+    fi
+    local stok satok=0
+    stok=$(_sum_inout < "$tp"); case "$stok" in ''|*[!0-9]*) stok=0 ;; esac
+    if [ -d "$subdir" ]; then
+        satok=$(find "$subdir" -type f -name 'agent-*.jsonl' -exec cat {} + 2>/dev/null | _sum_inout)
+        case "$satok" in ''|*[!0-9]*) satok=0 ;; esac
+    fi
+    # Rewrite: drop this sid's old line AND prune any session whose main_mtime (field 6) is older than RL_REG_TTL (a dead
+    # session — its transcript hasn't been touched in that long), then append the fresh line. awk's $2==sid is an exact
+    # compare (no regex), so unlike the old grep -v it can't over-delete on an odd sid. Atomic mv tolerates concurrent sessions.
+    local tmp="$TOKENS_CACHE.$$" cut=$(( nowsec - ${RL_REG_TTL:-604800} ))
+    { awk -v sid="$sid" -v cut="$cut" '
+          $1=="T" && $2==sid { next }
+          $1=="T" && NF==8 && $6 ~ /^[0-9]+$/ && ($6+0) < cut { next }
+          { print }
+      ' "$cache" 2>/dev/null
+      printf 'T %s %s %s %s %s %s %s\n' "$sid" "$stok" "$satok" "$mz" "$mt" "$sz" "$st"
+    } > "$tmp" 2>/dev/null && mv -f "$tmp" "$cache" 2>/dev/null
+    rmdir "$lock" 2>/dev/null
 }

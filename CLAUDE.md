@@ -1,3 +1,32 @@
+<!-- SPECTRA:START v1.0.2 -->
+
+# Spectra Instructions
+
+This project uses Spectra for Spec-Driven Development(SDD). Specs live in `openspec/specs/`, change proposals in `openspec/changes/`.
+
+## Use `/spectra-*` skills when:
+
+- A discussion needs structure before coding → `/spectra-discuss`
+- User wants to plan, propose, or design a change → `/spectra-propose`
+- Tasks are ready to implement → `/spectra-apply`
+- There's an in-progress change to continue → `/spectra-ingest`
+- User asks about specs or how something works → `/spectra-ask`
+- Implementation is done → `/spectra-archive`
+- Commit only files related to a specific change → `/spectra-commit`
+
+## Workflow
+
+discuss? → propose → apply ⇄ ingest → archive
+
+- `discuss` is optional — skip if requirements are clear
+- Requirements change mid-work? Plan mode → `ingest` → resume `apply`
+
+## Parked Changes
+
+Changes can be parked（暫存）— temporarily moved out of `openspec/changes/`. Parked changes won't appear in `spectra list` but can be found with `spectra list --parked`. To restore: `spectra unpark <name>`. The `/spectra-apply` and `/spectra-ingest` skills handle parked changes automatically.
+
+<!-- SPECTRA:END -->
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -6,14 +35,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-line Claude Code statusline. Claude Code invokes `statusline-command.sh`,
 piping a status JSON on **stdin**; the script prints **one colored line** on stdout.
-It is wired up by pointing the `statusLine.command` setting at `statusline-command.sh`
-(it is not auto-installed by this repo's `setup.sh`). Reference guide:
+It is not auto-installed — wire it up by pointing the `statusLine.command` setting (in
+`~/.claude/settings.json`) at the script's absolute path. Reference guide:
 `github.com/Raymondhou0917/claude-code-resources` starter-kit `06-statusline.md`.
 
 The line has two halves: a **left** part (path · model · effort · thinking · ctx bar ·
-rate-limit countdowns · last-message time) and a **right** part (git · worktree ·
-session name), right-aligned to the terminal edge with a `│` junction that appears only
-when the two halves nearly touch.
+token usage · rate-limit countdowns · last-message time) and a **right** part (git ·
+worktree · session name), right-aligned to the terminal edge with a `│` junction that
+appears only when the two halves nearly touch.
 
 ## Commands
 
@@ -28,8 +57,9 @@ printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M 
   | COLUMNS=140 bash statusline-command.sh
 ```
 
-`tests/run-tests.sh` is one monolithic suite — each check prints a labeled line (`A`,
-`A2`, `B`…`S`); a failure prints `★ FAIL` and the script exits 1. There is **no
+`tests/run-tests.sh` is one monolithic suite — each check prints a labeled section (`A`,
+`A2`, `B`…`U`, plus `G` perf at the end; `T` = rate-sync rule matrix, `U` = last-msg age);
+a failure prints `★ FAIL` and the script exits 1. There is **no
 per-test flag**; to isolate a case, read its labeled output or temporarily edit the
 script. The harness is self-locating (`SL=$(cd "$(dirname "$0")/.." …)`) and uses a
 fresh `mktemp` work dir + fake `$HOME`, so it survives directory renames and tmp clears.
@@ -45,8 +75,11 @@ modules. The flow is ordered to overlap I/O:
 ```
 start_theme_job → start_width_job   # background jobs kicked off first (don't touch stdin)
 parse_input                         # main shell blocks parsing the stdin JSON (the ONLY stdin reader)
+start_tokens_job                    # fire-and-forget detached token re-sum for the NEXT frame (never blocks this one)
 collect_status                      # git×3 + effort scan, concurrent, blocks on the slowest
 read_theme / read_width             # jobs already done → zero wait
+reconcile_rates                     # cross-session rate-limit sync (newest-session authority; see RL_SYNC)
+read_tokens                         # read this session's cached token totals (tiny file; heavy sum runs only in the bg job)
 load_palette → build_left → build_right → render_line
 ```
 
@@ -77,6 +110,37 @@ right part and truncate the **left**. Goal: the line **never exceeds the drawabl
 (`term_cols - EDGE_PAD`) and gets hard-cut/wrapped by the terminal. `vis_width` computes
 visible columns by stripping SGR codes then estimating cells; `trunc_head` uses perl for
 correct wide-char truncation with a pure-bash degraded fallback when perl is absent.
+
+### Cross-session rate-limit sync (`reconcile_rates`)
+
+CC freezes `rate_limits` at each session's **start snapshot** (upstream limitation): an old
+session keeps showing a stale used%, only the countdown moves. `reconcile_rates` (in
+`lib/collect.sh`, gated by `RL_SYNC`) fixes this via a shared cache at
+`~/.claude/sl-ratelimit-cache` — an `awk` pass over two line types: `S <session_id>
+<first_seen>` (a registry of each session's first render time) and `W <resets_at> <used>
+<auth_first_seen>` (per reset-window authority value). **Rule: the newest session is the
+authority** — a window's used% is overwritten only by a report whose session's `first_seen`
+is newer-or-equal, so a frozen old session can't override a fresher one in either direction
+(adopt a climb, honour a genuine cap-raise drop). `RL_REG_TTL` prunes registry records older
+than the longest reset window. Test section `T` covers the full rule matrix.
+
+### Token usage (`start_tokens_job` / `read_tokens` / `tokens_update`)
+
+Cumulative **input+output** tokens (cache tokens deliberately EXCLUDED, so the number is
+stable across prompt-cache churn) for this session and its subagents, shown left between
+the ctx bar and the rate windows. Summing ~6–23MB of transcript JSONL is too slow for the
+hot path, so the foreground only ever **reads** a tiny one-line-per-session cache at
+`~/.claude/sl-tokens-cache` (`read_tokens`); a **detached** background job
+(`start_tokens_job` → `tokens_update`) re-sums and rewrites the cache for the *next* frame,
+gated on the transcript's size/mtime so it only recomputes when sources changed. So this
+frame shows the previous result (first-ever frame: nothing). Cache line:
+`T <sid> <session_tokens> <subagent_tokens> <main_size> <main_mtime> <sub_size> <sub_mtime>`;
+subagent transcripts are summed from `<transcript without extension>/subagents/**/agent-*.jsonl`.
+**`_sum_inout` dedups by `.message.id`** — CC writes one JSONL row per content block, each
+repeating the same message-level usage, so a naive per-row sum over-counts (~10x on real
+logs). The rewrite is single-flighted by an `mkdir` lock (stale-stolen after 30s) and prunes
+`T`-lines whose `main_mtime` is older than `RL_REG_TTL` so the file can't grow unbounded.
+Test sections `W` (display) / `X` (dedup) / `X2` (prune) cover it.
 
 ## Hard rules — violating these reintroduces fixed bugs
 
@@ -116,4 +180,9 @@ Top of `statusline-command.sh`: `CTX_BAR` (gradient ctx bar vs plain text), `NOR
 (whether thinking-on is the norm), `STYLE` (`claude` / `tokyo-night` /
 `tokyo-night-claude` / `catppuccin` / `rose-pine`; light themes always use a fixed light
 palette), `RIGHT_ALIGN`, `EDGE_PAD` (drawable-width correction; bump if a CC build
-truncates the right edge again), `JGAP` (min gap before a `│` junction is inserted).
+truncates the right edge again), `JGAP` (min gap before a `│` junction is inserted),
+`RL_SYNC` (cross-session rate-limit sync on/off; see above), `RL_REG_TTL` (session-registry
+retention in sec, default 7d), and the last-message age tiers `LASTMSG_WARN` (Δ ≥ this →
+yellow, default 300s = 5-min cache idle-cold) / `LASTMSG_STALE` (Δ ≥ this → red, default
+3600s = extended cache gone). The age colours track Anthropic's two prompt-cache TTLs (5 min
+/ 1 h); the timestamp is shown as honest elapsed text, only Δ carries the cache read.
