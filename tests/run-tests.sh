@@ -393,6 +393,143 @@ case "$xp" in *"T xupd "*) ;; *) echo "  ★ FAIL X2 own line not written: [$xp]
 [ "$xok" = 1 ] && echo "  X2 prune stale + keep fresh + write own line OK"
 rm -f "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
 
+echo "── Y. BURN: rate-limit burn-projection alarm — two-point slope from persisted P samples, ↘<ttl>, yellow>30m/red≤30m, sensitivity, gates, retention"
+SLC="$FAKE_HOME/.claude/sl-ratelimit-cache"
+NOWB=$(jq -n 'now|floor')
+# brun: seed exactly ONE old sample, then report cur_used → render (raw, colours kept). rsj pins ctx=5% + five_hour-only.
+brun() {  # $1=reset_epoch $2=old_ts $3=old_used $4=cur_used $5=sid → rendered line
+  printf 'P %s %s %s\n' "$1" "$2" "$3" > "$SLC"
+  run 200 "$(rsj "$4" "$1" "${5:-sBurn}")"
+}
+brunV() { # $1=variant-dir $2=reset $3=old_ts $4=old_used $5=cur_used $6=sid → render under a BURN_SENS-overridden copy
+  local vd=$1; shift
+  printf 'P %s %s %s\n' "$1" "$2" "$3" > "$SLC"
+  printf '%s' "$(rsj "$4" "$1" "${5:-sBurnV}")" | env COLUMNS=200 HOME="$FAKE_HOME" bash "$WORK/$vd/statusline-command.sh"
+}
+hasarrow() { python3 -c 'import sys; print("yes" if "↘" in sys.stdin.buffer.read().decode("utf-8","replace") else "no")'; }
+bcode() { python3 -c 'import sys,re
+m=re.search("\x1b\\[([0-9;]*)m↘", sys.stdin.buffer.read().decode("utf-8","replace")); print(m.group(1) if m else "")'; }
+rcode() { python3 -c 'import sys,re
+ms=re.findall("\x1b\\[([0-9;]*)m[0-9]+%", sys.stdin.buffer.read().decode("utf-8","replace")); print(ms[-1] if ms else "")'; }
+# BURN_SENS variant scripts (mirror the F/T6 copy-and-sed pattern)
+mkdir -p "$WORK/bcons/lib" && cp "$SL"/lib/*.sh "$WORK/bcons/lib/"
+sed 's/^BURN_SENS="balanced"/BURN_SENS="conservative"/' "$SL/statusline-command.sh" > "$WORK/bcons/statusline-command.sh"
+mkdir -p "$WORK/bsens/lib" && cp "$SL"/lib/*.sh "$WORK/bsens/lib/"
+sed 's/^BURN_SENS="balanced"/BURN_SENS="sensitive"/' "$SL/statusline-command.sh" > "$WORK/bsens/statusline-command.sh"
+
+# Y1 two-point slope → seconds-to-exhaust: used 33→58 over 1h ⇒ slope 25%/h, remaining 42% ⇒ tte=42·3600/25=6048s=1H40m (task 3.2)
+y1=$(brun $((NOWB+9000)) $((NOWB-3600)) 33 58 sTTE | strip)
+case "$y1" in *"↘1H40m"*|*"↘1H39m"*|*"↘1H41m"*) echo "  Y1 two-point slope → ↘1H40m (tte = remaining·Δt/Δused) OK" ;;
+  *) echo "  ★ FAIL Y1 expected ↘1H40m: [$y1]"; fail=1 ;; esac
+
+# Y2 colour thresholds + capture YREF/RREF: align the rate colour to the burn colour so we pin yellow/red without theme constants (task 3.4)
+yref=$(brun $((NOWB+9000)) $((NOWB-600)) 30 40 sYel)   # cur40→rate remaining60=YELLOW; tte=60·600/10=3600s=60m (>30m)=YELLOW
+rref=$(brun $((NOWB+9000)) $((NOWB-600)) 70 80 sRed)   # cur80→rate remaining20=RED;    tte=20·600/10=1200s=20m (≤30m)=RED
+YREF=$(printf '%s' "$yref" | bcode); RATEY=$(printf '%s' "$yref" | rcode)
+RREF=$(printf '%s' "$rref" | bcode); RATER=$(printf '%s' "$rref" | rcode)
+ybad=0
+[ "$(printf '%s' "$yref" | hasarrow)" = yes ] || { echo "  ★ FAIL Y2 >30m scenario hid the alarm"; ybad=1; }
+[ "$(printf '%s' "$rref" | hasarrow)" = yes ] || { echo "  ★ FAIL Y2 ≤30m scenario hid the alarm"; ybad=1; }
+{ [ -n "$YREF" ] && [ "$YREF" = "$RATEY" ]; } || { echo "  ★ FAIL Y2 >30m burn not yellow (burn=$YREF rate=$RATEY)"; ybad=1; }
+{ [ -n "$RREF" ] && [ "$RREF" = "$RATER" ]; } || { echo "  ★ FAIL Y2 ≤30m burn not red (burn=$RREF rate=$RATER)"; ybad=1; }
+[ "$YREF" != "$RREF" ] || { echo "  ★ FAIL Y2 yellow/red colour identical ($YREF)"; ybad=1; }
+[ "$ybad" -eq 0 ] && echo "  Y2 >30m yellow / ≤30m red (burn colour = same-tier rate colour) OK" || fail=1
+
+# Y3 exact 30m/31m boundary (spec example): dp large + Δt large so %d truncation absorbs ≤2s clock skew (task 3.4)
+y3a=$(brun $((NOWB+9000)) $((NOWB-4200)) 0 70 s30)    # rem30, tte=30·4200/70=1800s=30m → red, text ↘30m
+y3b=$(brun $((NOWB+9000)) $((NOWB-4140)) 0 69 s31)    # rem31, tte=31·4140/69=1860s=31m → yellow, text ↘31m
+y3bad=0
+case "$(printf '%s' "$y3a" | strip)" in *"↘30m"*) ;; *) echo "  ★ FAIL Y3 expected ↘30m: [$(printf '%s' "$y3a" | strip)]"; y3bad=1 ;; esac
+case "$(printf '%s' "$y3b" | strip)" in *"↘31m"*) ;; *) echo "  ★ FAIL Y3 expected ↘31m: [$(printf '%s' "$y3b" | strip)]"; y3bad=1 ;; esac
+[ "$(printf '%s' "$y3a" | bcode)" = "$RREF" ] || { echo "  ★ FAIL Y3 30m not red"; y3bad=1; }
+[ "$(printf '%s' "$y3b" | bcode)" = "$YREF" ] || { echo "  ★ FAIL Y3 31m not yellow"; y3bad=1; }
+[ "$y3bad" -eq 0 ] && echo "  Y3 boundary ↘30m red / ↘31m yellow OK" || fail=1
+
+# Y4 end-to-end result matrix (balanced default), 6 rows → hidden / yellow / red (task 3.7)
+mbad=0
+mrow() { # $1=label $2=reset $3=old_ts $4=old_u $5=cur_u $6=want(hidden|yellow|red)
+  local o a; o=$(brun "$2" "$3" "$4" "$5" "mx$1"); a=$(printf '%s' "$o" | hasarrow)
+  if [ "$6" = hidden ]; then
+    [ "$a" = no ] || { echo "  ★ FAIL Y4[$1] expected hidden, got [$(printf '%s' "$o" | strip)]"; mbad=1; }
+  else
+    [ "$a" = yes ] || { echo "  ★ FAIL Y4[$1] expected $6 shown, got hidden"; mbad=1; return; }
+    local c; c=$(printf '%s' "$o" | bcode)
+    if [ "$6" = yellow ]; then [ "$c" = "$YREF" ] || { echo "  ★ FAIL Y4[$1] not yellow (code=$c)"; mbad=1; }
+    else [ "$c" = "$RREF" ] || { echo "  ★ FAIL Y4[$1] not red (code=$c)"; mbad=1; }; fi
+  fi
+}
+mrow 1 $((NOWB+7800)) $((NOWB-3600))  8 10 hidden   # 90% rem, slow burn, exhaust ~45h ≫ 2H10m reset → before-reset gate fails
+mrow 2 $((NOWB+1800)) $((NOWB-3600)) 40 50 hidden   # 50% rem, tte 5h ≫ 30m reset → hidden
+mrow 3 $((NOWB+7200)) $((NOWB-3600)) 70 70 hidden   # flat (slope 0) → slope gate fails
+mrow 4 $((NOWB+7800)) $((NOWB-3600)) 33 58 yellow   # 42% rem, tte 1H40m < reset, within balanced ceiling, >30m → yellow
+mrow 5 $((NOWB+7200)) $((NOWB-600))  70 80 red      # 20% rem, tte 20m ≤30m → red
+mrow 6 $((NOWB+7200)) $((NOWB-60))    6 10 red      # 90% rem but bursting, tte ~22m ≤30m → red
+[ "$mbad" -eq 0 ] && echo "  Y4 end-to-end matrix (hidden×3 / yellow / red×2) OK" || fail=1
+
+# Y5 configurable sensitivity knob: same projection, three levels differ (task 3.6)
+sbad=0
+c60=$(brunV bcons $((NOWB+9000))  $((NOWB-600))  30 40 | hasarrow)   # 60m: conservative (≤30m) → hidden
+b60=$(brun        $((NOWB+9000))  $((NOWB-600))  30 40 | hasarrow)   # 60m: balanced default → shown
+s60=$(brunV bsens $((NOWB+9000))  $((NOWB-600))  30 40 | hasarrow)   # 60m: sensitive → shown
+b120=$(brun        $((NOWB+14400)) $((NOWB-1200)) 30 40 | hasarrow)  # 120m: balanced (>~90m+) → hidden
+s120=$(brunV bsens $((NOWB+14400)) $((NOWB-1200)) 30 40 | hasarrow)  # 120m: sensitive (before reset) → shown
+c25=$(brunV bcons $((NOWB+9000))  $((NOWB-750))  70 80 | hasarrow)   # 25m: conservative (≤30m) → shown
+[ "$c60" = no ]  || { echo "  ★ FAIL Y5 conservative 60m should hide"; sbad=1; }
+[ "$b60" = yes ] || { echo "  ★ FAIL Y5 balanced 60m should show"; sbad=1; }
+[ "$s60" = yes ] || { echo "  ★ FAIL Y5 sensitive 60m should show"; sbad=1; }
+[ "$b120" = no ] || { echo "  ★ FAIL Y5 balanced 120m should hide"; sbad=1; }
+[ "$s120" = yes ] || { echo "  ★ FAIL Y5 sensitive 120m should show"; sbad=1; }
+[ "$c25" = yes ] || { echo "  ★ FAIL Y5 conservative 25m should show"; sbad=1; }
+[ "$sbad" -eq 0 ] && echo "  Y5 conservative/balanced/sensitive gate the same projection differently OK" || fail=1
+
+# Y6 depletion-only direction: a rising remaining budget (slope<0) emits no glyph at all (task 3.5)
+case "$(brun $((NOWB+9000)) $((NOWB-1800)) 50 40 sDep | strip)" in
+  *↘*|*↗*) echo "  ★ FAIL Y6 falling/rising emitted an indicator"; fail=1 ;;
+  *) echo "  Y6 rising remaining (slope<0) → no ↘/↗ glyph OK" ;;
+esac
+
+# Y7 insufficient samples: only the current frame's own sample (no seed) → <2 in-horizon → no slope, no alarm (task 3.2)
+rm -f "$SLC"
+case "$(run 200 "$(rsj 58 "$((NOWB+9000))" sOne)" | strip)" in
+  *↘*) echo "  ★ FAIL Y7 single sample produced an alarm"; fail=1 ;;
+  *) echo "  Y7 <2 in-horizon samples → no alarm OK" ;; esac
+
+# Y8 bounded retention: 9 frames each append one sample → window capped at 5 P-lines (task 3.1)
+rm -f "$SLC"; RB=$((NOWB+9000))
+for i in 1 2 3 4 5 6 7 8 9; do run 200 "$(rsj $((10+i)) "$RB" sRet)" >/dev/null; done
+pc=$(grep -c "^P $RB " "$SLC" 2>/dev/null); pc=${pc:-0}
+[ "$pc" -eq 5 ] && echo "  Y8 9 frames → series bounded to 5 samples/window OK" || { echo "  ★ FAIL Y8 expected 5 P-lines, got $pc"; fail=1; }
+
+# Y9 expired-window pruning: a sample whose resets_at ≤ now is dropped on rewrite; the live window's sample survives (task 3.1)
+PASTR=$((NOWB-100)); RL=$((NOWB+9000))
+printf 'P %s %s 50\nP %s %s 60\n' "$PASTR" "$((NOWB-200))" "$RL" "$((NOWB-50))" > "$SLC"
+run 200 "$(rsj 30 "$RL" sPrune)" >/dev/null
+c9=$(cat "$SLC" 2>/dev/null); y9bad=0
+case "$c9" in *"P $PASTR "*) echo "  ★ FAIL Y9 expired-window sample not pruned: [$c9]"; y9bad=1 ;; esac
+case "$c9" in *"P $RL "*) ;; *) echo "  ★ FAIL Y9 live-window sample wrongly dropped: [$c9]"; y9bad=1 ;; esac
+[ "$y9bad" -eq 0 ] && echo "  Y9 expired-window samples pruned, live kept OK" || fail=1
+
+# Y10 sampled quantity is the reconciled authority, not the frozen report (task 3.1)
+RA=$((NOWB+9000)); OLDA=$((NOWB-5000)); RECA=$((NOWB-100))
+printf 'S sRec %s\nS sOldF %s\nW %s 75 %s\n' "$RECA" "$OLDA" "$RA" "$RECA" > "$SLC"   # authority 75 set by a RECENT session
+run 200 "$(rsj 40 "$RA" sOldF)" >/dev/null   # an OLDER frozen session reports 40 but must adopt 75 → the sample records 75
+case "$(grep "^P $RA " "$SLC")" in
+  *" 75") echo "  Y10 sample records reconciled authority (75), not frozen report (40) OK" ;;
+  *" 40") echo "  ★ FAIL Y10 sample recorded the frozen 40"; fail=1 ;;
+  *) echo "  ★ FAIL Y10 no/odd P sample: [$(grep "^P $RA " "$SLC")]"; fail=1 ;; esac
+
+# Y11 the alarm is width-bounded like every other left segment — burn-active frame stays single-line, never overflows (task 3.3)
+printf 'P %s %s 33\n' "$((NOWB+9000))" "$((NOWB-3600))" > "$SLC"
+JBW=$(rsj 58 "$((NOWB+9000))" sBW); wbad=0
+for cols in 60 90 120 160; do
+  o=$(printf '%s' "$JBW" | env COLUMNS="$cols" HOME="$FAKE_HOME" bash "$SL/statusline-command.sh")
+  nl=$(printf '%s' "$o" | grep -c ''); w=$(printf '%s' "$o" | vw)
+  [ "$nl" -eq 1 ]                 || { echo "  ★ FAIL Y11 C=$cols not single line: $nl"; wbad=1; }
+  [ "$w" -le $((cols-EDGE_PAD)) ] || { echo "  ★ FAIL Y11 C=$cols overflow width=$w > $((cols-EDGE_PAD))"; wbad=1; }
+done
+[ "$wbad" -eq 0 ] && echo "  Y11 burn-active frame single-line + width-bounded 60..160 OK" || fail=1
+rm -f "$SLC" "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 

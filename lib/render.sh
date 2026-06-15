@@ -2,7 +2,7 @@
 # shellcheck disable=SC2154  # globals read here are assigned by the sibling collect.sh (see READS header); lint via: shellcheck -x statusline-command.sh
 # render.sh — render output: palette + single-line assembly (left = path/resources/time, right = git/session, right-aligned)
 #
-# READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD) + every global written by collect.sh
+# READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD BURN_SENS) + every global written by collect.sh
 # WRITES: stdout (single colored status line). The palette (WH MD GR…TRK) must be global so it's reachable across functions;
 #         the assembly working variables (parts parts2 _pct _ttl _line bar display_dir git_seg…)
 #         are deliberately not local (this module is the terminal stage, nobody reads them afterward); external code should not depend on them
@@ -106,7 +106,7 @@ ttl() {   # $1=resets_at (Unix seconds) → _ttl="1D3H"/"2H2m"/"5m"; non-numeric
     fmt_dur "$s"; _ttl="$_dur"
 }
 
-add_rate() {   # $1=used% $2=resets_at → appends "2H2m 76%" to parts (time in white, % colored: >75 green, >50 yellow, >25 orange, <=25 red)
+add_rate() {   # $1=used% $2=resets_at $3=burn indicator (optional, appended inside the segment) → appends "2H2m 76% ↘33m" to parts
     fmt_pct "$1"
     [ -n "$_pct" ] || return 0
     local r=$((100 - _pct)) color
@@ -116,7 +116,27 @@ add_rate() {   # $1=used% $2=resets_at → appends "2H2m 76%" to parts (time in 
     elif [ "$r" -gt 25 ]; then color="$OG"
     else color="$RD"; fi
     ttl "$2"
-    parts+=("${_ttl:+${WH}${_ttl}${RS} }${color}${r}%${RS}")
+    parts+=("${_ttl:+${WH}${_ttl}${RS} }${color}${r}%${RS}${3:+ $3}")   # burn indicator (if any) rides inside the 5h segment, adjacent to %
+}
+
+# Rate-limit burn-projection alarm (5h window). reconcile_rates' awk emits burn_tte = projected seconds-to-exhaust, ALREADY gated on
+# slope>0 AND projected-exhaust-strictly-before-reset (both mandatory; they need now/resets_at, so they live in awk). Here we apply only
+# the config sensitivity ceiling and the colour threshold, then render "↘<dur>". Only the depletion glyph ↘ is ever emitted — a falling
+# used% (slope<0) yields an empty burn_tte upstream and never reaches here. Empty/non-numeric burn_tte (no slope, gate failed, sync off)
+# → segment stays silent, matching the statusline's "show only when abnormal" rule. ↘ folds to 1 cell in vis_width, so the width math holds.
+build_burn() {   # uses globals burn_tte + config BURN_SENS → _burn ("" when hidden)
+    _burn=""
+    case "${burn_tte:-}" in ''|*[!0-9]*) return 0 ;; esac
+    local tte=$burn_tte ceil
+    case "${BURN_SENS:-balanced}" in
+        conservative) ceil=1800 ;;     # show only when ≤30m to exhaust
+        sensitive)    ceil=$tte ;;     # no extra ceiling beyond the mandatory before-reset gate → always show
+        *)            ceil=6300 ;;     # balanced default (~90m+; the end-to-end result matrix pins it within [101,120) min)
+    esac
+    [ "$tte" -le "$ceil" ] || return 0
+    fmt_dur "$tte"
+    if [ "$tte" -le 1800 ]; then _burn="${RD}↘${_dur}${RS}"   # ≤30m: imminent → red
+    else _burn="${YL}↘${_dur}${RS}"; fi                       # >30m: comfortable approach → yellow
 }
 
 
@@ -206,8 +226,10 @@ build_left() {
         parts+=("$tok_part")
     fi
 
-    # Rate limit: reset countdown + remaining %
-    add_rate "$five_h" "$five_reset"
+    # Rate limit: reset countdown + remaining %. The 5h segment also carries the burn-projection alarm (↘<ttl>) when the budget
+    # is on track to run dry before the window resets; build_burn returns "" otherwise so the common case adds nothing.
+    build_burn
+    add_rate "$five_h" "$five_reset" "$_burn"
     add_rate "$seven_d" "$seven_reset"
 
     # Last-message time: the per-session file written by the UserPromptSubmit hook (not the current time).
@@ -303,7 +325,7 @@ vis_width() {   # $1=string with color codes → _w=visible column width
         s=${s#*$'\033['}; s=${s#*m}     # an SGR code always ends with m, the shortest match eats exactly one code
     done
     t+=$s
-    t=${t//│/N}; t=${t//·/N}; t=${t//…/N}; t=${t//⊂/N}   # fold the narrow multibyte chars we emit (junction │ · … and the token ⊂ marker) back to 1 byte
+    t=${t//│/N}; t=${t//·/N}; t=${t//…/N}; t=${t//⊂/N}; t=${t//↘/N}   # fold the narrow multibyte chars we emit (junction │ · … ⊂ token, ↘ burn) back to 1 byte
     na=${t//[$'\001'-$'\177']/}         # strip all ASCII, leaving only non-ASCII bytes
     _w=$(( ${#t} - ${#na} + (${#na} * 2 + 2) / 3 ))
 }

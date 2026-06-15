@@ -29,6 +29,12 @@ RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a 
                    # false → trust only this session's (possibly frozen) value. See reconcile_rates in lib/collect.sh for the full rule.
 RL_REG_TTL=604800  # session-registry retention (sec): drop a session's first-seen record once it is older than the longest reset window
                    # (7d) — it can no longer be the authority for any live window. Authority VALUES persist independently of this.
+BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SYNC=true — it samples the reconciled authority
+                   # used%, so with sync off there is no series to project). Three levels: conservative (alarm only when ≤30m to
+                   # exhaust) / balanced (default, alarm when projected exhaust is ≤~90m+ away) / sensitive (alarm whenever exhaust
+                   # is projected before the window resets). ALL levels still require a positive burn slope AND a projected exhaust
+                   # strictly before the window's reset; otherwise the segment stays hidden (the "show only when abnormal" rule).
+                   # The alarm shows "↘<time-to-exhaust>" next to the 5h quota, coloured yellow >30m / red ≤30m.
 # last-message age coloring — the time segment shows "HH:MM (Δ)" where Δ = how long since the last prompt; its COLOR signals
 # prompt-cache freshness, NOT just elapsed time. Why these two thresholds (and not arbitrary ones): Anthropic's prompt cache TTL
 # is idle-based and slides on every cache hit — it survives as long as you keep interacting, and only dies after going idle past
