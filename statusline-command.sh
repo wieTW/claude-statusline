@@ -42,8 +42,9 @@ BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SY
 # TTLs are the real breakpoints: <5m the (default) cache is still warm → continuing is near-free; 5m–1h the 5m cache has expired,
 # the 1h one may still hold → next turn re-writes cache; ≥1h even the extended cache is gone → continuing costs a full cache write,
 # same as a fresh session (consider starting one). Δ under 1 min is hidden (just "HH:MM"). The timestamp itself stays dim; only Δ colors.
-# We deliberately show the honest elapsed time as text and let colour carry the cache meaning — the script can't read CC's actual
-# cache TTL/state (no such field exists anywhere it can reach), so it must not assert a literal "cache cold"; the duration is a fact, the colour is the read.
+# We deliberately show the honest elapsed time as text and let colour carry the cache meaning — the script CAN read CC's structured
+# usage fields (current_usage / context_window: used%, exceeds_200k_tokens — the ctx meter keys on these), but none of them expose the
+# actual prompt-cache TTL/state, so the colour stays an idle-time INFERENCE, never a literal "cache cold" assertion; the duration is a fact, the colour is the read.
 LASTMSG_WARN=300   # Δ ≥ this (sec) → yellow: default 5-min prompt cache has gone idle-cold (5 min)
 LASTMSG_STALE=3600 # Δ ≥ this (sec) → red: even the 1-hour extended cache is gone; continuing pays a full cache write (1 h)
 

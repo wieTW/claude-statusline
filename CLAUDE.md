@@ -39,10 +39,12 @@ It is not auto-installed — wire it up by pointing the `statusLine.command` set
 `~/.claude/settings.json`) at the script's absolute path. Reference guide:
 `github.com/Raymondhou0917/claude-code-resources` starter-kit `06-statusline.md`.
 
-The line has two halves: a **left** part (path · model · effort · thinking · ctx bar ·
-token usage · rate-limit countdowns · last-message time) and a **right** part (git ·
-worktree · session name), right-aligned to the terminal edge with a `│` junction that
-appears only when the two halves nearly touch.
+The line has two halves: a **left** part (path · model · effort · thinking · ctx bar +
+200k cliff marker · token usage · rate-limit countdowns + burn-projection alarm ·
+last-message time with cache-age delta) and a **right** part (git · worktree · session name),
+right-aligned to the terminal edge with a `│` junction that appears only when the two halves
+nearly touch. When the terminal is too narrow, the line degrades through a fixed 14-step
+sacrifice order (shrink before drop; path + ctx% never dropped) so it never wraps.
 
 ## Commands
 
@@ -58,8 +60,11 @@ printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M 
 ```
 
 `tests/run-tests.sh` is one monolithic suite — each check prints a labeled section (`A`,
-`A2`, `B`…`U`, plus `G` perf at the end; `T` = rate-sync rule matrix, `U` = last-msg age);
-a failure prints `★ FAIL` and the script exits 1. There is **no
+`A2`, `B`… through the alphabet, plus `G` perf at the very end). Key feature sections:
+`T`/`T2` = rate-sync rule matrix + concurrency, `U` = last-msg age (incl. cross-day),
+`V` = parse_input positional sentinel, `W`/`X`/`X2` = token display/dedup/prune,
+`CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `Z`/`Z1`–`Z5` =
+adaptive-layout 14-step degrade. A failure prints `★ FAIL` and the script exits 1. There is **no
 per-test flag**; to isolate a case, read its labeled output or temporarily edit the
 script. The harness is self-locating (`SL=$(cd "$(dirname "$0")/.." …)`) and uses a
 fresh `mktemp` work dir + fake `$HOME`, so it survives directory renames and tmp clears.
@@ -76,9 +81,10 @@ modules. The flow is ordered to overlap I/O:
 start_theme_job → start_width_job   # background jobs kicked off first (don't touch stdin)
 parse_input                         # main shell blocks parsing the stdin JSON (the ONLY stdin reader)
 start_tokens_job                    # fire-and-forget detached token re-sum for the NEXT frame (never blocks this one)
+reconcile_start                     # cross-session rate-limit sync as a background FD job — overlaps the git stage below (see RL_SYNC)
 collect_status                      # git×3 + effort scan, concurrent, blocks on the slowest
 read_theme / read_width             # jobs already done → zero wait
-reconcile_rates                     # cross-session rate-limit sync (newest-session authority; see RL_SYNC)
+reconcile_read                      # reap the reconcile FD: adopt the freshest used% any session saw + the burn-projection time-to-exhaust
 read_tokens                         # read this session's cached token totals (tiny file; heavy sum runs only in the bg job)
 load_palette → build_left → build_right → render_line
 ```
@@ -102,27 +108,70 @@ A `read <&3` blocks until that job hits EOF — **the read IS the sync point**, 
 temp files. Jobs are independent, so wall-clock ≈ the single slowest job (~20ms), not the
 sum. Adding a new collected field = add a job + its FD read, keeping read order aligned.
 
-### Right-align / width algorithm (`render_line`)
+### Right-align / adaptive-layout width algorithm (`render_line` + `degrade_layout`)
 
-Tiered, from roomiest to tightest: plain-whitespace gap (no `│`) → insert `│` junction →
-head-truncate the **right** part (keep git, cut the session-name tail with `…`) → drop the
-right part and truncate the **left**. Goal: the line **never exceeds the drawable width**
-(`term_cols - EDGE_PAD`) and gets hard-cut/wrapped by the terminal. `vis_width` computes
-visible columns by stripping SGR codes then estimating cells; `trunc_head` uses perl for
+Goal: the line **never exceeds the drawable width** (`term_cols - EDGE_PAD`) and so never
+gets hard-cut/wrapped by the terminal. `render_line` is tiered from roomiest to tightest:
+plain-whitespace gap (no `│`) → insert `│` junction → … . When even the junction tier
+overflows, it walks **`degrade_layout` over a fixed 14-step sacrifice order** — applying
+each step only when the prior step still overflows (earliest sufficient step), so a wide
+terminal never enters the ladder and renders unchanged.
+
+The principle is **shrink/truncate before drop; the core (path + ctx%) is never dropped**.
+The 14 steps, widest→narrowest: 1 gap→junction (the junction tier) · 2 drop git diffstat ·
+3 drop worktree · 4 ctx bar→plain `N%` · 5 drop git branch · 6 drop last-msg · 7 drop 7d ·
+8 drop token (session+subagent as one unit) · 9 model→first-word compact · 10 drop model ·
+11 truncate session with `…` (the right-truncation tier, keeps git) · 12 drop session ·
+13 5h→remaining-% compact (**keeps any burn alarm**, drops only the reset countdown) ·
+14 core only = path + ctx%, head-truncating the **path** (not the %) so the percentage
+survives a 1–2 column terminal. Segments with two forms shrink at their step before any
+later drop (4 ctx, 9 model, 11 session, 13 5h). `vis_width` computes visible columns by
+folding the narrow multibyte glyphs we emit (`│ · … ⊂ ↘ ⚑`) to 1 byte then estimating cells
+(byte-count overestimate, safe direction — only shrinks the gap); `trunc_head` uses perl for
 correct wide-char truncation with a pure-bash degraded fallback when perl is absent.
+Sections `Z`/`Z1`–`Z5` cover the invariant, the per-segment compact forms, the monotone order,
+shrink-before-drop, and core survival at pathological widths.
 
-### Cross-session rate-limit sync (`reconcile_rates`)
+### Cross-session rate-limit sync (`reconcile_start` / `reconcile_read` / `_reconcile_core`)
 
 CC freezes `rate_limits` at each session's **start snapshot** (upstream limitation): an old
-session keeps showing a stale used%, only the countdown moves. `reconcile_rates` (in
-`lib/collect.sh`, gated by `RL_SYNC`) fixes this via a shared cache at
-`~/.claude/sl-ratelimit-cache` — an `awk` pass over two line types: `S <session_id>
-<first_seen>` (a registry of each session's first render time) and `W <resets_at> <used>
-<auth_first_seen>` (per reset-window authority value). **Rule: the newest session is the
-authority** — a window's used% is overwritten only by a report whose session's `first_seen`
-is newer-or-equal, so a frozen old session can't override a fresher one in either direction
-(adopt a climb, honour a genuine cap-raise drop). `RL_REG_TTL` prunes registry records older
-than the longest reset window. Test section `T` covers the full rule matrix.
+session keeps showing a stale used%, only the countdown moves. Reconcile (in `lib/collect.sh`,
+gated by `RL_SYNC`) fixes this via a shared cache at `~/.claude/sl-ratelimit-cache` — an `awk`
+pass over three line types: `S <session_id> <first_seen>` (a registry of each session's first
+render time), `W <resets_at> <used> <auth_first_seen>` (per reset-window authority value), and
+`P <resets_at> <timestamp> <used>` (bounded burn-projection sample series; see below).
+**Rule: the newest session is the authority** — a window's used% is overwritten only by a
+report whose session's `first_seen` is newer-or-equal, so a frozen old session can't override
+a fresher one in either direction (adopt a climb, honour a genuine cap-raise drop). `RL_REG_TTL`
+prunes registry records older than the longest reset window. Test section `T` covers the full
+rule matrix.
+
+**Backgrounded + serialized.** `reconcile_start` launches `_reconcile_core` as a background FD
+job (`exec 9< <(… </dev/null)`) overlapping the git stage; `reconcile_read` reaps the FD and
+applies numeric adoption guards. The whole read+awk+mv is serialized by an **`mkdir` spin-lock**
+(`<cache>.lock` — stock macOS has no `flock`; `mkdir` is the POSIX-atomic primitive) with
+bounded retry + stale-steal (`RL_LOCK_TRIES`/`RL_LOCK_WAIT`/`RL_LOCK_STALE`, defined in
+collect.sh), so concurrent renders don't lose updates. Two safe-degradation paths, both still
+**adopting the value they READ** (never their own frozen report): lock not acquired → skip the
+`mv`, run awk read-only; **empty `session_id`** → skip the lock and `mv` entirely (an anonymous
+frame can't be ranked, so it never does a destructive rewrite). Any awk/mv/lock failure leaves
+the emitted fields empty → `reconcile_read`'s guards keep this frame's own parse_input values
+(never `set -e`). Section `T2` covers the concurrency, lock-contention safe-skip, and empty-sid path.
+
+### Rate-limit burn-projection alarm (`_reconcile_core` awk → `build_burn`)
+
+The 5h window samples its **adopted** used% (the reconciled authority, not the frozen
+snapshot) into the `P` series each frame, keeping ≤5 samples over a ~3h horizon. The awk
+computes a **two-point slope** (oldest→newest in-horizon sample) and emits `burn_tte` =
+seconds-to-exhaust only when **both mandatory gates** pass: the slope is positive (used% is
+climbing) AND extrapolating it hits 100% strictly **before** `resets_at`. (Falling used%
+→ empty `burn_tte` → nothing shown; only the depletion glyph `↘` is ever emitted.) `build_burn`
+in render.sh then applies the `BURN_SENS` sensitivity ceiling and the colour threshold,
+rendering `↘<time-to-exhaust>` next to the 5h quota — yellow `>30m`, red `≤30m`. Otherwise the
+segment stays silent (the statusline's "show only when abnormal" rule). The alarm rides inside
+the 5h segment and is **retained** when that segment collapses to its compact form (degrade
+step 13). Section `Y` covers the result matrix, thresholds, the depletion-only direction,
+the gates, the bounded sample retention, and the sensitivity knob.
 
 ### Token usage (`start_tokens_job` / `read_tokens` / `tokens_update`)
 
@@ -141,6 +190,38 @@ repeating the same message-level usage, so a naive per-row sum over-counts (~10x
 logs). The rewrite is single-flighted by an `mkdir` lock (stale-stolen after 30s) and prunes
 `T`-lines whose `main_mtime` is older than `RL_REG_TTL` so the file can't grow unbounded.
 Test sections `W` (display) / `X` (dedup) / `X2` (prune) cover it.
+
+### Context meter (`build_left`, ctx segment)
+
+The ctx% turns red only near the model's context limit, on a **budget-aware** threshold —
+NOT a fixed 80%. A 1M-context model (display name carries the `1M context` / `(1M)` marker,
+the same signal the model-name compaction keys on) has ~5x the budget, so 80% there is still
+huge headroom and would falsely flag red; the threshold is **80% for 200k-class models, 92%
+for 1M-context models** (keeps the spec's worked 85% example normal-coloured while still
+warning as the 1M window nears full). Separately, a **200k cost/cache cliff marker** `⚑` is
+appended iff the upstream `exceeds_200k_tokens` flag is true. The marker is **decoupled** from
+the percentage colour — driven solely by the flag, independent of used% or which budget the
+colour threshold picked (a normal-coloured 1M frame can still show the cliff). Section `CTX`
+covers the budget-aware threshold and the decoupled marker.
+
+### Last-message age (`build_left`, time segment)
+
+Shows the last user prompt as `HH:MM` plus a parenthesized delta `(Δ)` once the age is ≥60s;
+the timestamp text is dim and the **delta's colour** signals prompt-cache freshness via the
+two idle tiers (dim < `LASTMSG_WARN` ≤ yellow < `LASTMSG_STALE` ≤ red). A sub-minute age hides
+the delta. The displayed duration is the honest elapsed time; only the colour asserts the
+cache read (the script can't see CC's real cache TTL). Negative ages (clock skew) clamp to 0.
+**Cross-day correctness:** `lm_epoch` is UTC but the stored `HH:MM` label is LOCAL, so a
+prior-day prompt would read as today. When `lm_epoch` and `now` fall on **different LOCAL
+calendar days** the timestamp is prefixed with the date (`MM-DD HH:MM`). The test is a
+calendar-day difference, **not a fixed 24h age** — a `23:50` prompt rendered at `00:10` next
+day is cross-day at Δ=20m and still gets the prefix (the spec's normative "cross-midnight
+under one hour" scenario; this supersedes design.md/tasks.md 6.5's stale "Δ≥1h gate" wording —
+spec.md is the authority). The date is resolved with `date -r <epoch>` (BSD/macOS, DST-correct,
+no manual offset) and the fork is **gated behind the Δ≥60s branch** so the common sub-minute
+(unambiguously same-day) case stays fork-free. A legacy file with no numeric epoch tail is
+shown verbatim (backward compatible). Section `U` covers the tiers, sub-minute hide, legacy
+format, and cross-day prefix.
 
 ## Hard rules — violating these reintroduces fixed bugs
 
@@ -182,7 +263,17 @@ Top of `statusline-command.sh`: `CTX_BAR` (gradient ctx bar vs plain text), `NOR
 palette), `RIGHT_ALIGN`, `EDGE_PAD` (drawable-width correction; bump if a CC build
 truncates the right edge again), `JGAP` (min gap before a `│` junction is inserted),
 `RL_SYNC` (cross-session rate-limit sync on/off; see above), `RL_REG_TTL` (session-registry
-retention in sec, default 7d), and the last-message age tiers `LASTMSG_WARN` (Δ ≥ this →
-yellow, default 300s = 5-min cache idle-cold) / `LASTMSG_STALE` (Δ ≥ this → red, default
-3600s = extended cache gone). The age colours track Anthropic's two prompt-cache TTLs (5 min
-/ 1 h); the timestamp is shown as honest elapsed text, only Δ carries the cache read.
+retention in sec, default 7d), `BURN_SENS` (rate-limit burn-projection alarm sensitivity —
+`conservative` alarms only ≤30m to exhaust / `balanced` default ~90m+ / `sensitive` alarms
+whenever exhaust is projected before reset; needs `RL_SYNC=true` since it samples the
+reconciled authority; all levels still require a positive slope AND projected exhaust before
+reset), and the last-message age tiers `LASTMSG_WARN` (Δ ≥ this → yellow, default 300s = 5-min
+cache idle-cold) / `LASTMSG_STALE` (Δ ≥ this → red, default 3600s = extended cache gone). The
+age colours track Anthropic's two prompt-cache TTLs (5 min / 1 h); the timestamp is shown as
+honest elapsed text, only Δ carries the cache read. (The reconcile `mkdir`-lock knobs
+`RL_LOCK_STALE` / `RL_LOCK_TRIES` / `RL_LOCK_WAIT` live at the top of `lib/collect.sh`, not the
+entry point — they tune the serialization spin-lock, not appearance.)
+
+The token segment shows **cumulative input+output only — cache tokens are excluded**, so the
+number is stable across prompt-cache churn and is NOT a measure of real spend (cache-write
+cost is deliberately not counted; see the Token usage section).

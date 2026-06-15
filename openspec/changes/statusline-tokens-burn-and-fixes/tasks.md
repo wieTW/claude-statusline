@@ -46,5 +46,5 @@
 
 ## 7. 收尾與驗證
 
-- [ ] 7.1 更新過時敘述:移除/修正 statusline-command.sh 內過時的「no such field exists」cache 註解(現已可由 current_usage 取得),並更新 CLAUDE.md 架構說明納入 token 段、燃燒投影、新增 config 旋鈕。行為:文件與實作一致。驗證:grep 確認舊敘述不存在、內容審查新段落齊全。
-- [ ] 7.2 全量 verify gate 與清理:通過 bash -n statusline-command.sh lib/collect.sh lib/render.sh、shellcheck -x statusline-command.sh、bash tests/run-tests.sh,並刪除 repo root 的 preview-*.html 討論草稿。行為:整體門檻通過、草稿不入庫。驗證:三命令皆 exit 0 且印 ALL CHECKS PASSED,ls preview-*.html 回報不存在。
+- [x] 7.1 更新過時敘述:移除/修正 statusline-command.sh 內過時的「no such field exists」cache 註解(現已可由 current_usage 取得),並更新 CLAUDE.md 架構說明納入 token 段、燃燒投影、新增 config 旋鈕。行為:文件與實作一致。驗證:grep 確認舊敘述不存在、內容審查新段落齊全。
+- [x] 7.2 全量 verify gate 與清理:通過 bash -n statusline-command.sh lib/collect.sh lib/render.sh、shellcheck -x statusline-command.sh、bash tests/run-tests.sh,並刪除 repo root 的 preview-*.html 討論草稿。行為:整體門檻通過、草稿不入庫。驗證:三命令皆 exit 0 且印 ALL CHECKS PASSED,ls preview-*.html 回報不存在。
