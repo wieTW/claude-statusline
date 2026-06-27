@@ -48,6 +48,11 @@ BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SY
 LASTMSG_WARN=300   # Δ ≥ this (sec) → yellow: default 5-min prompt cache has gone idle-cold (5 min)
 LASTMSG_STALE=3600 # Δ ≥ this (sec) → red: even the 1-hour extended cache is gone; continuing pays a full cache write (1 h)
 
+# RL_REG_TTL floor: registry retention MUST never be shorter than the longest reset window (604800s / 7d). A smaller value prunes a
+# still-alive session's S registry line, so next frame it re-ranks as NEW and seizes authority with its frozen used% (under-reporting —
+# the one direction the meter must never get wrong). Floor only (a larger value is kept); non-numeric/empty → 604800. One builtin test, no fork.
+case "$RL_REG_TTL" in ''|*[!0-9]*) RL_REG_TTL=604800 ;; *) [ "$RL_REG_TTL" -ge 604800 ] || RL_REG_TTL=604800 ;; esac
+
 case $0 in */*) SL_DIR=${0%/*} ;; *) SL_DIR=. ;; esac   # pure-bash dirname, saves a fork
 . "$SL_DIR/lib/collect.sh"
 . "$SL_DIR/lib/render.sh"

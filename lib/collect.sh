@@ -342,7 +342,7 @@ _reconcile_core() {
             tte=""                                                     # 5h burn projection — both mandatory gates applied here
             if (isnum(r5) && rc>=2 && pt1>pt0) {
                 dp=pu1-pu0; dt=pt1-pt0
-                if (dp>0) {                                             # slope-positive gate: used% must be climbing
+                if (dp>0 && dt>=60) {                                   # slope-positive gate + min-Δt gate: a sub-minute render burst (dt 1-2s) with a used% jump would otherwise project a false imminent alarm; 60 is inclusive & load-bearing (Y4 row 6 is a legit dt≈60 red)
                     rem=100-pu1; if (rem<0) rem=0
                     x=rem*dt/dp                                         # seconds-to-exhaust = remaining ÷ (slope per second)
                     if (now+0+x < r5+0) tte=sprintf("%d", x)           # before-reset gate: must run dry before the window rolls
@@ -355,7 +355,11 @@ _reconcile_core() {
     # skip the mv (leave the on-disk cache untouched), drop the temp, but still emit the adopted value computed above. This is the
     # safe-degradation path for both lock-contention and empty-sid, and it never errors out (no set -e).
     if [ "$have_lock" = 1 ] && [ -n "$session_id" ]; then
-        mv -f "$tmpfile" "$cache" 2>/dev/null
+        # Overwrite ONLY when the awk produced a non-empty temp (success). An awk failure leaves an empty/half temp; mv-ing it would
+        # wipe the cross-session authority other sessions persisted. rm cleans up the skip case (mv consumes the temp on success);
+        # the lock is released on BOTH paths so an awk-failure frame never leaks the lock dir.
+        [ -s "$tmpfile" ] && mv -f "$tmpfile" "$cache" 2>/dev/null
+        rm -f "$tmpfile" 2>/dev/null
         rmdir "$lock" 2>/dev/null
     else
         rm -f "$tmpfile" 2>/dev/null

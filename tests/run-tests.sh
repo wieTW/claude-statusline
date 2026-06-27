@@ -324,6 +324,17 @@ if grep -q "^W $RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T7 expired wi
 printf '%s 99\n' "$RT" > "$SLC"
 t8=$(run 120 "$(rsj 10 "$RT" sessZ)" | nocol)
 case "$t8" in *" 90%"*) echo "  T8 legacy 2-col line ignored → own 90% OK" ;; *" 1%"*) echo "  ★ FAIL T8 legacy line treated as authority (showed 1%): [$t8]"; fail=1 ;; *) echo "  ★ FAIL T8 expected 90%: [$t8]"; fail=1 ;; esac
+# T9 (1.3) RL_REG_TTL clamp: an undersized OR non-numeric RL_REG_TTL must be raised to the 604800 floor, so a still-alive old session's
+# registry (S) line is NOT pruned — pruning it makes that session re-rank as NEW next frame and seize authority with its frozen used%.
+t9bad=0; OLDF=$((NOW-18000))   # first_seen 5h ago, still well within the 7d window
+for ttl in 3600 abc; do
+  mkdir -p "$WORK/ttl$ttl/lib" && cp "$SL"/lib/*.sh "$WORK/ttl$ttl/lib/"
+  sed "s/^RL_REG_TTL=604800/RL_REG_TTL=$ttl/" "$SL/statusline-command.sh" > "$WORK/ttl$ttl/statusline-command.sh"
+  printf 'S sOldLive %s\nW %s 70 %s\n' "$OLDF" "$RT" "$OLDF" > "$SLC"
+  printf '%s' "$(rsj 70 "$RT" sOldLive)" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/ttl$ttl/statusline-command.sh" >/dev/null 2>&1
+  grep -q "^S sOldLive " "$SLC" 2>/dev/null || { echo "  ★ FAIL T9 RL_REG_TTL=$ttl pruned a live session's registry (clamp missing)"; t9bad=1; }
+done
+[ "$t9bad" -eq 0 ] && echo "  T9 undersized/non-numeric RL_REG_TTL clamped to 604800 floor (live registry kept) OK" || fail=1
 rm -f "$SLC"
 
 echo "── T2. RATE-SYNC CONCURRENCY: mkdir-lock serialises read+awk+mv (no lost-update), lock-contention safe-skip, empty-sid read-only, torn-cache survives"
@@ -422,6 +433,13 @@ T2C=$(grep -c 'reconcile_start\|reconcile_read' "$SL/lib/collect.sh")
 [ "$T2C" -ge 2 ] && echo "  T2.6 reconcile split into start/read FD-job pair OK" || { echo "  ★ FAIL T2.6 reconcile not backgrounded (reconcile_start/reconcile_read absent)"; fail=1; }
 # the bg reconcile job must redirect stdin from /dev/null (hard rule) — assert a reconcile procsub job carries </dev/null
 grep -q 'exec [0-9]*< <(_reconcile.*</dev/null)' "$SL/lib/collect.sh" && echo "  T2.6 reconcile bg job has </dev/null (stdin hard rule) OK" || { echo "  ★ FAIL T2.6 reconcile bg job missing </dev/null"; fail=1; }
+# T2.7 (1.1) mv guard: an awk-FAILURE frame (empty tmpfile) must NOT clobber the shared authority cache — a failing awk (here a PATH-shim
+# awk that exits 0 producing nothing) leaves an empty per-pid temp; the unconditional mv would wipe what prior sessions persisted.
+mkdir -p "$WORK/awkfail"; printf '#!/bin/sh\nexit 0\n' > "$WORK/awkfail/awk"; chmod +x "$WORK/awkfail/awk"
+printf 'S sKeep %s\nW %s 47 %s\n' "$RECENT" "$RT" "$RECENT" > "$SLC"; t27seed=$(cat "$SLC")
+printf '%s' "$(rsj 80 "$RT" sKeep)" | env PATH="$WORK/awkfail:$PATH" COLUMNS=120 HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >/dev/null 2>&1
+t27after=$(cat "$SLC" 2>/dev/null)
+[ "$t27seed" = "$t27after" ] && echo "  T2.7 awk-failure frame preserved the authority cache (mv guarded on empty tmpfile) OK" || { echo "  ★ FAIL T2.7 empty tmpfile clobbered the cache: before=[$t27seed] after=[$t27after]"; fail=1; }
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
 
 echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format verbatim, cross-day date prefix"
@@ -746,6 +764,15 @@ for cols in 60 90 120 160; do
   [ "$w" -le $((cols-EDGE_PAD)) ] || { echo "  ★ FAIL Y11 C=$cols overflow width=$w > $((cols-EDGE_PAD))"; wbad=1; }
 done
 [ "$wbad" -eq 0 ] && echo "  Y11 burn-active frame single-line + width-bounded 60..160 OK" || fail=1
+
+# Y12 minimum-Δt gate (dt>=60, inclusive): a sub-minute render burst with a used% jump must NOT project a false alarm; a genuine
+# 60s interval still alarms. brun's appended sample is at ~now, so dt = now - old_ts. (Y4 row 6's dt≈60 red alarm pins the inclusive boundary.)
+y12bad=0
+y12a=$(brun $((NOWB+9000)) $((NOWB-2))  40 70 sBurst | hasarrow)   # dt≈2s burst, used 40→70 — without the gate this falsely projects ↘
+[ "$y12a" = no ]  || { echo "  ★ FAIL Y12 sub-minute burst (dt<60) emitted a false alarm"; y12bad=1; }
+y12b=$(brun $((NOWB+9000)) $((NOWB-60)) 50 80 sEx60 | hasarrow)    # dt≈60s genuine interval, exhaust before reset → still shown (inclusive 60)
+[ "$y12b" = yes ] || { echo "  ★ FAIL Y12 dt=60 genuine interval wrongly suppressed"; y12bad=1; }
+[ "$y12bad" -eq 0 ] && echo "  Y12 dt>=60 gate: sub-minute burst hidden, genuine 60s shown OK" || fail=1
 rm -f "$SLC" "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
 
 echo "── Z. ADAPTIVE-LAYOUT: fixed 14-step sacrifice order — width invariant, segment forms/priority, monotonic drop order, shrink-before-drop, core always remains"

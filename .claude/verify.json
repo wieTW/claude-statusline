@@ -1,9 +1,9 @@
 {
-  "description": "新增 session 時長：collect.sh 解析 cost.total_duration_ms 為 dur_ms(#16)，render.sh 把它併進時間段取代絕對時鐘、保留 Δ→『1H15m (10m)』，無 dur 時 fallback 回舊時鐘；model 顯示壓成 Opus 4.8(1M)（去空格）。測試加 DUR 段＋V 段補 dur_ms 哨兵。",
+  "description": "statusline-correctness-guards：3 個顯示正確性守衛。(1) _reconcile_core 的 mv 加 [ -s tmpfile ] 守衛，awk 失敗產生空檔時不蓋掉跨 session 權威快取、且鎖照常釋放；(2) burn 投影 slope 閘由 dp>0 收緊為 dp>0 && dt>=60（inclusive、load-bearing），消除重繪爆發的假紅警報；(3) statusline-command.sh 把 RL_REG_TTL clamp 到 >=604800、非數值歸 604800，防止剪掉存活舊 session 的 S registry 行而少報用量。",
   "verify": [
     "bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh",
     "shellcheck -x statusline-command.sh",
-    "bash tests/run-tests.sh 2>&1 | tail -1"
+    "bash tests/run-tests.sh 2>&1 | grep -E 'T2\\.7|Y12|T9|ALL CHECKS PASSED'"
   ],
-  "pass": "三命令皆 exit 0；測試套件末行為『ALL CHECKS PASSED』（含新 DUR1-5/4a/4b 六項與 V 段『all 17 fields』），且無 ★ FAIL。"
+  "pass": "三命令皆 exit 0；測試套件印出 ALL CHECKS PASSED 且無 ★ FAIL，新增 T2.7（mv 守衛）、Y12（dt>=60 閘）、T9（RL_REG_TTL clamp）三斷言全綠，既有 T/T2/Y（含 Y4 row 6 dt≈60）不變。"
 }
