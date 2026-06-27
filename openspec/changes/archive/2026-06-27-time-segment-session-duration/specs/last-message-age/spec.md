@@ -1,10 +1,4 @@
-# last-message-age Specification
-
-## Purpose
-
-TBD - created by archiving change 'statusline-tokens-burn-and-fixes'. Update Purpose after archive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Last-message timestamp with cache-freshness-colored delta
 
@@ -73,18 +67,6 @@ This requirement MUST be implemented inside `build_left` in `lib/render.sh`, whi
 - **WHEN** the stored epoch is greater than `now` (clock skew between the prompt-writing host and the render)
 - **THEN** `lm_age` SHALL be clamped to 0, the delta SHALL be hidden, and the bare primary text SHALL be shown
 
-
-<!-- @trace
-source: time-segment-session-duration
-updated: 2026-06-27
-code:
-  - lib/collect.sh
-  - CLAUDE.md
-  - lib/render.sh
-  - tests/run-tests.sh
--->
-
----
 ### Requirement: Cross-day timestamps include the date
 
 WHEN the primary text is the `HH:MM` clock fallback (that is, `cost.total_duration_ms` is unavailable) AND the last prompt's local calendar day differs from the current local calendar day, the displayed clock MUST include the date so that a prior-day time is not misread as today; when the last prompt occurred on the current local calendar day, a bare `HH:MM` MUST be shown. The session-duration primary text is an elapsed span, not a wall clock, and MUST NOT receive a date prefix.
@@ -134,13 +116,3 @@ The calendar-day comparison MUST be computed from the local calendar date of `lm
 
 - **WHEN** `cost.total_duration_ms` is unavailable and the last-message file holds an older format whose trailing token is not an all-digit epoch (so `lm_epoch` resolves empty)
 - **THEN** the stored string SHALL be displayed verbatim as the dim primary text with no delta and no added date prefix, preserving backward compatibility for sessions whose file has not yet been rewritten
-
-<!-- @trace
-source: time-segment-session-duration
-updated: 2026-06-27
-code:
-  - lib/collect.sh
-  - CLAUDE.md
-  - lib/render.sh
-  - tests/run-tests.sh
--->

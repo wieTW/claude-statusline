@@ -1,9 +1,9 @@
 {
-  "description": "reconcile_rates 從『每視窗取最大 used%』改成『最新 session 為權威值』模型。CC 把 rate 凍在 session 開始快照,單純取 max 在 used% 真的下降時(額度被調高→%重算下來)會卡在過期高值、顯示假的低剩餘且不自癒。新規則:每視窗持久化(value, authority_first_seen)=最新(first_seen 最晚)session 報的值;更舊的 session 永不能覆蓋(擋 frozen-low 低報撞牆),更新的可雙向覆蓋(升=爬升、降=額度調高)。權威值持久化、不因 session 結束被清(used% 累積,過去高值在視窗 reset 前仍真;只有更新 session 能降它)。快取改兩種行:S <sid> <first_seen> / W <resets_at> <used> <auth_first_seen>;舊2欄格式行被丟棄(自動遷移)。新增 RL_REG_TTL=604800 config。顯示是倒數(0%=用完),安全方向=絕不多報剩餘。",
+  "description": "新增 session 時長：collect.sh 解析 cost.total_duration_ms 為 dur_ms(#16)，render.sh 把它併進時間段取代絕對時鐘、保留 Δ→『1H15m (10m)』，無 dur 時 fallback 回舊時鐘；model 顯示壓成 Opus 4.8(1M)（去空格）。測試加 DUR 段＋V 段補 dur_ms 哨兵。",
   "verify": [
-    "bash -n /Users/will/Downloads/macOS/claude-statusline/statusline-command.sh && bash -n /Users/will/Downloads/macOS/claude-statusline/lib/collect.sh && bash -n /Users/will/Downloads/macOS/claude-statusline/lib/render.sh",
-    "shellcheck -x /Users/will/Downloads/macOS/claude-statusline/statusline-command.sh",
-    "bash /Users/will/Downloads/macOS/claude-statusline/tests/run-tests.sh"
+    "bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh",
+    "shellcheck -x statusline-command.sh",
+    "bash tests/run-tests.sh 2>&1 | tail -1"
   ],
-  "pass": "三個 bash -n + shellcheck + 測試套件都 exit 0,印出 ALL CHECKS PASSED。新 T1..T8 全過:T1 更新 session 升值(climb)、T2 更新 session 降值(額度調高,顯示真值62%非卡死30%=這次的 bug)、T3 更舊 session 不能降權威(不低報撞牆)、T4 反轉防護(降後舊凍高 session 再 render 不會彈回)、T5 視窗隔離、T6 RL_SYNC=false 不碰快取、T7 過期視窗不寫入、T8 舊2欄格式被忽略。既有 A..S、U 全不變。"
+  "pass": "三命令皆 exit 0；測試套件末行為『ALL CHECKS PASSED』（含新 DUR1-5/4a/4b 六項與 V 段『all 17 fields』），且無 ★ FAIL。"
 }

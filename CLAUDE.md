@@ -41,7 +41,7 @@ It is not auto-installed — wire it up by pointing the `statusLine.command` set
 
 The line has two halves: a **left** part (path · model · effort · thinking · ctx bar +
 200k cliff marker · token usage · rate-limit countdowns + burn-projection alarm ·
-last-message time with cache-age delta) and a **right** part (git · worktree · session name),
+session duration + last-message cache-age delta) and a **right** part (git · worktree · session name),
 right-aligned to the terminal edge with a `│` junction that appears only when the two halves
 nearly touch. When the terminal is too narrow, the line degrades through a fixed 14-step
 sacrifice order (shrink before drop; path + ctx% never dropped) so it never wraps.
@@ -204,24 +204,35 @@ the percentage colour — driven solely by the flag, independent of used% or whi
 colour threshold picked (a normal-coloured 1M frame can still show the cliff). Section `CTX`
 covers the budget-aware threshold and the decoupled marker.
 
-### Last-message age (`build_left`, time segment)
+### Session duration + last-message age (`build_left`, time segment)
 
-Shows the last user prompt as `HH:MM` plus a parenthesized delta `(Δ)` once the age is ≥60s;
-the timestamp text is dim and the **delta's colour** signals prompt-cache freshness via the
-two idle tiers (dim < `LASTMSG_WARN` ≤ yellow < `LASTMSG_STALE` ≤ red). A sub-minute age hides
-the delta. The displayed duration is the honest elapsed time; only the colour asserts the
-cache read (the script can't see CC's real cache TTL). Negative ages (clock skew) clamp to 0.
-**Cross-day correctness:** `lm_epoch` is UTC but the stored `HH:MM` label is LOCAL, so a
+The time segment's **primary** text is the **session duration**: `cost.total_duration_ms`
+(upstream wall-clock since session start, idle included) divided to seconds and run through
+`fmt_dur` (`1H15m` / `40m` / `2D3H`), shown dim. It **replaces** the absolute last-prompt
+clock. A parenthesized delta `(Δ)` — how long since the last user prompt — is appended once
+that age is ≥60s, and the **delta's colour** signals prompt-cache freshness via the two idle
+tiers (dim < `LASTMSG_WARN` ≤ yellow < `LASTMSG_STALE` ≤ red). A sub-minute age hides the
+delta. Both texts are honest elapsed time; only the Δ colour asserts the cache read (the
+script can't see CC's real cache TTL). Negative ages (clock skew) clamp to 0.
+
+**Clock fallback (backward compatible):** when `cost.total_duration_ms` is absent (older CC,
+or a non-numeric value), the primary text falls back to the legacy `HH:MM` clock with the same
+`(Δ)`. This is the no-`cost` path that every test frame without a `cost` field takes, so the
+whole `U` section's clock behaviour is preserved unchanged. **Cross-day correctness applies to
+that clock fallback only:** `lm_epoch` is UTC but the stored `HH:MM` label is LOCAL, so a
 prior-day prompt would read as today. When `lm_epoch` and `now` fall on **different LOCAL
-calendar days** the timestamp is prefixed with the date (`MM-DD HH:MM`). The test is a
-calendar-day difference, **not a fixed 24h age** — a `23:50` prompt rendered at `00:10` next
-day is cross-day at Δ=20m and still gets the prefix (the spec's normative "cross-midnight
-under one hour" scenario; this supersedes design.md/tasks.md 6.5's stale "Δ≥1h gate" wording —
-spec.md is the authority). The date is resolved with `date -r <epoch>` (BSD/macOS, DST-correct,
-no manual offset) and the fork is **gated behind the Δ≥60s branch** so the common sub-minute
-(unambiguously same-day) case stays fork-free. A legacy file with no numeric epoch tail is
-shown verbatim (backward compatible). Section `U` covers the tiers, sub-minute hide, legacy
-format, and cross-day prefix.
+calendar days** the clock is prefixed with the date (`MM-DD HH:MM`). The test is a calendar-day
+difference, **not a fixed 24h age** — a `23:50` prompt rendered at `00:10` next day is cross-day
+at Δ=20m and still gets the prefix (the spec's normative "cross-midnight under one hour"
+scenario; this supersedes design.md/tasks.md 6.5's stale "Δ≥1h gate" wording — spec.md is the
+authority). The date is resolved with `date -r <epoch>` (BSD/macOS, DST-correct, no manual
+offset) and the fork is **gated behind the Δ≥60s + clock-fallback branch** so the common path
+(duration primary, or a sub-minute prompt) stays fork-free. The session-duration primary needs
+no cross-day fix — it is an elapsed span, not a wall clock. A legacy file with no numeric epoch
+tail is shown verbatim when it is the fallback (backward compatible). Section `U` covers the
+clock-fallback tiers, sub-minute hide, legacy format, and cross-day prefix; section `DUR`
+covers the duration primary, clock replacement, `fmt_dur` boundaries, the no-last-msg case, and
+the no-`cost` fallback.
 
 ## Hard rules — violating these reintroduces fixed bugs
 

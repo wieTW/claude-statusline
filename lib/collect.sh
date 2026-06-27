@@ -4,7 +4,7 @@
 #
 # READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
-#         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k now
+#         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms now
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
 #         session_tokens subagent_tokens burn_tte
 #
@@ -92,7 +92,8 @@ parse_input() {
         IFS= read -r session_id        # 13 session_id
         IFS= read -r transcript_path   # 14 transcript_path
         IFS= read -r exceeds_200k      # 15 exceeds_200k (upstream over-200k cost/cache cliff indicator)
-        IFS= read -r now               # 16 now
+        IFS= read -r dur_ms            # 16 dur_ms (cost.total_duration_ms — session wall-clock since start, ms)
+        IFS= read -r now               # 17 now
         # NOTE: this read order is positional one-for-one with the jq array below. Each line carries a "# NN field"
         # number that MUST match the same-numbered jq element. Inserting/removing a field means editing BOTH lists at
         # the same position. Section V (sentinel test) in tests/run-tests.sh asserts every field lands in its own global.
@@ -113,7 +114,8 @@ parse_input() {
           .transcript_path // "",                                            # 14 transcript_path
           (if .context_window.exceeds_200k_tokens == null then ""            # 15 exceeds_200k (over-200k cost/cache cliff flag; "" when absent)
              else .context_window.exceeds_200k_tokens end),
-          (now | floor)                                                      # 16 now
+          .cost.total_duration_ms // "",                                     # 16 dur_ms (session wall-clock since start, ms)
+          (now | floor)                                                      # 17 now
         ] | map(tostring | gsub("\n"; "\\n") | gsub("\r"; "\\r")
             | explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode | .[0:256])[]
     ' 2>/dev/null)

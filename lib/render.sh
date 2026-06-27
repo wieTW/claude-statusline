@@ -175,9 +175,9 @@ build_left() {
     # Core path segment: the basename is the never-dropped anchor (degrade_layout head-truncates it only at the core-only tier).
     [ -n "$display_dir" ] && { seg_path="${CY}${BOLD}${display_dir}${RS}"; parts+=("$seg_path"); }
 
-    # Model name carries a compact form ("Opus 4.8 (1M)" → "Opus", the leading word) so degrade_layout shrinks before dropping (steps 9/10).
+    # Model name carries a compact form ("Opus 4.8(1M)" → "Opus", the leading word) so degrade_layout shrinks before dropping (steps 9/10).
     if [ -n "$model" ]; then
-        seg_model_full="${MD}${model/ (1M context)/ (1M)}${RS}"
+        seg_model_full="${MD}${model/ (1M context)/(1M)}${RS}"
         seg_model_compact="${MD}${model%% *}${RS}"   # first whitespace-delimited word, e.g. "Opus"
         parts+=("$seg_model_full")
     fi
@@ -310,21 +310,27 @@ build_left() {
             fi
             ;;
     esac
-    # Render "HH:MM (Δ)": timestamp always dim; Δ ("how long since the last prompt") colored as a prompt-cache-freshness signal
-    # (thresholds = the two real cache TTLs, see LASTMSG_WARN/STALE in statusline-command.sh). Δ under a minute is hidden. The text
-    # is the honest elapsed time; only the color encodes the cache read — the script can't see CC's real cache state, so it won't claim one in words.
-    # Cross-day correctness: lm_epoch is a UTC Unix time but the stored "HH:MM" label is LOCAL — a prompt from a prior local calendar
-    # day would be misread as today. So when lm_epoch and now fall on DIFFERENT local calendar days, prepend the local date ("MM-DD HH:MM").
-    # The comparison is a calendar-DAY difference (not a fixed 24h age): a 23:50 prompt rendered at 00:10 next day is cross-day at Δ=20m.
-    # The local date is resolved with `date -r <epoch>` (BSD/macOS, same family as the script's stat -f) which formats an epoch in the
-    # local zone, so DST is handled correctly with no manual offset math. To keep the hot path light, the date fork only runs inside the
-    # Δ>=60 branch (a sub-minute prompt is unambiguously same-day → zero fork); within that branch at most two `date` forks resolve both
-    # local dates. (Deliberate: design.md's "Δ>=1h gate" is superseded by spec.md last-message-age's NORMATIVE scenario
-    # "cross-midnight prompt under one hour" — lm_epoch 23:50 / now 00:10 MUST render "06-14 23:50" with a yellow (20m) Δ.
-    # A Δ>=3600 gate would drop that date prefix and violate the spec, so the gate is Δ>=60s. design.md/tasks.md 6.5 carry the
-    # stale "Δ>=1h" wording from before that scenario was pinned; spec.md is the authority. A sub-minute prompt is unambiguously
-    # same-day, so gating at >=60s still keeps the common case fork-free.)
-    if [ -n "$last_msg" ]; then
+    # Session duration: cost.total_duration_ms (wall-clock since session start, ms) → fmt_dur is the PRIMARY text of this time segment,
+    # REPLACING the absolute last-prompt clock. When no duration is available (older CC without the cost field) the segment falls back
+    # to the legacy "HH:MM" / "MM-DD HH:MM" clock label — backward compatible, and the path the test suite's no-cost frames exercise.
+    dur_str=""
+    if [ -n "$dur_ms" ] && [ "$dur_ms" -gt 0 ] 2>/dev/null; then
+        fmt_dur "$(( dur_ms / 1000 ))"; dur_str="$_dur"
+    fi
+    # Render "<primary> (Δ)": the primary text (session duration, or the clock fallback) is dim; Δ ("how long since the last prompt") is
+    # colored as a prompt-cache-freshness signal (thresholds = the two real cache TTLs, see LASTMSG_WARN/STALE in statusline-command.sh).
+    # Δ under a minute is hidden. The text is honest elapsed time; only the Δ color encodes the cache read — the script can't see CC's
+    # real cache state, so it won't claim one in words.
+    # Cross-day correctness applies ONLY to the clock fallback: lm_epoch is a UTC Unix time but the stored "HH:MM" label is LOCAL, so a
+    # prompt from a prior local calendar day would be misread as today; when lm_epoch and now fall on DIFFERENT local days, prepend the
+    # local date ("MM-DD HH:MM"). The duration primary is an elapsed span, not a wall clock, so it needs no such fix. The comparison is a
+    # calendar-DAY difference (not a fixed 24h age): a 23:50 prompt rendered at 00:10 next day is cross-day at Δ=20m. The local date is
+    # resolved with `date -r <epoch>` (BSD/macOS, same family as the script's stat -f), so DST is handled with no manual offset math. The
+    # date fork only runs inside the Δ>=60 + clock-fallback branch, keeping the common path fork-free. (Deliberate: design.md's "Δ>=1h
+    # gate" is superseded by spec.md last-message-age's NORMATIVE "cross-midnight prompt under one hour" scenario — lm_epoch 23:50 / now
+    # 00:10 MUST render "06-14 23:50" with a yellow (20m) Δ; spec.md is the authority over design.md/tasks.md 6.5's stale "Δ>=1h" wording.)
+    if [ -n "$last_msg" ] || [ -n "$dur_str" ]; then
+        local lm_delta="" lm_col="" lm_primary="$dur_str"
         if [ -n "$lm_epoch" ]; then
             lm_age=$(( now - lm_epoch ))
             if [ "$lm_age" -lt 0 ]; then lm_age=0; fi
@@ -332,20 +338,24 @@ build_left() {
                 fmt_dur "$lm_age"; lm_delta="$_dur"
                 if   [ "$lm_age" -ge "$LASTMSG_STALE" ]; then lm_col="$RD"   # ≥1h: even the extended cache is gone
                 elif [ "$lm_age" -ge "$LASTMSG_WARN"  ]; then lm_col="$YL"   # ≥5m: default cache has gone idle-cold
-                else lm_col="$DM"; fi                                        # <5m: cache still warm → dim, matches the timestamp
-                lm_label="$last_msg"
+                else lm_col="$DM"; fi                                        # <5m: cache still warm → dim, matches the primary text
+            fi
+        fi
+        if [ -z "$lm_primary" ]; then                                       # no session duration → fall back to the legacy clock label
+            lm_primary="$last_msg"
+            if [ -n "$lm_delta" ]; then                                     # clock fallback + Δ>=60 only: prefix local "MM-DD" on a prior-day prompt
                 local lm_day now_day
                 lm_day=$(date -r "$lm_epoch" '+%Y-%m-%d' 2>/dev/null)        # local calendar day of the prompt
                 now_day=$(date -r "$now" '+%Y-%m-%d' 2>/dev/null)           # local calendar day of the render
                 if [ -n "$lm_day" ] && [ -n "$now_day" ] && [ "$lm_day" != "$now_day" ]; then
-                    lm_label="${lm_day:5} $last_msg"                         # different local day → prefix "MM-DD" (strip the leading "YYYY-")
+                    lm_primary="${lm_day:5} $last_msg"                       # different local day → prefix "MM-DD" (strip the leading "YYYY-")
                 fi
-                seg_lastmsg="${DM}${lm_label}${RS} ${lm_col}(${lm_delta})${RS}"
-            else
-                seg_lastmsg="${DM}${last_msg}${RS}"                         # <1 min → clock time only, no Δ (always same local day)
             fi
+        fi
+        if [ -n "$lm_delta" ]; then
+            seg_lastmsg="${DM}${lm_primary}${RS} ${lm_col}(${lm_delta})${RS}"
         else
-            seg_lastmsg="${DM}${last_msg}${RS}"                             # old/unknown format → show the raw string as-is
+            seg_lastmsg="${DM}${lm_primary}${RS}"                           # <1 min since last prompt (or no prompt yet) → primary only, no Δ
         fi
         parts+=("$seg_lastmsg")
     fi

@@ -93,7 +93,7 @@ chk check exact $((W+20-EDGE_PAD)) < <(run $((W+20)) "$J")
 echo "── A2. content order dir→model→ultra→ctx→quota→time→git→session"
 plain=$(run $((W+20)) "$J" | python3 -c 'import sys,re;sys.stdout.write(re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read()))')
 case "$plain" in
-  "$SLDIR"*"Opus 4.8 (1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*main*"Consolidate statusline from two rows to one") echo "  order OK" ;;
+  "$SLDIR"*"Opus 4.8(1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*main*"Consolidate statusline from two rows to one") echo "  order OK" ;;
   *) echo "  ★ FAIL order mismatch: [$plain]"; fail=1 ;;
 esac
 
@@ -465,6 +465,38 @@ if [ -n "$u8cross" ] && [ "$u8cross" = "$u8bare" ]; then echo "  U8 date prefix 
 else echo "  ★ FAIL U8 date prefix changed the Δ colour tier (cross=[$u8cross] bare=[$u8bare])"; fail=1; fi
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
 
+echo "── DUR. SESSION DURATION drives the time segment: cost.total_duration_ms → '<dur> (Δ)', replaces clock, keeps Δ, format boundaries"
+# mkdur: a standard roomy frame WITH cost.total_duration_ms ($1 = ms). Same session_id so the U-section last-msg file applies.
+mkdur() { jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson d "$1" '
+  { workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:6.2},
+    rate_limits:{ five_hour:{used_percentage:23, resets_at:(now+3960|floor)},
+                  seven_day:{used_percentage:84, resets_at:(now+112000|floor)} },
+    session_id:"sl-selftest", transcript_path:$tp, cost:{total_duration_ms:$d} }'; }
+# DUR1: duration is the PRIMARY text, the absolute clock 09:30 is REPLACED, the Δ-since-last-prompt is kept → "1H15m (10m)"
+printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+d1=$(run 200 "$(mkdur 4521000)" | strip)
+case "$d1" in *"1H15m (10m)"*|*"1H15m (11m)"*) echo "  DUR1 duration primary + Δ kept (1H15m (10m)) OK" ;; *) echo "  ★ FAIL DUR1 expected 1H15m (10m): [$d1]"; fail=1 ;; esac
+case "$d1" in *"09:30"*) echo "  ★ FAIL DUR1 absolute clock 09:30 not replaced by duration: [$d1]"; fail=1 ;; esac
+# DUR2: last prompt <1min → Δ hidden, duration alone (clock still replaced)
+printf '09:30 %s\n' "$(( NOWS - 30 ))" > "$LMF"
+d2=$(run 200 "$(mkdur 4521000)" | strip)
+case "$d2" in *"1H15m ("*) echo "  ★ FAIL DUR2 <1min should hide Δ: [$d2]"; fail=1 ;; *"1H15m"*) echo "  DUR2 <1min: duration only, no Δ OK" ;; *) echo "  ★ FAIL DUR2 duration missing: [$d2]"; fail=1 ;; esac
+# DUR3: no last-msg file at all → duration still shows (the segment is duration-driven, not last-msg-driven)
+rm -f "$LMF"
+d3=$(run 200 "$(mkdur 4521000)" | strip)
+case "$d3" in *"1H15m"*) echo "  DUR3 duration shows with no last-msg file OK" ;; *) echo "  ★ FAIL DUR3 duration missing with no last-msg: [$d3]"; fail=1 ;; esac
+# DUR4: fmt_dur boundaries — <1h has no H (40m); >=1 day uses D/H (2D3H)
+d4a=$(run 200 "$(mkdur 2400000)" | strip)     # 2,400,000 ms = 40 m
+case "$d4a" in *"40m"*) echo "  DUR4a <1h → 40m OK" ;; *) echo "  ★ FAIL DUR4a expected 40m: [$d4a]"; fail=1 ;; esac
+d4b=$(run 200 "$(mkdur 183600000)" | strip)   # 183,600,000 ms = 2 d 3 h
+case "$d4b" in *"2D3H"*) echo "  DUR4b >=1day → 2D3H OK" ;; *) echo "  ★ FAIL DUR4b expected 2D3H: [$d4b]"; fail=1 ;; esac
+# DUR5: no cost field → legacy clock fallback unchanged (the absolute clock still renders with its Δ)
+printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+d5=$(run 200 "$J" | strip)
+case "$d5" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  DUR5 no-cost → legacy clock fallback (09:30) OK" ;; *) echo "  ★ FAIL DUR5 expected clock fallback 09:30 (10m): [$d5]"; fail=1 ;; esac
+printf '06-07 19:38\n' > "$LMF"   # restore baseline
+
 echo "── W. TOKENS: cumulative in+out, subagent ⊂ only when >0, foreground reads cache (never blocks)"
 # Seed the token cache with the transcript's REAL size/mtime so the detached bg job hits its gate (sources unchanged →
 # no recompute) and the seeded token VALUES are preserved; this makes the assertions deterministic despite the bg job.
@@ -494,7 +526,7 @@ VFEED=$(jq -cn '{
   effort:{level:"S_effort"}, thinking:{enabled:false},
   rate_limits:{ five_hour:{used_percentage:"S_5h", resets_at:"S_5r"},
                 seven_day:{used_percentage:"S_7d", resets_at:"S_7r"} },
-  session_id:"S_sid", transcript_path:"S_tp" }')
+  session_id:"S_sid", transcript_path:"S_tp", cost:{total_duration_ms:4521000} }')
 if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
    rc=0
    chkv() { [ "$2" = "$3" ] || { echo "  ★ FAIL $1=[$2] expected [$3]"; rc=1; }; }
@@ -505,9 +537,9 @@ if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
    chkv five_h "$five_h" S_5h;            chkv seven_d "$seven_d" S_7d
    chkv five_reset "$five_reset" S_5r;    chkv seven_reset "$seven_reset" S_7r
    chkv session_id "$session_id" S_sid;   chkv transcript_path "$transcript_path" S_tp
-   chkv exceeds_200k "$exceeds_200k" true
+   chkv exceeds_200k "$exceeds_200k" true; chkv dur_ms "$dur_ms" 4521000
    case "$now" in ''|*[!0-9]*) echo "  ★ FAIL now not numeric: [$now]"; rc=1 ;; esac
-   exit $rc ); then echo "  all 16 fields land in their own global OK"; else fail=1; fi
+   exit $rc ); then echo "  all 17 fields land in their own global OK"; else fail=1; fi
 
 echo "── CTX. CONTEXT-METER: budget-aware red threshold (1M model not red at 85%, 200k model is) + decoupled 200k cliff marker ⚑"
 # mkctx: build a statusline JSON with controllable model / used% / exceeds_200k. Width is roomy (no degrade) so the ctx% renders full.
@@ -741,12 +773,12 @@ for cols in 200 160 140 130 120 110 100 90 80 70 60 50 40 30 24 20 17 10 5 $((ED
 done
 [ "$z1bad" -eq 0 ] && echo "  Z1 200..$((EDGE_PAD+1)) cols: single line, never exceeds drawable width OK" || fail=1
 
-# Z2 (task 4.2) Per-segment forms: model compacts "Opus 4.8 (1M)"→"Opus", ctx bar collapses to plain N%, 5h collapses to remaining% only.
+# Z2 (task 4.2) Per-segment forms: model compacts "Opus 4.8(1M)"→"Opus", ctx bar collapses to plain N%, 5h collapses to remaining% only.
 echo "── Z2. per-segment compact forms: model→Opus, ctx bar→plain N%, 5h→remaining% (compact preferred over drop)"
 z2bad=0
 z2full=$(run 200 "$JZ"); z2fp=$(printf '%s' "$z2full" | nocol)
 [ "$(printf '%s' "$z2full" | barcells)" -eq 12 ] || { echo "  ★ FAIL Z2 wide: ctx bar (12 cells) absent"; z2bad=1; }
-case "$z2fp" in *"Opus 4.8 (1M)"*) ;; *) echo "  ★ FAIL Z2 wide: full model name absent"; z2bad=1 ;; esac
+case "$z2fp" in *"Opus 4.8(1M)"*) ;; *) echo "  ★ FAIL Z2 wide: full model name absent"; z2bad=1 ;; esac
 z2c=$(run 130 "$JZ"); z2cp=$(printf '%s' "$z2c" | nocol)
 [ "$(printf '%s' "$z2c" | barcells)" -eq 0 ] || { echo "  ★ FAIL Z2 mid: ctx bar not collapsed to plain N%"; z2bad=1; }
 case "$z2cp" in *"42%"*) ;; *) echo "  ★ FAIL Z2 mid: ctx % lost"; z2bad=1 ;; esac
