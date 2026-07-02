@@ -1,2 +1,3 @@
 .spectra/
 openspec/.vector-search.db*
+.claude/verify.json
