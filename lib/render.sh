@@ -296,9 +296,7 @@ build_left() {
         *)
             if [ -f "$HOME/.claude/last-msg/$session_id" ]; then
                 IFS= read -r last_msg < "$HOME/.claude/last-msg/$session_id"
-                last_msg=${last_msg//[$'\001'-$'\037'$'\177']/}        # C0 + DEL (single bytes)
-                last_msg=${last_msg//$'\302'[$'\200'-$'\237']/}        # 2-byte UTF-8 C1 U+0080-U+009F (U+009B=CSI etc.) — same injection class as a raw ESC
-                last_msg=${last_msg:0:256}                            # bound length (vis_width's strip is O(n^2) under bash 3.2)
+                _sanitize_field "$last_msg"; last_msg=$REPLY          # C0+DEL + 2-byte C1 (U+009B CSI etc.) strip + 256-cap (O(n^2) vis_width bound); shared with git_branch via _sanitize_field in collect.sh so the two filters can't drift
                 # File is now "HH:MM <epoch>" (hook writes both). Split off the trailing all-digit epoch so we can age it into a Δ;
                 # an old "MM-DD HH:MM" file (no numeric tail) leaves lm_epoch empty and is shown verbatim — backward compatible for
                 # sessions whose file the updated hook hasn't rewritten yet.

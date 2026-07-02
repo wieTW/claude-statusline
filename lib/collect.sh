@@ -119,6 +119,23 @@ parse_input() {
         ] | map(tostring | gsub("\n"; "\\n") | gsub("\r"; "\\r")
             | explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode | .[0:256])[]
     ' 2>/dev/null)
+    # Post-jq hardening for the fields interpolated into file paths / awk -v / space-delimited cache records (jq guards JSON structure,
+    # not these downstream uses). session_id → last-msg path, awk sid, cache fields: allow only [A-Za-z0-9_-] so a crafted value can't
+    # inject awk C-escapes (needs \), corrupt space-delimited records (needs whitespace), or traverse paths (needs / or ..); real CC
+    # session IDs (UUIDs) are a subset. transcript_path → tail/find reads: reject path-traversal. Both blank-on-violation; every
+    # downstream reader already treats empty as a graceful no-op.
+    case "$session_id" in ''|*[!0-9A-Za-z_-]*) session_id="" ;; esac
+    case "$transcript_path" in *..*) transcript_path="" ;; esac
+}
+
+# Bash-side twin of parse_input's jq sanitizer for the two fields that bypass jq: git_branch (from git, in collect_status) and
+# last_msg (read from a file, in render.sh build_left). Strips C0+DEL (single bytes) + 2-byte UTF-8 C1 U+0080-U+009F (incl. U+009B
+# CSI) and caps to 256 bytes — the bash mirror of select(. >= 32 and (. < 127 or . > 159)) | .[0:256]. Sets global REPLY (no
+# command-substitution fork on the hot path; bash 3.2 has no namerefs). Keep in sync with parse_input and the render.sh call site.
+_sanitize_field() {
+    REPLY=${1//[$'\001'-$'\037'$'\177']/}
+    REPLY=${REPLY//$'\302'[$'\200'-$'\237']/}
+    REPLY=${REPLY:0:256}
 }
 
 
@@ -169,6 +186,7 @@ collect_status() {
         IFS= read -r git_untracked
         IFS= read -r effort_mode
     } < <(collect_all "$cwd" "$transcript_path" "$effort" </dev/null)
+    _sanitize_field "$git_branch"; git_branch=$REPLY   # git_branch bypasses parse_input's jq (it comes from git) → strip C1/control + cap; else a hostile branch name injects SGR to stdout and desyncs vis_width
 
     # dirty flag + changed-line counts merged (precedence and behavior bit-for-bit identical to the old version):
     # non-empty shortstat = tracked files have changes (staged+unstaged) → dirty, also extract +N/-N;
@@ -262,6 +280,7 @@ reconcile_read() {
 # The serialized worker. Emits "<five>|<seven>|<burn_tte>" on stdout. Acquires the mkdir lock (bounded retry + stale steal) around the
 # read+awk+mv; on lock failure OR empty session_id it still runs the awk read-only and emits the adopted value but skips the mv.
 _reconcile_core() {
+    umask 077                                      # cache/tmp/lock created private (600/700): they hold session IDs + usage — no cross-user read on a shared machine. Subshell-scoped (only ever run via procsub in reconcile_start).
     local cache="$HOME/.claude/sl-ratelimit-cache" lock="$HOME/.claude/sl-ratelimit-cache.lock"
     local src tmpfile have_lock=0 tries lmt
     tmpfile="$cache.$$"                            # $$ is unique per session process → no temp collision across sessions
@@ -415,6 +434,7 @@ start_tokens_job() {
 }
 
 tokens_update() {   # $1=transcript_path $2=sid $3=now — detached worker: gate on size/mtime, recompute + rewrite this sid's line
+    umask 077                                            # token cache/tmp/lock created private (600/700): holds session IDs + token counts. Subshell-scoped (detached bg job / test subshell).
     local tp=$1 sid=$2 nowsec=$3 cache="$TOKENS_CACHE" lock="$TOKENS_CACHE.lock"
     local _b=${1##*/} subdir                              # strip the extension from the BASENAME only — NOT the last dot
     subdir="${1%/*}/${_b%.*}/subagents"                   # anywhere in the path, so a dotted parent dir can't misdirect find

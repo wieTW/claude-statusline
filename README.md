@@ -13,7 +13,7 @@ at the script's absolute path:
 {
   "statusLine": {
     "type": "command",
-    "command": "/Users/will/Downloads/macOS/claude-statusline/statusline-command.sh"
+    "command": "/absolute/path/to/claude-statusline/statusline-command.sh"
   }
 }
 ```
