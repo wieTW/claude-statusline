@@ -10,7 +10,7 @@
 #
 # Usage:
 #   ./install.sh                 # install with refreshInterval 60 (default)
-#   ./install.sh 30              # install with a custom interval (seconds, integer >= 1)
+#   ./install.sh 30              # install with a custom interval (seconds; 0 = omit the key)
 #   REFRESH_INTERVAL=0 ./install.sh   # install WITHOUT refreshInterval (0 = omit the key)
 #
 # Why 60: the line's display granularity is whole minutes (Δ / countdowns / duration), and the
@@ -86,4 +86,6 @@ echo
 echo "statusLine is now:"
 jq '.statusLine' "$SETTINGS"
 echo
-echo "Done. Restart your Claude Code session (or run /statusline) for it to take effect."
+# NOTE: don't suggest /statusline here — that's Claude Code's interactive statusline SETUP
+# command; running it can generate a new statusline and overwrite the entry just written.
+echo "Done. Restart your Claude Code session for it to take effect."
