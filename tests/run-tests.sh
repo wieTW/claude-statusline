@@ -472,11 +472,21 @@ u6=$(lmrun "$U6AGE" | strip)
 case "$u6" in *"$U6MD 09:30 ("*) echo "  U6 cross-day (26h) date-prefixed $U6MD 09:30 OK" ;;
   *"09:30 ("*) echo "  ★ FAIL U6 cross-day NOT date-prefixed (expected $U6MD): [$u6]"; fail=1 ;;
   *) echo "  ★ FAIL U6 time segment missing: [$u6]"; fail=1 ;; esac
-# U7 same-day (10 min ago, already U2): the timestamp stays a BARE HH:MM — no date prefix
+# U7 10 min ago (already U2): normally same LOCAL day → BARE HH:MM, no date prefix. But within
+# 10 min after local midnight, now-600 lands on YESTERDAY — the spec's normative cross-midnight-
+# under-one-hour case — so the prefix is then REQUIRED. Derive the expectation from the fixture
+# epoch's own calendar day instead of assuming wall-clock (the suite was flaky 00:00–00:10).
+U7EP=$(( NOWS - 600 )); U7MD=$(date -r "$U7EP" '+%m-%d' 2>/dev/null)
 u7=$(lmrun 600 | strip)
-case "$u7" in *[0-9][0-9]-[0-9][0-9]" 09:30 ("*) echo "  ★ FAIL U7 same-day wrongly date-prefixed: [$u7]"; fail=1 ;;
-  *"09:30 ("*) echo "  U7 same-day bare HH:MM (no date prefix) OK" ;;
-  *) echo "  ★ FAIL U7 time segment missing: [$u7]"; fail=1 ;; esac
+if [ "$U7MD" = "$(date -r "$NOWS" '+%m-%d' 2>/dev/null)" ]; then
+  case "$u7" in *[0-9][0-9]-[0-9][0-9]" 09:30 ("*) echo "  ★ FAIL U7 same-day wrongly date-prefixed: [$u7]"; fail=1 ;;
+    *"09:30 ("*) echo "  U7 same-day bare HH:MM (no date prefix) OK" ;;
+    *) echo "  ★ FAIL U7 time segment missing: [$u7]"; fail=1 ;; esac
+else
+  case "$u7" in *"$U7MD 09:30 ("*) echo "  U7 cross-midnight (<1h) date-prefixed $U7MD OK" ;;
+    *"09:30 ("*) echo "  ★ FAIL U7 cross-midnight NOT date-prefixed (expected $U7MD): [$u7]"; fail=1 ;;
+    *) echo "  ★ FAIL U7 time segment missing: [$u7]"; fail=1 ;; esac
+fi
 # U8 cross-day prefix does NOT alter the delta colour tier: 26h ≥ LASTMSG_STALE → still the red (≥1h) tier, same as a bare-time ≥1h delta
 u8cross=$(lmrun "$U6AGE" | pcode); u8bare=$(printf '%s' "$u3raw" | pcode)
 if [ -n "$u8cross" ] && [ "$u8cross" = "$u8bare" ]; then echo "  U8 date prefix keeps the same Δ colour tier (red) OK";
