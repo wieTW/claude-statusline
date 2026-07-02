@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 'statusline-tokens-burn-and-fixes'. Update Purpose after archive.
+The last-message-age capability defines the time segment of the line. It specifies the session-duration primary text (with an HH:MM clock fallback for older Claude Code builds that omit the duration field), the parenthesized delta since the last user prompt whose color signals prompt-cache freshness across the two cache TTLs, the sub-minute hide and negative-age clamp, and the cross-day date prefix applied to the clock fallback only.
 
 ## Requirements
 

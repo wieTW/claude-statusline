@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 'statusline-tokens-burn-and-fixes'. Update Purpose after archive.
+The rate-limit-sync capability defines how the true rate-limit usage percentage is shared across concurrent sessions through a lock-serialized cache, correcting Claude Code's frozen per-session start snapshot. It owns the "newest session is the authority" rule, the mkdir spin-lock with stale-steal, the empty-session-id read-only path, and the registry-retention TTL floor that keeps a still-alive session from being re-ranked as new.
 
 ## Requirements
 

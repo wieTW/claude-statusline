@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 'statusline-tokens-burn-and-fixes'. Update Purpose after archive.
+The rate-burn-projection capability defines the depletion alarm on the five-hour rate-limit window. It owns the bounded sample series of adopted used-percentages, the two-point slope estimate, the two mandatory display gates (a strictly positive slope AND a projected exhaustion strictly before the window resets), the minimum inter-sample interval that suppresses false alarms from render bursts, and the `↘` time-to-exhaust indicator with its sensitivity knob and yellow/red color thresholds.
 
 ## Requirements
 

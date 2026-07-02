@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 'statusline-tokens-burn-and-fixes'. Update Purpose after archive.
+The context-meter capability defines how the context-window usage percentage is displayed and when it is alerted. It specifies the budget-aware red threshold — evaluated against the active model's context budget (200k-class versus 1M) rather than a single fixed 80% — the 200k cost/cache cliff marker driven solely by the upstream over-200k indicator, and the requirement that the percentage coloring and the cliff marker are computed from independent inputs and stay decoupled.
 
 ## Requirements
 

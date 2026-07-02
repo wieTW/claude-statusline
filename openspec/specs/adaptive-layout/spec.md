@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 'statusline-tokens-burn-and-fixes'. Update Purpose after archive.
+The adaptive-layout capability governs how the single status line fits the terminal's drawable width without ever wrapping or being hard-cut. It defines the right-alignment of the git/session half, the `│` junction that appears only when the two halves nearly touch, and the fixed 14-step sacrifice order that shrinks and truncates segments before dropping them — guaranteeing that the core (the path basename plus the context percentage) always survives, even at a 1–2 column width.
 
 ## Requirements
 
