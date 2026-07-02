@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1195" height="92" viewBox="0 0 1195 92" role="img">
+<rect width="1195" height="92" rx="10" fill="#16161e" stroke="#2f334d"/>
+<circle cx="22" cy="18.0" r="6.5" fill="#ff5f57"/><circle cx="44" cy="18.0" r="6.5" fill="#febc2e"/><circle cx="66" cy="18.0" r="6.5" fill="#28c840"/>
+<rect x="407.8" y="50" width="25.3" height="22" fill="#9ece6a"/>
+<rect x="433.1" y="50" width="25.3" height="22" fill="#e0af68"/>
+<rect x="458.4" y="50" width="25.3" height="22" fill="#ff9e64"/>
+<rect x="483.6" y="50" width="16.9" height="22" fill="#f7768e"/>
+<rect x="500.5" y="50" width="8.4" height="22" fill="#292e42"/>
+<text x="20.0" y="66" fill="#7aa2f7" font-weight="bold" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="143.3" lengthAdjust="spacingAndGlyphs">claude-statusline</text>
+<text x="171.7" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="188.6" y="66" fill="#ff9e64" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="101.2" lengthAdjust="spacingAndGlyphs">Opus 4.8(1M)</text>
+<text x="298.2" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="315.1" y="66" fill="#f7768e" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="67.4" lengthAdjust="spacingAndGlyphs">no-think</text>
+<text x="390.9" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="517.4" y="66" fill="#f7768e" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="33.7" lengthAdjust="spacingAndGlyphs">93%⚑</text>
+<text x="559.5" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="576.4" y="66" fill="#ded6ca" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="33.7" lengthAdjust="spacingAndGlyphs">412k</text>
+<text x="618.5" y="66" fill="#8a827c" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">⊂</text>
+<text x="627.0" y="66" fill="#e0af68" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="25.3" lengthAdjust="spacingAndGlyphs">88k</text>
+<text x="660.7" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="677.5" y="66" fill="#ded6ca" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="42.1" lengthAdjust="spacingAndGlyphs">1H50m</text>
+<text x="728.1" y="66" fill="#f7768e" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="25.3" lengthAdjust="spacingAndGlyphs">18%</text>
+<text x="761.8" y="66" fill="#f7768e" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="33.7" lengthAdjust="spacingAndGlyphs">↘23m</text>
+<text x="804.0" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="820.9" y="66" fill="#ded6ca" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="33.7" lengthAdjust="spacingAndGlyphs">1D2H</text>
+<text x="863.0" y="66" fill="#f7768e" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="16.9" lengthAdjust="spacingAndGlyphs">9%</text>
+<text x="888.3" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="905.1" y="66" fill="#8a827c" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="33.7" lengthAdjust="spacingAndGlyphs">2H5m</text>
+<text x="947.3" y="66" fill="#f7768e" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="59.0" lengthAdjust="spacingAndGlyphs">(1H15m)</text>
+<text x="1065.3" y="66" fill="#ded6ca" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="42.1" lengthAdjust="spacingAndGlyphs">main*</text>
+<text x="1115.9" y="66" fill="#9ece6a" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="25.3" lengthAdjust="spacingAndGlyphs">+68</text>
+<text x="1141.2" y="66" fill="#5e5854" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">/</text>
+<text x="1149.6" y="66" fill="#db4b4b" font-family='"SF Mono","Cascadia Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace' font-size="14" xml:space="preserve" textLength="25.3" lengthAdjust="spacingAndGlyphs">-14</text>
+</svg>

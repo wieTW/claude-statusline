@@ -58,6 +58,11 @@ bash tests/run-tests.sh                                                         
 # Render one frame by hand (the fastest dev loop) — COLUMNS drives the right-align width
 printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M context)"},"context_window":{"used_percentage":6.2}}' "$PWD" \
   | COLUMNS=140 bash statusline-command.sh
+
+# Regenerate the README screenshot SVGs (hero/alerts/degrade/themes): fixture JSON piped
+# through the REAL script, ANSI→SVG via assets/ansi2svg.py (python3 — dev-only dep).
+# Run after any display-affecting change so the README images stay truthful.
+bash assets/generate.sh
 ```
 
 `tests/run-tests.sh` is one monolithic suite — each check prints a labeled section (`A`,
