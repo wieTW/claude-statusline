@@ -1,16 +1,24 @@
-# claude-statusline
+<h1 align="center">claude-statusline</h1>
 
-A one-line statusline for [Claude Code](https://claude.ai/code) that warns you *before* you
-hit your rate limit — not after.
+<p align="center"><b>Claude Code freezes your quota&nbsp;% at session start. This line doesn't —
+and it warns <code>↘21m</code> before you run dry.</b></p>
 
-**macOS · stock bash 3.2 · `jq` is the only dependency · ~26 ms a frame**
+<p align="center">One colored line for <a href="https://claude.ai/code">Claude Code</a> ·
+macOS · stock bash 3.2 · <code>jq</code> is the only dependency · ~26&nbsp;ms a frame</p>
 
-![A healthy session: project path, model, context bar, token count, both rate-limit countdowns, compute time, and git — one colored line](assets/hero.svg)
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-macOS-111111?logo=apple&logoColor=white" alt="Platform: macOS">
+  <img src="https://img.shields.io/badge/bash-3.2_stock-4EAA25?logo=gnubash&logoColor=white" alt="Runs on the stock macOS bash 3.2 — nothing to upgrade">
+  <img src="https://img.shields.io/badge/dependency-jq_only-5A6AB1" alt="jq is the only dependency">
+  <img src="https://img.shields.io/badge/render-~26ms%2Fframe-1971c2" alt="About 26 milliseconds per frame">
+</p>
 
-Calm by default — warnings appear only when the condition is real, so when the line shouts,
-believe it. Every glyph is decoded in [Reading the line](#reading-the-line):
+<p align="center"><img src="assets/demo.svg" alt="Animated demo — one session across an afternoon: calm at first, then burning fast (a yellow ↘58m appears on the 5h quota), then the red ↘21m alarm: dry in 21 minutes, reset still 1h10m away"></p>
 
-![A bad day: red context meter past the ⚑ 200k cliff, thinking off, a ↘23m burn alarm on the 5h quota, and a red idle delta](assets/alerts.svg)
+That loop is one afternoon, re-rendered live: the quota countdown falls, the burn alarm `↘`
+appears the moment the projection says you'll run dry *before* the reset — yellow first,
+then red. Calm by default; when the line shouts, believe it. Every glyph is decoded in
+[Reading the line](#reading-the-line).
 
 ## Install
 
@@ -64,6 +72,10 @@ Optional tools, each degrading gracefully if missing: **`git`** (no git segment)
 
 ## Reading the line
 
+A healthy frame — every example in the table below is taken from it, character for character:
+
+![A healthy session: project path, model, context bar, token count, both rate-limit countdowns, compute time, and git — one colored line](assets/hero.svg)
+
 | Segment | Example | What it tells you |
 |---------|---------|-------------------|
 | **Path** | `claude-statusline` | The project / sub-path you're in |
@@ -86,6 +98,12 @@ Optional tools, each degrading gracefully if missing: **`git`** (no git segment)
 - **Cache-freshness delta `(3m)`** — time since your last prompt, colored by Anthropic's two
   real prompt-cache TTLs: dim = warm, yellow past ~5 min, red past ~1 h (next prompt pays a
   full cache re-write).
+
+And when several things go wrong at once — a 1M-context session past the `⚑` 200k cliff,
+thinking off, quota burning, cache cold — the line looks like this and nothing on it is
+decoration:
+
+![A bad day: red context meter past the ⚑ 200k cliff, thinking off, a ↘23m burn alarm on the 5h quota, and a red idle delta](assets/alerts.svg)
 - **A token count you can trust** — cache tokens excluded (stable across cache churn),
   transcript rows deduped (naive summing over-counts ~10x), summed in the background so
   rendering never waits.
@@ -112,6 +130,11 @@ Five themes, picked with `STYLE` at the top of `statusline-command.sh`:
 | `RL_SYNC` | `true` | Cross-session rate-limit sync; off = each session keeps its frozen startup snapshot |
 | `BURN_SENS` | `balanced` | Burn-alarm eagerness: `conservative` / `balanced` / `sensitive` |
 | `LASTMSG_WARN` / `LASTMSG_STALE` | `300` / `3600` | Idle seconds before the `(Δ)` turns yellow / red — matched to the 5-min / 1-h cache TTLs |
+
+---
+
+*If the `↘` ever fires with enough time left to land your commit, a ⭐ helps the next person
+see theirs coming.*
 
 ## Contributing
 

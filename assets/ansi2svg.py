@@ -5,7 +5,13 @@ Reads lines on stdin. A line starting with "@@" is a dim caption attached
 above the NEXT content line. Emits a dark terminal-window SVG on stdout.
 Only the SGR subset the statusline emits is handled: 0, 1, 38;2;r;g;b, 48;2;r;g;b.
 
-Usage: ansi2svg.py [--title TEXT] [--pad-cols N] < frames.ansi > out.svg
+Modes:
+  default          — stack all content lines vertically (screenshot)
+  --animate SECS   — treat each content line as a KEYFRAME of one single line and
+                     emit a looping SMIL animation, SECS per frame (discrete switch,
+                     like a statusline re-rendering). Works in GitHub READMEs.
+
+Usage: ansi2svg.py [--title TEXT] [--pad-cols N] [--animate SECS] < frames.ansi > out.svg
 """
 import sys, re, argparse
 from html import escape
@@ -48,7 +54,7 @@ def parse_ansi(line):
 
 
 def runs(cells, key):
-    """Group consecutive cells by key(cell) -> (start_col, text, keyval)."""
+    """Group consecutive cells by key(cell) -> (start_col, cells_run, keyval)."""
     out, start, cur = [], 0, None
     for i, c in enumerate(cells):
         k = key(c)
@@ -61,11 +67,49 @@ def runs(cells, key):
     return out
 
 
+def render_entry(cells, cap, y):
+    """SVG elements for one caption + one content line starting at y.
+    Returns (elements, next_y)."""
+    parts = []
+    if cap is not None:
+        y += CAPTION_H
+        parts.append(f'<text x="{PAD_X}" y="{y - 6}" fill="{CAPTION_FG}" '
+                     f'font-family={FONT!r} font-size="11">{escape(cap)}</text>')
+    for col, run, bg in runs(cells, lambda c: c[2]):          # background runs (the ctx bar)
+        if bg:
+            parts.append(f'<rect x="{PAD_X + col * CW:.1f}" y="{y}" '
+                         f'width="{len(run) * CW:.1f}" height="{CH}" fill="{bg}"/>')
+    for col, run, (fg, bold) in runs(cells, lambda c: (c[1], c[3])):   # text runs
+        text = ''.join(ch for ch, *_ in run)
+        if not text.strip():
+            continue
+        lead = len(text) - len(text.lstrip())
+        text = text.strip()
+        x = PAD_X + (col + lead) * CW
+        w = len(text) * CW
+        attr = ' font-weight="bold"' if bold else ''
+        parts.append(f'<text x="{x:.1f}" y="{y + CH - 6}" fill="{fg or DEFAULT_FG}"'
+                     f'{attr} font-family={FONT!r} font-size="{FS}" xml:space="preserve" '
+                     f'textLength="{w:.1f}" lengthAdjust="spacingAndGlyphs">{escape(text)}</text>')
+    return parts, y + CH + 6
+
+
+def chrome(width, height, title):
+    dots = ''.join(f'<circle cx="{22 + i * 22}" cy="{BAR_H / 2}" r="6.5" fill="{c}"/>'
+                   for i, c in enumerate(('#ff5f57', '#febc2e', '#28c840')))
+    t = (f'<text x="{width / 2}" y="{BAR_H / 2 + 4}" fill="{CAPTION_FG}" text-anchor="middle" '
+         f'font-family={FONT!r} font-size="12">{escape(title)}</text>' if title else '')
+    return (f'<rect width="{width}" height="{height}" rx="10" fill="{BG}" stroke="{BORDER}"/>'
+            + dots + t)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--title', default='')
     ap.add_argument('--pad-cols', type=int, default=0,
                     help='minimum width in columns (pads narrow frames)')
+    ap.add_argument('--animate', type=float, default=0,
+                    help='seconds per frame: content lines become looping keyframes of one line')
     a = ap.parse_args()
 
     raw = sys.stdin.read().rstrip('\n').split('\n')
@@ -74,49 +118,37 @@ def main():
     for line in raw:
         if line.startswith('@@'):
             caption = line[2:].strip()
-        elif line.strip('\x1b[0m \t') or line.strip():
+        elif line.strip():
             entries.append((caption, parse_ansi(line)))
             caption = None
 
     ncols = max([len(c) for _, c in entries] + [a.pad_cols, 40])
     width = round(ncols * CW + 2 * PAD_X)
-    y = BAR_H + PAD_Y
-    body = []
-    for cap, cells in entries:
-        if cap is not None:
-            y += CAPTION_H
-            body.append(f'<text x="{PAD_X}" y="{y - 6}" fill="{CAPTION_FG}" '
-                        f'font-family={FONT!r} font-size="11">{escape(cap)}</text>')
-        # background runs (the ctx gradient bar)
-        for col, run, bg in runs(cells, lambda c: c[2]):
-            if bg:
-                body.append(f'<rect x="{PAD_X + col * CW:.1f}" y="{y}" '
-                            f'width="{len(run) * CW:.1f}" height="{CH}" fill="{bg}"/>')
-        # text runs
-        for col, run, (fg, bold) in runs(cells, lambda c: (c[1], c[3])):
-            text = ''.join(ch for ch, *_ in run)
-            if not text.strip():
-                continue
-            lead = len(text) - len(text.lstrip())
-            text = text.strip()
-            x = PAD_X + (col + lead) * CW
-            w = len(text) * CW
-            attr = f' font-weight="bold"' if bold else ''
-            body.append(f'<text x="{x:.1f}" y="{y + CH - 6}" fill="{fg or DEFAULT_FG}"'
-                        f'{attr} font-family={FONT!r} font-size="{FS}" xml:space="preserve" '
-                        f'textLength="{w:.1f}" lengthAdjust="spacingAndGlyphs">{escape(text)}</text>')
-        y += CH + 6
-    height = y + PAD_Y
+    y0 = BAR_H + PAD_Y
 
-    dots = ''.join(f'<circle cx="{22 + i * 22}" cy="{BAR_H / 2}" r="6.5" fill="{c}"/>'
-                   for i, c in enumerate(('#ff5f57', '#febc2e', '#28c840')))
-    title = (f'<text x="{width / 2}" y="{BAR_H / 2 + 4}" fill="{CAPTION_FG}" text-anchor="middle" '
-             f'font-family={FONT!r} font-size="12">{escape(a.title)}</text>' if a.title else '')
-    print(f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img">
-<rect width="{width}" height="{height}" rx="10" fill="{BG}" stroke="{BORDER}"/>
-{dots}{title}
-{chr(10).join(body)}
-</svg>''')
+    if a.animate > 0:
+        # every entry is a keyframe of the SAME line; discrete opacity switch, infinite loop
+        n = len(entries)
+        dur = a.animate * n
+        body, height = [], y0
+        for i, (cap, cells) in enumerate(entries):
+            parts, height = render_entry(cells, cap, y0)
+            values = ';'.join('1' if j == i else '0' for j in range(n))
+            keytimes = ';'.join(f'{j / n:.4f}' for j in range(n))
+            body.append(f'<g opacity="{1 if i == 0 else 0}">'
+                        f'<animate attributeName="opacity" values="{values}" keyTimes="{keytimes}" '
+                        f'calcMode="discrete" dur="{dur:g}s" repeatCount="indefinite"/>'
+                        + ''.join(parts) + '</g>')
+    else:
+        body, height = [], y0
+        for cap, cells in entries:
+            parts, height = render_entry(cells, cap, height)
+            body.extend(parts)
+    height += PAD_Y
+
+    print(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+          f'viewBox="0 0 {width} {height}" role="img">\n'
+          + chrome(width, height, a.title) + '\n' + '\n'.join(body) + '\n</svg>')
 
 
 if __name__ == '__main__':

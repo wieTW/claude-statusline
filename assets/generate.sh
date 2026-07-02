@@ -51,6 +51,32 @@ render() {
     HOME="$1" COLUMNS="$2" bash "${3:-$SL/statusline-command.sh}"
 }
 
+# --- 0. demo: an ANIMATED 3-act story (looping SMIL keyframes, 3s each) -------------------------
+# One session across an afternoon: calm → burning fast (yellow ↘ appears) → red alarm.
+# Every keyframe is a real render; the P-samples seed the burn slope exactly like a live session.
+demo_frame() { # <name> <tokens> <sub> <lm_age> <ctx> <used5> <reset5_off> [P_age P_used]
+    mk_home "demo-$1" "$2" "$3" "$4"
+    local r5=$((NOW + $7))
+    [ -n "$8" ] && printf 'P %s %s %s\n' "$r5" "$((NOW - $8))" "$9" > "$FH/.claude/sl-ratelimit-cache"
+    jq -n --arg cwd "$REPO" --argjson ctx "$5" --argjson u5 "$6" --argjson r5 "$r5" \
+          --argjson dur "${10}" --argjson api "${11}" '{
+      workspace:{current_dir:$cwd}, model:{display_name:"Opus 4.8"},
+      context_window:{used_percentage:$ctx, exceeds_200k_tokens:false},
+      rate_limits:{five_hour:{used_percentage:$u5, resets_at:$r5},
+                   seven_day:{used_percentage:28, resets_at:(now+453600|floor)}},
+      session_id:"demo-sess", transcript_path:"/nonexistent/demo.jsonl", session_name:"auth-refactor",
+      cost:{total_duration_ms:$dur, total_api_duration_ms:$api}
+    }' | render "$FH" 140
+}
+{
+    printf '@@a quiet session\n'
+    demo_frame calm    64200  8900  70 22 18 15000 "" "" 1500000 1330000
+    printf '@@two hours later — burning fast\n'
+    demo_frame burn   209800 47600 150 55 58  8400 3000 22 6600000 6300000
+    printf '@@the alarm: dry in ~21m, and the reset is still 1h10m away\n'
+    demo_frame alarm  340100 76800 240 87 84  4200 2700 51 9600000 9100000
+} | python3 "$OUT/ansi2svg.py" --animate 3 > "$OUT/demo.svg"
+
 # --- 1. hero: the full healthy line ------------------------------------------------------------
 mk_home hero 128400 23100 180
 hero_json | render "$FH" 140 | python3 "$OUT/ansi2svg.py" > "$OUT/hero.svg"
@@ -94,4 +120,4 @@ mk_home themes 128400 23100 180
     done
 } | python3 "$OUT/ansi2svg.py" > "$OUT/themes.svg"
 
-ls -la "$OUT"/hero.svg "$OUT"/alerts.svg "$OUT"/degrade.svg "$OUT"/themes.svg
+ls -la "$OUT"/demo.svg "$OUT"/hero.svg "$OUT"/alerts.svg "$OUT"/degrade.svg "$OUT"/themes.svg
