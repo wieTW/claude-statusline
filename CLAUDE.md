@@ -41,7 +41,8 @@ It is not auto-installed — wire it up by pointing the `statusLine.command` set
 
 The line has two halves: a **left** part (path · model · effort · thinking · ctx bar +
 200k cliff marker · token usage · rate-limit countdowns + burn-projection alarm ·
-session duration + last-message cache-age delta) and a **right** part (git · worktree · session name),
+API thinking-time — session-duration → clock fallbacks — + last-message cache-age delta)
+and a **right** part (git · worktree · session name),
 right-aligned to the terminal edge with a `│` junction that appears only when the two halves
 nearly touch. When the terminal is too narrow, the line degrades through a fixed 14-step
 sacrifice order (shrink before drop; path + ctx% never dropped) so it never wraps.
@@ -62,6 +63,7 @@ printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M 
 `tests/run-tests.sh` is one monolithic suite — each check prints a labeled section (`A`,
 `A2`, `B`… through the alphabet, plus `G` perf at the very end). Key feature sections:
 `T`/`T2` = rate-sync rule matrix + concurrency, `U` = last-msg age (incl. cross-day),
+`DUR` = session-duration primary, `API` = API-thinking-time primary + `fmt_dur_s` + 3-level fallback,
 `V` = parse_input positional sentinel, `W`/`X`/`X2` = token display/dedup/prune,
 `CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `Z`/`Z1`–`Z5` =
 adaptive-layout 14-step degrade. A failure prints `★ FAIL` and the script exits 1. There is **no
@@ -206,17 +208,29 @@ covers the budget-aware threshold and the decoupled marker.
 
 ### Session duration + last-message age (`build_left`, time segment)
 
-The time segment's **primary** text is the **session duration**: `cost.total_duration_ms`
-(upstream wall-clock since session start, idle included) divided to seconds and run through
-`fmt_dur` (`1H15m` / `40m` / `2D3H`), shown dim. It **replaces** the absolute last-prompt
-clock. A parenthesized delta `(Δ)` — how long since the last user prompt — is appended once
+The time segment's **primary** text is selected by a **three-level fallback chain**, all shown
+dim and all **replacing** the absolute last-prompt clock:
+1. **API thinking-time** (top priority): `cost.total_api_duration_ms` when present and `>0` —
+   the cumulative time Claude spent *waiting on the API to produce responses this session*,
+   **excluding idle** and **excluding local tool execution**; the closest available proxy for
+   "how long Claude actually thought" (pure extended-thinking block time is in no source). It is
+   divided to whole seconds and run through **`fmt_dur_s`**, a seconds-grained formatter: `45s`
+   under a minute, `3m45s` / `1m0s` / `59m59s` under an hour, and **delegating to `fmt_dur`** at
+   ≥1h so the `1H15m` / `1D3H` forms are byte-identical to the session-duration primary.
+2. else **session duration**: `cost.total_duration_ms` when `>0` (upstream wall-clock since
+   session start, idle included) divided to seconds and run through `fmt_dur` (`1H15m` / `40m` /
+   `2D3H`).
+3. else the legacy **`HH:MM` clock** (see clock fallback below).
+Both duration primaries land in the same `dur_str`, so the segment-emit guard, the `(Δ)` logic,
+and the clock-fallback branch are shared. `fmt_dur` itself is untouched. A parenthesized delta
+`(Δ)` — how long since the last user prompt — is appended once
 that age is ≥60s, and the **delta's colour** signals prompt-cache freshness via the two idle
 tiers (dim < `LASTMSG_WARN` ≤ yellow < `LASTMSG_STALE` ≤ red). A sub-minute age hides the
 delta. Both texts are honest elapsed time; only the Δ colour asserts the cache read (the
 script can't see CC's real cache TTL). Negative ages (clock skew) clamp to 0.
 
-**Clock fallback (backward compatible):** when `cost.total_duration_ms` is absent (older CC,
-or a non-numeric value), the primary text falls back to the legacy `HH:MM` clock with the same
+**Clock fallback (backward compatible):** when **neither** cost duration field is usable (older
+CC, absent, or non-numeric/≤0 values), the primary text falls back to the legacy `HH:MM` clock with the same
 `(Δ)`. This is the no-`cost` path that every test frame without a `cost` field takes, so the
 whole `U` section's clock behaviour is preserved unchanged. **Cross-day correctness applies to
 that clock fallback only:** `lm_epoch` is UTC but the stored `HH:MM` label is LOCAL, so a
@@ -227,12 +241,14 @@ at Δ=20m and still gets the prefix (the spec's normative "cross-midnight under 
 scenario; this supersedes design.md/tasks.md 6.5's stale "Δ≥1h gate" wording — spec.md is the
 authority). The date is resolved with `date -r <epoch>` (BSD/macOS, DST-correct, no manual
 offset) and the fork is **gated behind the Δ≥60s + clock-fallback branch** so the common path
-(duration primary, or a sub-minute prompt) stays fork-free. The session-duration primary needs
-no cross-day fix — it is an elapsed span, not a wall clock. A legacy file with no numeric epoch
-tail is shown verbatim when it is the fallback (backward compatible). Section `U` covers the
-clock-fallback tiers, sub-minute hide, legacy format, and cross-day prefix; section `DUR`
-covers the duration primary, clock replacement, `fmt_dur` boundaries, the no-last-msg case, and
-the no-`cost` fallback.
+(a duration primary, or a sub-minute prompt) stays fork-free. Both duration primaries (API time,
+session duration) need no cross-day fix — they are elapsed spans, not wall clocks. A legacy file
+with no numeric epoch tail is shown verbatim when it is the fallback (backward compatible).
+Section `U` covers the clock-fallback tiers, sub-minute hide, legacy format, and cross-day prefix;
+section `DUR` covers the session-duration primary, clock replacement, `fmt_dur` boundaries, the
+no-last-msg case, and the no-`cost` fallback; section `API` covers the API-thinking-time primary
+(overriding both duration and clock), the `fmt_dur_s` boundary table, and the invalid-value +
+both-fields-unusable fallbacks down the three-level chain.
 
 ## Hard rules — violating these reintroduces fixed bugs
 

@@ -515,6 +515,64 @@ d5=$(run 200 "$J" | strip)
 case "$d5" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  DUR5 no-cost → legacy clock fallback (09:30) OK" ;; *) echo "  ★ FAIL DUR5 expected clock fallback 09:30 (10m): [$d5]"; fail=1 ;; esac
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
 
+echo "── API. API THINKING TIME is the top-priority primary: cost.total_api_duration_ms → fmt_dur_s '<dur> (Δ)', overrides duration+clock, 3-level fallback"
+# mkapi: a standard roomy frame whose cost object ($1 = whole JSON cost object) drives the time segment. Same session_id → the last-msg file applies.
+mkapi() { jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson c "$1" '
+  { workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:6.2},
+    rate_limits:{ five_hour:{used_percentage:23, resets_at:(now+3960|floor)},
+                  seven_day:{used_percentage:84, resets_at:(now+112000|floor)} },
+    session_id:"sl-selftest", transcript_path:$tp, cost:$c }'; }
+# API1: api time is the PRIMARY (overrides BOTH the duration 1H15m and the clock 09:30); the Δ-since-last-prompt is kept → "3m45s (10m)"
+printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+a1=$(run 200 "$(mkapi '{"total_duration_ms":4521000,"total_api_duration_ms":225000}')" | strip)
+case "$a1" in *"3m45s (10m)"*|*"3m45s (11m)"*) echo "  API1 api primary + Δ kept (3m45s (10m)) OK" ;; *) echo "  ★ FAIL API1 expected 3m45s (10m): [$a1]"; fail=1 ;; esac
+case "$a1" in *"1H15m"*) echo "  ★ FAIL API1 duration form 1H15m leaked (api must replace it): [$a1]"; fail=1 ;; esac
+case "$a1" in *"09:30"*) echo "  ★ FAIL API1 absolute clock 09:30 not replaced by api time: [$a1]"; fail=1 ;; esac
+# API2: fmt_dur_s boundary table (remove last-msg so only the bare primary shows, no Δ noise). Delegates to fmt_dur at >=1h.
+rm -f "$LMF"
+for pair in "500:0s" "45000:45s" "60000:1m0s" "3599000:59m59s" "4500000:1H15m" "97200000:1D3H"; do
+  ms=${pair%%:*}; want=${pair##*:}
+  a2=$(run 200 "$(mkapi "{\"total_api_duration_ms\":$ms}")" | strip)
+  case "$a2" in *"$want"*) : ;; *) echo "  ★ FAIL API2 api=${ms}ms expected $want: [$a2]"; fail=1 ;; esac
+done
+echo "  API2 fmt_dur_s boundaries (0s/45s/1m0s/59m59s/1H15m/1D3H) OK"   # 500ms row pins the sub-second s=0 branch (spec table row 1)
+a2p=$(run 200 "$(mkapi '{"total_api_duration_ms":45000}')" | strip)   # pin: sub-minute value carries NO minute prefix
+case "$a2p" in *"m45s"*) echo "  ★ FAIL API2 45s carries a spurious minute prefix: [$a2p]"; fail=1 ;; *"45s"*) echo "  API2 45s has no minute prefix OK" ;; *) echo "  ★ FAIL API2 45s missing: [$a2p]"; fail=1 ;; esac
+a2z=$(run 200 "$(mkapi '{"total_api_duration_ms":500}')" | strip)     # pin: sub-second (spec table row 1, s=0) is EXACTLY "0s", never "0m0s" — a plain *"0s"* substring would wrongly match "0m0s"
+case "$a2z" in *"m0s"*) echo "  ★ FAIL API2 sub-second carries a minute prefix (0m0s): [$a2z]"; fail=1 ;; *"0s"*) echo "  API2 sub-second → 0s (no minute prefix) OK" ;; *) echo "  ★ FAIL API2 0s missing: [$a2z]"; fail=1 ;; esac
+# API3: api time present, NO duration field → api is still the primary → "3m45s"
+a3=$(run 200 "$(mkapi '{"total_api_duration_ms":225000}')" | strip)
+case "$a3" in *"3m45s"*) echo "  API3 api primary with no duration field OK" ;; *) echo "  ★ FAIL API3 expected 3m45s: [$a3]"; fail=1 ;; esac
+# API4: invalid api time (0 / non-numeric / negative) falls back to the session-duration 1H15m (never a spurious 0s).
+# Build the frame JSON into a variable first: an inline $(run … "$(mkapi "…\":$bad")") triple-nests command subs and bash mangles the escaped quotes → empty frame.
+a4ok=1
+for bad in '0' '"abc"' '-5000'; do
+  j4=$(mkapi "{\"total_duration_ms\":4521000,\"total_api_duration_ms\":$bad}")
+  a4=$(run 200 "$j4" | strip)
+  case "$a4" in *"1H15m"*) : ;; *) echo "  ★ FAIL API4 api=$bad should fall back to 1H15m: [$a4]"; fail=1; a4ok=0 ;; esac
+  case "$a4" in *"0s"*) echo "  ★ FAIL API4 api=$bad rendered as 0s instead of falling back: [$a4]"; fail=1; a4ok=0 ;; esac
+done
+[ "$a4ok" = 1 ] && echo "  API4 invalid api (0/\"abc\"/-5000) falls back to duration 1H15m OK"
+# API5: cost object present but NEITHER field usable → clock fallback with its Δ → "09:30 (10m)"
+printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+a5=$(run 200 "$(mkapi '{"total_duration_ms":0,"total_api_duration_ms":0}')" | strip)
+case "$a5" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  API5 both cost fields unusable → clock fallback 09:30 (10m) OK" ;; *) echo "  ★ FAIL API5 expected clock fallback 09:30 (10m): [$a5]"; fail=1 ;; esac
+# API6: last prompt <1min → Δ hidden, api primary alone → "3m45s" with no "("
+printf '14:05 %s\n' "$(( NOWS - 30 ))" > "$LMF"
+a6=$(run 200 "$(mkapi '{"total_api_duration_ms":225000}')" | strip)
+case "$a6" in *"3m45s ("*) echo "  ★ FAIL API6 sub-minute prompt should hide Δ: [$a6]"; fail=1 ;; *"3m45s"*) echo "  API6 <1min prompt → api primary only, no Δ OK" ;; *) echo "  ★ FAIL API6 api primary missing: [$a6]"; fail=1 ;; esac
+# API7: cross-day prompt (26h ago → prior local calendar day) with an API primary → the elapsed-span primary is NEVER date-prefixed
+# (spec normative "An elapsed-span primary is never date-prefixed"); the date "MM-DD" prefix is a clock-fallback-only concern. The Δ still shows.
+printf '12:00 %s\n' "$(( NOWS - 93600 ))" > "$LMF"
+a7=$(run 200 "$(mkapi '{"total_api_duration_ms":225000}')" | strip)
+case "$a7" in
+  *[0-9][0-9]-[0-9][0-9]\ 3m45s*) echo "  ★ FAIL API7 elapsed-span primary got a date prefix: [$a7]"; fail=1 ;;
+  *"3m45s (1D2H)"*|*"3m45s (1D3H)"*) echo "  API7 cross-day api primary: no date prefix, elapsed Δ kept OK" ;;
+  *) echo "  ★ FAIL API7 expected bare 3m45s with (1D2H) Δ: [$a7]"; fail=1 ;;
+esac
+printf '06-07 19:38\n' > "$LMF"   # restore baseline
+
 echo "── W. TOKENS: cumulative in+out, subagent ⊂ only when >0, foreground reads cache (never blocks)"
 # Seed the token cache with the transcript's REAL size/mtime so the detached bg job hits its gate (sources unchanged →
 # no recompute) and the seeded token VALUES are preserved; this makes the assertions deterministic despite the bg job.
@@ -544,7 +602,7 @@ VFEED=$(jq -cn '{
   effort:{level:"S_effort"}, thinking:{enabled:false},
   rate_limits:{ five_hour:{used_percentage:"S_5h", resets_at:"S_5r"},
                 seven_day:{used_percentage:"S_7d", resets_at:"S_7r"} },
-  session_id:"S_sid", transcript_path:"S_tp", cost:{total_duration_ms:4521000} }')
+  session_id:"S_sid", transcript_path:"S_tp", cost:{total_duration_ms:4521000, total_api_duration_ms:987654} }')
 if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
    rc=0
    chkv() { [ "$2" = "$3" ] || { echo "  ★ FAIL $1=[$2] expected [$3]"; rc=1; }; }
@@ -556,8 +614,9 @@ if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
    chkv five_reset "$five_reset" S_5r;    chkv seven_reset "$seven_reset" S_7r
    chkv session_id "$session_id" S_sid;   chkv transcript_path "$transcript_path" S_tp
    chkv exceeds_200k "$exceeds_200k" true; chkv dur_ms "$dur_ms" 4521000
+   chkv api_ms "$api_ms" 987654
    case "$now" in ''|*[!0-9]*) echo "  ★ FAIL now not numeric: [$now]"; rc=1 ;; esac
-   exit $rc ); then echo "  all 17 fields land in their own global OK"; else fail=1; fi
+   exit $rc ); then echo "  all 18 fields land in their own global OK"; else fail=1; fi
 
 echo "── CTX. CONTEXT-METER: budget-aware red threshold (1M model not red at 85%, 200k model is) + decoupled 200k cliff marker ⚑"
 # mkctx: build a statusline JSON with controllable model / used% / exceeds_200k. Width is roomy (no degrade) so the ctx% renders full.

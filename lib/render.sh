@@ -100,6 +100,16 @@ fmt_dur() {   # $1=seconds (non-negative integer) → _dur="1D3H"/"2H2m"/"5m"
     else _dur="${m}m"; fi
 }
 
+# Seconds-precision duration formatter for the API-time primary (fmt_dur is minute-grained; API work is often sub-minute).
+# <60s → "<s>s" (incl. "0s" for a sub-second ms that still passed the -gt 0 guard); <1h → "<m>m<s>s" ("3m45s", "1m0s", "59m59s");
+# >=1h delegates to fmt_dur so the "1H15m"/"1D3H" forms are byte-identical to the session-duration primary. Writes _dur. fmt_dur untouched.
+fmt_dur_s() {   # $1=seconds (non-negative integer) → _dur="45s"/"3m45s"/"1H15m"
+    local s=$1
+    if [ "$s" -lt 60 ]; then _dur="${s}s"
+    elif [ "$s" -lt 3600 ]; then _dur="$(( s / 60 ))m$(( s % 60 ))s"
+    else fmt_dur "$s"; fi
+}
+
 ttl() {   # $1=resets_at (Unix seconds) → _ttl="1D3H"/"2H2m"/"5m"; non-numeric returns empty
     _ttl=""
     case "$1" in ''|*[!0-9]*) return ;; esac
@@ -308,20 +318,28 @@ build_left() {
             fi
             ;;
     esac
-    # Session duration: cost.total_duration_ms (wall-clock since session start, ms) → fmt_dur is the PRIMARY text of this time segment,
-    # REPLACING the absolute last-prompt clock. When no duration is available (older CC without the cost field) the segment falls back
-    # to the legacy "HH:MM" / "MM-DD HH:MM" clock label — backward compatible, and the path the test suite's no-cost frames exercise.
+    # Time-segment PRIMARY text: a THREE-LEVEL fallback chain, all REPLACING the absolute last-prompt clock.
+    #   1. cost.total_api_duration_ms (>0): cumulative API-wait/"thinking" ms — the time Claude spent producing responses this session,
+    #      EXCLUDING idle and EXCLUDING local tool execution — formatted seconds-grained by fmt_dur_s ("3m45s"). Closest available proxy
+    #      for "how long did Claude actually think", so it takes precedence over wall-clock.
+    #   2. else cost.total_duration_ms (>0): session wall-clock since start (idle included), formatted by fmt_dur ("1H15m").
+    #   3. else the legacy "HH:MM" / "MM-DD HH:MM" clock label (older CC without either cost field) — backward compatible, and the path
+    #      the test suite's no-cost frames exercise.
+    # Levels 1 and 2 both land in dur_str so the segment-emit guard, the (Δ) delta logic, and the clock-fallback branch below are shared.
     dur_str=""
-    if [ -n "$dur_ms" ] && [ "$dur_ms" -gt 0 ] 2>/dev/null; then
+    if [ -n "$api_ms" ] && [ "$api_ms" -gt 0 ] 2>/dev/null; then
+        fmt_dur_s "$(( api_ms / 1000 ))"; dur_str="$_dur"
+    elif [ -n "$dur_ms" ] && [ "$dur_ms" -gt 0 ] 2>/dev/null; then
         fmt_dur "$(( dur_ms / 1000 ))"; dur_str="$_dur"
     fi
-    # Render "<primary> (Δ)": the primary text (session duration, or the clock fallback) is dim; Δ ("how long since the last prompt") is
+    # Render "<primary> (Δ)": the primary text (API time, session duration, or the clock fallback) is dim; Δ ("how long since the last prompt") is
     # colored as a prompt-cache-freshness signal (thresholds = the two real cache TTLs, see LASTMSG_WARN/STALE in statusline-command.sh).
     # Δ under a minute is hidden. The text is honest elapsed time; only the Δ color encodes the cache read — the script can't see CC's
     # real cache state, so it won't claim one in words.
-    # Cross-day correctness applies ONLY to the clock fallback: lm_epoch is a UTC Unix time but the stored "HH:MM" label is LOCAL, so a
-    # prompt from a prior local calendar day would be misread as today; when lm_epoch and now fall on DIFFERENT local days, prepend the
-    # local date ("MM-DD HH:MM"). The duration primary is an elapsed span, not a wall clock, so it needs no such fix. The comparison is a
+    # Cross-day correctness applies ONLY to the clock fallback (reached only when BOTH cost duration fields are unavailable): lm_epoch is a
+    # UTC Unix time but the stored "HH:MM" label is LOCAL, so a prompt from a prior local calendar day would be misread as today; when
+    # lm_epoch and now fall on DIFFERENT local days, prepend the local date ("MM-DD HH:MM"). Both duration primaries (API time, session
+    # duration) are elapsed spans, not wall clocks, so they need no such fix. The comparison is a
     # calendar-DAY difference (not a fixed 24h age): a 23:50 prompt rendered at 00:10 next day is cross-day at Δ=20m. The local date is
     # resolved with `date -r <epoch>` (BSD/macOS, same family as the script's stat -f), so DST is handled with no manual offset math. The
     # date fork only runs inside the Δ>=60 + clock-fallback branch, keeping the common path fork-free. (Deliberate: design.md's "Δ>=1h
