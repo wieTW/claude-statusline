@@ -84,22 +84,9 @@ The burn alarm SHALL be displayed adjacent to the 5-hour quota segment ONLY WHEN
 
 - GIVEN remaining = 40% (used 60%), slope = 20%/h, time-to-reset = 3h
 - WHEN the projection is computed
-- THEN `time_to_exhaust = remaining / slope = 40 / 20 = 2.0h`, so `projected_exhaust = now + 2h`; since `2.0h < 3h` (before reset) AND slope > 0, BOTH gates pass and the alarm SHALL be shown
+- THEN `time_to_exhaust = remaining / slope = 40 / 20 = 2.0h` (120m), so `projected_exhaust = now + 2h`; since `2.0h < 3h` (before reset) AND slope > 0, BOTH MANDATORY gates pass and a `burn_tte` IS emitted — but the final DISPLAY additionally depends on the `BURN_SENS` ceiling (see the "Configurable sensitivity knob" requirement): under the default `balanced` level the 120m projection exceeds the 105-minute (6300s) ceiling, so `build_burn` returns nothing and the alarm stays hidden
 - GIVEN the same remaining = 40% and slope = 20%/h but time-to-reset = 1h
 - THEN `time_to_exhaust = 2.0h >= 1h`, gate (b) fails, and the alarm SHALL NOT be shown
-
-
-<!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
-code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
--->
 
 ---
 ### Requirement: Burn alarm indicator content and color thresholds

@@ -87,7 +87,7 @@ This requirement MUST be implemented inside `build_left` in `lib/render.sh`, whi
 ---
 ### Requirement: Cross-day timestamps include the date
 
-WHEN the primary text is the `HH:MM` clock fallback (that is, `cost.total_duration_ms` is unavailable) AND the last prompt's local calendar day differs from the current local calendar day, the displayed clock MUST include the date so that a prior-day time is not misread as today; when the last prompt occurred on the current local calendar day, a bare `HH:MM` MUST be shown. The session-duration primary text is an elapsed span, not a wall clock, and MUST NOT receive a date prefix.
+WHEN the primary text is the `HH:MM` clock fallback (that is, `cost.total_duration_ms` is unavailable) AND the last prompt's local calendar day differs from the current local calendar day, the displayed clock MUST include the date (only when the delta is shown, i.e. `lm_age >= 60s`, matching the clock-fallback + delta branch) so that a prior-day time is not misread as today; when the last prompt occurred on the current local calendar day, a bare `HH:MM` MUST be shown. The session-duration primary text is an elapsed span, not a wall clock, and MUST NOT receive a date prefix.
 
 The calendar-day comparison MUST be computed from the local calendar date of `lm_epoch` versus the local calendar date of `now` (a difference in local calendar day, NOT a fixed 24-hour age threshold), so a prompt at `23:50` followed by a render at `00:10` the next day is treated as cross-day even though the age is 20 minutes. The date-prefixed form MUST NOT change the delta computation or its color tier; only the clock text gains a date prefix.
 
@@ -115,7 +115,7 @@ The calendar-day comparison MUST be computed from the local calendar date of `lm
 
 #### Scenario: Different local calendar day prefixes the date under clock fallback
 
-- **WHEN** the primary text is the clock fallback and `lm_epoch` and `now` fall on different local calendar days
+- **WHEN** the primary text is the clock fallback and `lm_epoch` and `now` fall on different local calendar days (only when the delta is shown, i.e. `lm_age >= 60s`)
 - **THEN** the clock text SHALL include the date prefix (for example `MM-DD HH:MM`) ahead of the time, so the prior-day prompt is not read as today
 
 ##### Example: prompt 26 hours ago carries the date
@@ -134,16 +134,6 @@ The calendar-day comparison MUST be computed from the local calendar date of `lm
 
 - **WHEN** `cost.total_duration_ms` is unavailable and the last-message file holds an older format whose trailing token is not an all-digit epoch (so `lm_epoch` resolves empty)
 - **THEN** the stored string SHALL be displayed verbatim as the dim primary text with no delta and no added date prefix, preserving backward compatibility for sessions whose file has not yet been rewritten
-
-<!-- @trace
-source: time-segment-session-duration
-updated: 2026-06-27
-code:
-  - lib/collect.sh
-  - CLAUDE.md
-  - lib/render.sh
-  - tests/run-tests.sh
--->
 
 ---
 ### Requirement: Time segment omitted when no timestamp inputs are available

@@ -8,7 +8,7 @@ The adaptive-layout capability governs how the single status line fits the termi
 
 ### Requirement: Drawable-width invariant
 
-The rendered status line MUST NOT exceed the drawable terminal width, defined as `term_cols - EDGE_PAD`, at any terminal width, with perl present or absent, and including the pathological 1–2 column case. The renderer MUST achieve this without ever wrapping the single line into two physical rows. This invariant is the topmost constraint and every degradation tier below it MUST hold it.
+When the drawable terminal width, defined as `term_cols - EDGE_PAD`, is positive (`term_cols > EDGE_PAD`), the rendered status line MUST NOT exceed it, with perl present or absent. When `term_cols` is less than or equal to `EDGE_PAD`, so the drawable width is zero or negative, the numeric bound does not apply and the renderer MUST guarantee only the single-physical-row property. At every terminal width the renderer MUST NOT wrap the single line into two physical rows. This invariant is the topmost constraint and every degradation tier below it MUST hold it.
 
 The visible-column accounting that enforces this invariant (`vis_width`) MUST count bytes under the pinned `LC_ALL=C` locale and MUST assume every escape sequence reaching it is a self-emitted SGR code that ends in `m`; the design relies on `parse_input` being the only external-string sanitizer and on the 256-codepoint cap that bounds `vis_width`'s O(n²) ASCII strip. The renderer MUST NOT use `set -e`, and every background collection job feeding the renderer MUST redirect stdin from `/dev/null`.
 
@@ -36,19 +36,6 @@ The visible-column accounting that enforces this invariant (`vis_width`) MUST co
 - WHEN the renderer computes available width
 - THEN `avail = 137`, and the emitted line's visible width is `<= 137`
 
-
-<!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
-code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
--->
-
 ---
 ### Requirement: Per-segment priority and forms
 
@@ -62,7 +49,7 @@ Each renderable segment MUST be assigned a fixed priority and, where a shorter r
 
 ##### Example: model name compacts instead of dropping
 
-- GIVEN the model segment `Opus 4.8 (1M)` does not fit in full form but its compact form `Opus` fits in the remaining width
+- GIVEN the model segment `Opus 4.8(1M)` does not fit in full form but its compact form `Opus` fits in the remaining width
 - WHEN the renderer handles the model segment
 - THEN the renderer emits `Opus` and SHALL NOT drop the model segment
 
@@ -77,22 +64,9 @@ Each renderable segment MUST be assigned a fixed priority and, where a shorter r
 | Segment | Full form | Compact form |
 | --- | --- | --- |
 | context bar | 12-cell gradient bar + `N%` | plain `N%` text |
-| model name | `Opus 4.8 (1M)` | `Opus` |
+| model name | `Opus 4.8(1M)` | `Opus` |
 | session name | full name | head form with `…` |
 | 5-hour quota | `2H2m 76%` | `76%` (countdown dropped, burn alarm kept) |
-
-
-<!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
-code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
--->
 
 ---
 ### Requirement: Fixed sacrifice order
@@ -109,7 +83,7 @@ The order MUST be:
 6. Drop the last-message time segment.
 7. Drop the 7-day quota segment.
 8. Drop the token segment entirely (session token and subagent token together).
-9. Shorten the model name (for example `Opus 4.8 (1M)` to `Opus`).
+9. Shorten the model name (for example `Opus 4.8(1M)` to `Opus`).
 10. Drop the model name.
 11. Truncate the session name with `…`.
 12. Drop the session name.
@@ -152,19 +126,6 @@ The order MUST be:
 | 13 | compact | 5-hour quota to remaining% only |
 | 14 | retain | core (path basename + context%) |
 
-
-<!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
-code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
--->
-
 ---
 ### Requirement: Shrink and truncate preferred over drop
 
@@ -184,60 +145,34 @@ Within the fixed sacrifice order, every step that compacts a segment (collapsing
 
 ##### Example: model name shrink precedes model drop
 
-- GIVEN the model name `Opus 4.8 (1M)` and a width where step 8 has been applied but the line still overflows
+- GIVEN the model name `Opus 4.8(1M)` and a width where step 8 has been applied but the line still overflows
 - WHEN the renderer reaches model handling
 - THEN step 9 shortens it to `Opus` first
 - AND only if the line still overflows does step 10 drop the model name entirely
 
-
-<!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
-code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
--->
-
 ---
 ### Requirement: Core always remains
 
-The core, consisting of the path basename and the context percentage, MUST always be present in the emitted line at every terminal width, including the pathological 1–2 column case. The renderer MUST NOT drop, blank, or fully truncate away either the path basename or the context percentage as part of any degradation step.
+The context percentage is the single core element that MUST always be present in the emitted line at every terminal width, including the pathological 1–2 column case. The renderer MUST NOT drop, blank, or fully truncate away the context percentage as part of any degradation step. The path basename is head-truncated on a best-effort basis to fit ahead of the percentage; it is an optional companion that the renderer SHALL fully sacrifice at very narrow drawable widths — roughly `avail < ctx-width + 3`, where the remaining path budget falls below two columns — so that the percentage always survives.
 
 #### Scenario: core survives the narrowest terminal
 
 - **WHEN** the terminal is so narrow that every droppable and compactable segment has been removed or collapsed
-- **THEN** the emitted line still contains the path basename and the context percentage
+- **THEN** the emitted line still contains the context percentage, with the path basename retained ahead of it only as far as the drawable width allows
 - **AND** the line's visible width is less than or equal to `term_cols - EDGE_PAD`
 
 #### Scenario: core survives a 1–2 column terminal without overflow
 
 - **WHEN** `term_cols` is 1 or 2 and perl is unavailable
 - **THEN** the renderer emits a line that does not wrap and does not exceed the drawable width using the pure-bash degraded truncation fallback
-- **AND** the core content is retained as far as the drawable width allows, with the path basename head-truncated rather than the context percentage removed
+- **AND** the context percentage is retained, with the path basename head-truncated into whatever budget remains and dropped entirely when no path budget remains, the percentage never removed
 
 ##### Example: core at minimal width
 
 - GIVEN `term_cols = 20`, `EDGE_PAD = 3`, a deep path, and a full original segment set
 - WHEN the renderer degrades to the core-only tier
-- THEN the emitted line contains the path basename and `N%`
+- THEN the emitted line contains the context percentage `N%`, with the path basename head-truncated to fit ahead of it while the drawable width still admits a path cell
 - AND its visible width is `<= 17`
-
-
-<!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
-code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
--->
 
 ---
 ### Requirement: Width-tiered rendering scenarios
