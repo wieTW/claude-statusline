@@ -348,7 +348,13 @@ build_left() {
     if [ -n "$last_msg" ] || [ -n "$dur_str" ]; then
         local lm_delta="" lm_col="" lm_primary="$dur_str"
         if [ -n "$lm_epoch" ]; then
-            lm_age=$(( now - lm_epoch ))
+            # (Δ) measures idle since the turn's last activity, not age since the prompt: anchor on act_epoch
+            # (transcript mtime ≈ turn end ≈ last cache refresh; written by collect.sh) when it's a valid epoch,
+            # else fall back to lm_epoch (prompt submit) so a render without a usable transcript reproduces the
+            # pre-change behavior. The clock-fallback label and cross-day prefix below still use lm_epoch.
+            local delta_epoch="$act_epoch"
+            case "$delta_epoch" in ''|*[!0-9]*) delta_epoch="$lm_epoch" ;; esac
+            lm_age=$(( now - delta_epoch ))
             if [ "$lm_age" -lt 0 ]; then lm_age=0; fi
             if [ "$lm_age" -ge 60 ]; then
                 fmt_dur "$lm_age"; lm_delta="$_dur"

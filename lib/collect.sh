@@ -4,7 +4,7 @@
 #
 # READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
-#         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now
+#         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now act_epoch
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
 #         session_tokens subagent_tokens burn_tte
 #
@@ -128,6 +128,15 @@ parse_input() {
     # downstream reader already treats empty as a graceful no-op.
     case "$session_id" in ''|*[!0-9A-Za-z_-]*) session_id="" ;; esac
     case "$transcript_path" in *..*) transcript_path="" ;; esac
+    # act_epoch: the turn's last-activity time = the transcript file's mtime. The transcript is appended on every
+    # request during a turn and frozen while idle, so its mtime tracks the last request (≈ turn end ≈ the last
+    # prompt-cache refresh). render.sh's build_left anchors the (Δ) idle delta on this; empty when the transcript is
+    # unavailable → render falls back to lm_epoch (prompt submit), preserving pre-change behavior. BSD stat (macOS).
+    act_epoch=""
+    if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+        act_epoch=$(stat -f %m "$transcript_path" 2>/dev/null)
+        case "$act_epoch" in ''|*[!0-9]*) act_epoch="" ;; esac
+    fi
 }
 
 # Bash-side twin of parse_input's jq sanitizer for the two fields that bypass jq: git_branch (from git, in collect_status) and

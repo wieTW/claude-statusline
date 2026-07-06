@@ -228,11 +228,17 @@ dim and all **replacing** the absolute last-prompt clock:
 3. else the legacy **`HH:MM` clock** (see clock fallback below).
 Both duration primaries land in the same `dur_str`, so the segment-emit guard, the `(Δ)` logic,
 and the clock-fallback branch are shared. `fmt_dur` itself is untouched. A parenthesized delta
-`(Δ)` — how long since the last user prompt — is appended once
-that age is ≥60s, and the **delta's colour** signals prompt-cache freshness via the two idle
-tiers (dim < `LASTMSG_WARN` ≤ yellow < `LASTMSG_STALE` ≤ red). A sub-minute age hides the
-delta. Both texts are honest elapsed time; only the Δ colour asserts the cache read (the
-script can't see CC's real cache TTL). Negative ages (clock skew) clamp to 0.
+`(Δ)` — the **idle since the turn's last activity** (how long since Claude last did work), NOT the age
+since the last prompt — is appended once that idle is ≥60s, and the **delta's colour** signals
+prompt-cache freshness via the two idle tiers (dim < `LASTMSG_WARN` ≤ yellow < `LASTMSG_STALE` ≤ red).
+The idle is anchored on `act_epoch` (the transcript file's mtime, written by `collect.sh`): the
+transcript is appended per request and frozen while idle, so its mtime ≈ the last request ≈ turn end ≈
+the last cache refresh. This is what makes the colour thresholds line up with the real cache TTL — a long
+turn that just finished reads as a small warm delta, not a red one the size of the turn. When the
+transcript is unavailable `act_epoch` is empty and the delta **falls back to `lm_epoch`** (prompt submit),
+reproducing the pre-change behaviour; the clock-fallback label and cross-day prefix below still use
+`lm_epoch` regardless. A sub-minute idle hides the delta. Both texts are honest elapsed time; only the Δ
+colour asserts the cache read (the script can't see CC's real cache TTL). Negative ages (clock skew) clamp to 0.
 
 **Clock fallback (backward compatible):** when **neither** cost duration field is usable (older
 CC, absent, or non-numeric/≤0 values), the primary text falls back to the legacy `HH:MM` clock with the same

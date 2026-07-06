@@ -445,7 +445,12 @@ rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
 echo "── U. LAST-MSG: 'HH:MM (Δ)' cache-age delta — <1m hides Δ, 5m/1h colour tiers, old format verbatim, cross-day date prefix"
 NOWS=$(jq -n 'now|floor')
 LMF="$FAKE_HOME/.claude/last-msg/sl-selftest"
-lmrun() { printf '09:30 %s\n' "$(( NOWS - $1 ))" > "$LMF"; run 200 "$J"; }      # $1=age sec → render with that last-msg age
+# lmset <clock> <epoch>: write the per-session last-msg file AND set the transcript mtime to the same epoch.
+# The (Δ) idle delta anchors on the transcript mtime (last activity ≈ turn end); lm_epoch still drives the clock
+# label + cross-day prefix. Setting both to <epoch> keeps the delta reading as (now-epoch), so these fixtures
+# assert the same outputs after the anchor moved from prompt time to last activity.
+lmset() { printf '%s %s\n' "$1" "$2" > "$LMF"; touch -t "$(date -r "$2" '+%Y%m%d%H%M.%S')" "$TP" 2>/dev/null; }
+lmrun() { lmset 09:30 "$(( NOWS - $1 ))"; run 200 "$J"; }                        # $1=idle sec → render with that last-activity age
 pcode() { sed -E 's/.*\x1b\[([0-9;]*)m\(.*/\1/'; }    # SGR code right before the LAST "(" (the Δ segment)
 strip()  { sed 's/\x1b\[[0-9;]*m//g'; }
 # U1 Δ<1min suppressed → clock time only (no "(" after the time)
@@ -491,6 +496,28 @@ fi
 u8cross=$(lmrun "$U6AGE" | pcode); u8bare=$(printf '%s' "$u3raw" | pcode)
 if [ -n "$u8cross" ] && [ "$u8cross" = "$u8bare" ]; then echo "  U8 date prefix keeps the same Δ colour tier (red) OK";
 else echo "  ★ FAIL U8 date prefix changed the Δ colour tier (cross=[$u8cross] bare=[$u8bare])"; fail=1; fi
+# U9 REGRESSION: (Δ) anchors on the turn's last activity (transcript mtime), NOT the prompt time (lm_epoch).
+# A prompt submitted 2h10m ago whose turn last wrote 90s ago must read as a warm ~(1m) idle, never a red (2H10m).
+# Falsifiable: revert the render change (delta back on lm_epoch) and this asserts (2H10m) → FAIL.
+printf '09:30 %s\n' "$(( NOWS - 7800 ))" > "$LMF"                 # prompt 2h10m ago (drives the clock label only)
+touch -t "$(date -r "$(( NOWS - 90 ))" '+%Y%m%d%H%M.%S')" "$TP"  # last activity 90s ago (drives the idle delta)
+u9=$(run 200 "$J" | strip)
+case "$u9" in
+  *"09:30 (1m)"*|*"09:30 (2m)"*) echo "  U9 idle anchored on transcript mtime (warm ~1m, not 2H10m) OK" ;;
+  *"(1H"*|*"(2H"*) echo "  ★ FAIL U9 delta anchored on prompt time, not last activity: [$u9]"; fail=1 ;;
+  *) echo "  ★ FAIL U9 expected 09:30 (1m): [$u9]"; fail=1 ;;
+esac
+# U10 FALLBACK: transcript_path points at a missing file → act_epoch empty → (Δ) falls back to lm_epoch (prompt
+# time), reproducing pre-change behavior for hosts/renders without a usable transcript.
+printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+JNOTP=$(jq -cn --arg cwd "$SL" '
+  { workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:6.2},
+    rate_limits:{ five_hour:{used_percentage:23, resets_at:(now+3960|floor)},
+                  seven_day:{used_percentage:84, resets_at:(now+112000|floor)} },
+    session_id:"sl-selftest", transcript_path:"/nonexistent/sl-missing.jsonl" }')
+u10=$(run 200 "$JNOTP" | strip)
+case "$u10" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  U10 transcript-missing falls back to lm_epoch (10m) OK" ;; *) echo "  ★ FAIL U10 fallback expected 09:30 (10m): [$u10]"; fail=1 ;; esac
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
 
 echo "── DUR. SESSION DURATION drives the time segment: cost.total_duration_ms → '<dur> (Δ)', replaces clock, keeps Δ, format boundaries"
@@ -502,12 +529,12 @@ mkdur() { jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson d "$1" '
                   seven_day:{used_percentage:84, resets_at:(now+112000|floor)} },
     session_id:"sl-selftest", transcript_path:$tp, cost:{total_duration_ms:$d} }'; }
 # DUR1: duration is the PRIMARY text, the absolute clock 09:30 is REPLACED, the Δ-since-last-prompt is kept → "1H15m (10m)"
-printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+lmset 09:30 "$(( NOWS - 600 ))"
 d1=$(run 200 "$(mkdur 4521000)" | strip)
 case "$d1" in *"1H15m (10m)"*|*"1H15m (11m)"*) echo "  DUR1 duration primary + Δ kept (1H15m (10m)) OK" ;; *) echo "  ★ FAIL DUR1 expected 1H15m (10m): [$d1]"; fail=1 ;; esac
 case "$d1" in *"09:30"*) echo "  ★ FAIL DUR1 absolute clock 09:30 not replaced by duration: [$d1]"; fail=1 ;; esac
 # DUR2: last prompt <1min → Δ hidden, duration alone (clock still replaced)
-printf '09:30 %s\n' "$(( NOWS - 30 ))" > "$LMF"
+lmset 09:30 "$(( NOWS - 30 ))"
 d2=$(run 200 "$(mkdur 4521000)" | strip)
 case "$d2" in *"1H15m ("*) echo "  ★ FAIL DUR2 <1min should hide Δ: [$d2]"; fail=1 ;; *"1H15m"*) echo "  DUR2 <1min: duration only, no Δ OK" ;; *) echo "  ★ FAIL DUR2 duration missing: [$d2]"; fail=1 ;; esac
 # DUR3: no last-msg file at all → duration still shows (the segment is duration-driven, not last-msg-driven)
@@ -520,7 +547,7 @@ case "$d4a" in *"40m"*) echo "  DUR4a <1h → 40m OK" ;; *) echo "  ★ FAIL DUR
 d4b=$(run 200 "$(mkdur 183600000)" | strip)   # 183,600,000 ms = 2 d 3 h
 case "$d4b" in *"2D3H"*) echo "  DUR4b >=1day → 2D3H OK" ;; *) echo "  ★ FAIL DUR4b expected 2D3H: [$d4b]"; fail=1 ;; esac
 # DUR5: no cost field → legacy clock fallback unchanged (the absolute clock still renders with its Δ)
-printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+lmset 09:30 "$(( NOWS - 600 ))"
 d5=$(run 200 "$J" | strip)
 case "$d5" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  DUR5 no-cost → legacy clock fallback (09:30) OK" ;; *) echo "  ★ FAIL DUR5 expected clock fallback 09:30 (10m): [$d5]"; fail=1 ;; esac
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
@@ -534,7 +561,7 @@ mkapi() { jq -cn --arg cwd "$SL" --arg tp "$TP" --argjson c "$1" '
                   seven_day:{used_percentage:84, resets_at:(now+112000|floor)} },
     session_id:"sl-selftest", transcript_path:$tp, cost:$c }'; }
 # API1: api time is the PRIMARY (overrides BOTH the duration 1H15m and the clock 09:30); the Δ-since-last-prompt is kept → "3m45s (10m)"
-printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+lmset 09:30 "$(( NOWS - 600 ))"
 a1=$(run 200 "$(mkapi '{"total_duration_ms":4521000,"total_api_duration_ms":225000}')" | strip)
 case "$a1" in *"3m45s (10m)"*|*"3m45s (11m)"*) echo "  API1 api primary + Δ kept (3m45s (10m)) OK" ;; *) echo "  ★ FAIL API1 expected 3m45s (10m): [$a1]"; fail=1 ;; esac
 case "$a1" in *"1H15m"*) echo "  ★ FAIL API1 duration form 1H15m leaked (api must replace it): [$a1]"; fail=1 ;; esac
@@ -565,16 +592,16 @@ for bad in '0' '"abc"' '-5000'; do
 done
 [ "$a4ok" = 1 ] && echo "  API4 invalid api (0/\"abc\"/-5000) falls back to duration 1H15m OK"
 # API5: cost object present but NEITHER field usable → clock fallback with its Δ → "09:30 (10m)"
-printf '09:30 %s\n' "$(( NOWS - 600 ))" > "$LMF"
+lmset 09:30 "$(( NOWS - 600 ))"
 a5=$(run 200 "$(mkapi '{"total_duration_ms":0,"total_api_duration_ms":0}')" | strip)
 case "$a5" in *"09:30 (10m)"*|*"09:30 (11m)"*) echo "  API5 both cost fields unusable → clock fallback 09:30 (10m) OK" ;; *) echo "  ★ FAIL API5 expected clock fallback 09:30 (10m): [$a5]"; fail=1 ;; esac
 # API6: last prompt <1min → Δ hidden, api primary alone → "3m45s" with no "("
-printf '14:05 %s\n' "$(( NOWS - 30 ))" > "$LMF"
+lmset 14:05 "$(( NOWS - 30 ))"
 a6=$(run 200 "$(mkapi '{"total_api_duration_ms":225000}')" | strip)
 case "$a6" in *"3m45s ("*) echo "  ★ FAIL API6 sub-minute prompt should hide Δ: [$a6]"; fail=1 ;; *"3m45s"*) echo "  API6 <1min prompt → api primary only, no Δ OK" ;; *) echo "  ★ FAIL API6 api primary missing: [$a6]"; fail=1 ;; esac
 # API7: cross-day prompt (26h ago → prior local calendar day) with an API primary → the elapsed-span primary is NEVER date-prefixed
 # (spec normative "An elapsed-span primary is never date-prefixed"); the date "MM-DD" prefix is a clock-fallback-only concern. The Δ still shows.
-printf '12:00 %s\n' "$(( NOWS - 93600 ))" > "$LMF"
+lmset 12:00 "$(( NOWS - 93600 ))"
 a7=$(run 200 "$(mkapi '{"total_api_duration_ms":225000}')" | strip)
 case "$a7" in
   *[0-9][0-9]-[0-9][0-9]\ 3m45s*) echo "  ★ FAIL API7 elapsed-span primary got a date prefix: [$a7]"; fail=1 ;;

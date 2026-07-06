@@ -1,10 +1,4 @@
-# last-message-age Specification
-
-## Purpose
-
-The last-message-age capability defines the time segment of the line. It specifies the session-duration primary text (with an HH:MM clock fallback for older Claude Code builds that omit the duration field), the parenthesized delta since the last user prompt whose color signals prompt-cache freshness across the two cache TTLs, the sub-minute hide and negative-age clamp, and the cross-day date prefix applied to the clock fallback only.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Last-message timestamp with cache-freshness-colored delta
 
@@ -131,19 +125,6 @@ This requirement MUST be implemented inside `build_left` in `lib/render.sh`, whi
 - **WHEN** the last-activity epoch used for the delta (`act_epoch` when valid, otherwise `lm_epoch`) is greater than `now` (clock skew between the activity-writing host and the render)
 - **THEN** `lm_age` SHALL be clamped to 0, the delta SHALL be hidden, and the bare primary text SHALL be shown
 
-
-<!-- @trace
-source: delta-anchor-turn-end
-updated: 2026-07-04
-code:
-  - tests/run-tests.sh
-  - .spectra.yaml
-  - lib/collect.sh
-  - CLAUDE.md
-  - lib/render.sh
--->
-
----
 ### Requirement: Cross-day timestamps include the date
 
 WHEN the primary text is the `HH:MM` clock fallback (that is, BOTH `cost.total_api_duration_ms` and `cost.total_duration_ms` are unavailable) AND the last prompt's local calendar day differs from the current local calendar day, the displayed clock MUST include the date (only when the delta is shown, i.e. the idle-anchored `lm_age >= 60s`, matching the clock-fallback + delta branch) so that a prior-day time is not misread as today; when the last prompt occurred on the current local calendar day, a bare `HH:MM` MUST be shown. The clock label and the calendar-day comparison MUST use `lm_epoch` (the prompt-submit time), which is unaffected by the delta's re-anchoring to `act_epoch`. Both the API-time primary and the session-duration primary are elapsed spans, not wall clocks, and MUST NOT receive a date prefix.
@@ -193,52 +174,3 @@ The calendar-day comparison MUST be computed from the local calendar date of `lm
 
 - **WHEN** both `cost` duration fields are unavailable and the last-message file holds an older format whose trailing token is not an all-digit epoch (so `lm_epoch` resolves empty)
 - **THEN** the stored string SHALL be displayed verbatim as the dim primary text with no delta and no added date prefix, preserving backward compatibility for sessions whose file has not yet been rewritten
-
-
-<!-- @trace
-source: delta-anchor-turn-end
-updated: 2026-07-04
-code:
-  - tests/run-tests.sh
-  - .spectra.yaml
-  - lib/collect.sh
-  - CLAUDE.md
-  - lib/render.sh
--->
-
----
-### Requirement: Time segment omitted when no timestamp inputs are available
-
-WHEN neither timestamp input is available — that is, `build_left` reads no per-session last-message string (`last_msg` empty because the `session_id` is empty or path-traversal-shaped, or no last-message file exists) AND the duration chain produces no primary (`dur_str` empty because NEITHER `cost.total_api_duration_ms` NOR `cost.total_duration_ms` is present, numeric, and greater than zero) — the time segment SHALL be omitted entirely and SHALL NOT be appended to the left parts. The segment SHALL be emitted only when at least one of the two inputs is present, matching the code guard `[ -n "$last_msg" ] || [ -n "$dur_str" ]` in `build_left`. This omission MUST NOT introduce `set -e`, MUST remain bash 3.2 compatible, and MUST leave the remaining left segments and the right-align algorithm unaffected (an absent time segment is simply not present in `parts`).
-
-#### Scenario: Both timestamp inputs absent omits the time segment
-
-- **WHEN** no last-message file is available (so `last_msg` is empty) AND neither `cost.total_api_duration_ms` nor `cost.total_duration_ms` yields a positive duration (so `dur_str` is empty)
-- **THEN** `build_left` SHALL append no time segment to `parts`, and the rendered line SHALL contain neither a duration nor a clock nor a `(Δ)` delta
-
-##### Example: fresh session with no last-message file and no duration fields
-
-- **GIVEN** the stdin JSON has no `cost` object and no last-message file exists for the current `session_id`
-- **WHEN** `build_left` builds the left parts
-- **THEN** no `seg_lastmsg` is appended and the time segment does not appear anywhere on the line
-
-#### Scenario: Either input alone keeps the time segment present
-
-- **WHEN** exactly one input is available — either a positive duration from the API-time-or-session-duration chain with no last-message file, or a last-message file with no positive duration
-- **THEN** the time segment SHALL be emitted, showing the available primary text (the dim `fmt_dur_s` API time, the dim `fmt_dur` session duration, or the dim `HH:MM` clock label), with the `(Δ)` delta applied only when its ≥60s rule is met
-
-##### Example: API time present but no last-message file
-
-- **GIVEN** `cost.total_api_duration_ms = 225000` and no last-message file exists for the current `session_id`
-- **WHEN** `build_left` renders the time segment
-- **THEN** the output is the dim `3m45s` with no `(Δ)` suffix, and the time segment IS present on the line
-
-<!-- @trace
-source: time-segment-api-thinking-time
-updated: 2026-07-02
-code:
-  - CLAUDE.md
-  - lib/render.sh
-  - tests/run-tests.sh
-  - lib/collect.sh
--->
