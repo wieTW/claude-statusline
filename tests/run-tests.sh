@@ -279,7 +279,7 @@ JS=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
 sout=$(run 200 "$JS" | sed 's/\x1b\[[0-9;]*m//g')
 case "$sout" in *-[0-9]*%*) echo "  ★ FAIL negative remaining %: [$sout]"; fail=1 ;; *) echo "  no negative % OK" ;; esac
 
-echo "── T. RATE-SYNC: per-window authority = the NEWEST session's value (older sessions can't override) — climb / cap-raise drop / anti-reversal / persistence / keying / toggle / prune / legacy"
+echo "── T. RATE-SYNC: per-CLASS (W5/W7) authority = the NEWEST session's value (older sessions can't override) — climb / cap-raise drop / anti-reversal / persistence / re-key / toggle / prune / legacy / roll-adoption / class-isolation / sanity-bound"
 SLC="$FAKE_HOME/.claude/sl-ratelimit-cache"
 nocol() { sed 's/\x1b\[[0-9;]*m//g'; }
 rsj() {  # $1=used% $2=resets_at $3=session_id → minimal five_hour-only json (ctx pinned 5% so the only other "%" token is the rate)
@@ -290,28 +290,28 @@ rsj() {  # $1=used% $2=resets_at $3=session_id → minimal five_hour-only json (
 NOW=$(jq -n 'now|floor'); RT=$((NOW + 9000))   # active window key (~2.5h to reset)
 OLD=$((NOW - 5000)); RECENT=$((NOW - 100))     # an old vs a recent session's first_seen
 # T1 climb: authority is an OLD session at 40; a NEW session (first_seen=now > OLD) reports higher 75 → adopt → remaining 25%
-printf 'S sessOld %s\nW %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s\nW5 %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
 t1=$(run 120 "$(rsj 75 "$RT" sessNew)" | nocol)
 case "$t1" in *" 25%"*) echo "  T1 newer session raises (climb) → 25% OK" ;; *) echo "  ★ FAIL T1 expected 25% remaining: [$t1]"; fail=1 ;; esac
 # T2 cap-raise (THE incident): authority OLD at 70; a NEW session reports LOWER 38 → adopt → remaining 62%, not the stale 30%
-printf 'S sessOld %s\nW %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
 t2=$(run 120 "$(rsj 38 "$RT" sessNew)" | nocol)
 case "$t2" in *" 62%"*) echo "  T2 newer session lowers (cap raised) → 62%, not stale 30% OK" ;; *" 30%"*) echo "  ★ FAIL T2 stuck on stale high 70 (showed 30%): [$t2]"; fail=1 ;; *) echo "  ★ FAIL T2 expected 62%: [$t2]"; fail=1 ;; esac
 # T3 older can't override + persistence: authority set by a RECENT session at 75; an OLD frozen-low session reports 40 → ignored → stays 25% (setter need not be rendering)
-printf 'S sessRecent %s\nS sessOldFrozen %s\nW %s 75 %s\n' "$RECENT" "$OLD" "$RT" "$RECENT" > "$SLC"
+printf 'S sessRecent %s\nS sessOldFrozen %s\nW5 %s 75 %s\n' "$RECENT" "$OLD" "$RT" "$RECENT" > "$SLC"
 t3=$(run 120 "$(rsj 40 "$RT" sessOldFrozen)" | nocol)
 case "$t3" in *" 25%"*) echo "  T3 older session can't lower authority (no under-report) → 25% OK" ;; *" 60%"*) echo "  ★ FAIL T3 old frozen-low session overrode authority (showed 60%): [$t3]"; fail=1 ;; *) echo "  ★ FAIL T3 expected 25%: [$t3]"; fail=1 ;; esac
 # T4 anti-reversal: after a newer session lowers 70→38, the OLD frozen-HIGH session rendering again must NOT bounce it back to 30%
-printf 'S sessOld %s\nW %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
 run 120 "$(rsj 38 "$RT" sessNew)" >/dev/null     # newer session lowers to 38 (becomes authority @ now)
 t4=$(run 120 "$(rsj 70 "$RT" sessOld)" | nocol)  # the old session reports its stale 70 again
 case "$t4" in *" 62%"*) echo "  T4 stale-high old session can't undo the cap-raise → still 62% OK" ;; *" 30%"*) echo "  ★ FAIL T4 reverted to stale 70 (showed 30%): [$t4]"; fail=1 ;; *) echo "  ★ FAIL T4 expected 62%: [$t4]"; fail=1 ;; esac
-# T5 keying: a DIFFERENT window (different resets_at) must NOT inherit RT's authority
-printf 'S sessOld %s\nW %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+# T5 keying: a session reporting a NEWER window re-keys the class to its own report — it must NOT inherit the old window's value
+printf 'S sessOld %s\nW5 %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
 t5=$(run 120 "$(rsj 0 "$((NOW + 22000))" sessOther)" | nocol)
 case "$t5" in *" 100%"*) echo "  T5 separate window not polluted → 100% OK" ;; *) echo "  ★ FAIL T5 window polluted: [$t5]"; fail=1 ;; esac
 # T6 toggle: RL_SYNC=false must ignore the cache entirely → a frozen used=0 shows the raw 100% (cache still holds the RT authority)
-printf 'S sessOld %s\nW %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
 mkdir -p "$WORK/nosync/lib" && cp "$SL"/lib/*.sh "$WORK/nosync/lib/"
 sed 's/^RL_SYNC=true/RL_SYNC=false/' "$SL/statusline-command.sh" > "$WORK/nosync/statusline-command.sh"
 t6=$(printf '%s' "$(rsj 0 "$RT" sessOld)" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/nosync/statusline-command.sh" | nocol)
@@ -319,7 +319,7 @@ case "$t6" in *" 100%"*) echo "  T6 RL_SYNC=false ignores cache (100%) OK" ;; *)
 # T7 prune: a frame whose window already expired (resets_at<=now) must NOT be persisted as a W line
 rm -f "$SLC"; RTpast=$((NOW - 100))
 run 120 "$(rsj 90 "$RTpast" sessX)" >/dev/null
-if grep -q "^W $RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T7 expired window persisted to cache"; fail=1; else echo "  T7 expired window pruned from cache OK"; fi
+if grep -q "^W5 $RTpast " "$SLC" 2>/dev/null; then echo "  ★ FAIL T7 expired window persisted to cache"; fail=1; else echo "  T7 expired window pruned from cache OK"; fi
 # T8 legacy: an old-format "<resets_at> <used>" line is ignored (dropped), not read as an authority
 printf '%s 99\n' "$RT" > "$SLC"
 t8=$(run 120 "$(rsj 10 "$RT" sessZ)" | nocol)
@@ -330,11 +330,56 @@ t9bad=0; OLDF=$((NOW-18000))   # first_seen 5h ago, still well within the 7d win
 for ttl in 3600 abc; do
   mkdir -p "$WORK/ttl$ttl/lib" && cp "$SL"/lib/*.sh "$WORK/ttl$ttl/lib/"
   sed "s/^RL_REG_TTL=604800/RL_REG_TTL=$ttl/" "$SL/statusline-command.sh" > "$WORK/ttl$ttl/statusline-command.sh"
-  printf 'S sOldLive %s\nW %s 70 %s\n' "$OLDF" "$RT" "$OLDF" > "$SLC"
+  printf 'S sOldLive %s\nW5 %s 70 %s\n' "$OLDF" "$RT" "$OLDF" > "$SLC"
   printf '%s' "$(rsj 70 "$RT" sOldLive)" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/ttl$ttl/statusline-command.sh" >/dev/null 2>&1
   grep -q "^S sOldLive " "$SLC" 2>/dev/null || { echo "  ★ FAIL T9 RL_REG_TTL=$ttl pruned a live session's registry (clamp missing)"; t9bad=1; }
 done
 [ "$t9bad" -eq 0 ] && echo "  T9 undersized/non-numeric RL_REG_TTL clamped to 604800 floor (live registry kept) OK" || fail=1
+# T10 window-roll adoption (regression: frozen sessions went permanently stale after a roll — showed the pre-roll used% and a
+# perpetual 0m countdown): a frame whose OWN resets_at expired must adopt the live per-class authority — value AND resets_at
+# (countdown) — for both classes, and must sample the P series under the adopted (effective) live key.
+rsj2() {  # $1=used5 $2=reset5 $3=used7 $4=reset7 $5=session_id → five_hour+seven_day json
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --arg sid "${5:-sl-selftest}" --argjson u5 "$1" --argjson r5 "$2" --argjson u7 "$3" --argjson r7 "$4" '
+  { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
+    rate_limits:{five_hour:{used_percentage:$u5, resets_at:$r5}, seven_day:{used_percentage:$u7, resets_at:$r7}},
+    session_id:$sid, transcript_path:$tp }'; }
+RT7=$((NOW + 300000))
+printf 'S sFrozen %s\nS sFresh %s\nW5 %s 3 %s\nW7 %s 24 %s\n' "$OLD" "$RECENT" "$RT" "$RECENT" "$RT7" "$RECENT" > "$SLC"
+t10=$(run 200 "$(rsj2 87 $((NOW-2000)) 79 $((NOW-1000)) sFrozen)" | nocol)
+t10bad=0
+case "$t10" in *"2H"*" 97%"*) ;; *) echo "  ★ FAIL T10 5h did not adopt live authority value+countdown: [$t10]"; t10bad=1 ;; esac
+case "$t10" in *" 76%"*) ;; *) echo "  ★ FAIL T10 7d did not adopt live authority: [$t10]"; t10bad=1 ;; esac
+case "$t10" in *" 13%"*|*" 21%"*) echo "  ★ FAIL T10 frozen pre-roll used% leaked into the display: [$t10]"; t10bad=1 ;; esac
+grep -q "^P $RT " "$SLC" 2>/dev/null || { echo "  ★ FAIL T10 frozen frame did not sample under the effective live key"; t10bad=1; }
+[ "$t10bad" -eq 0 ] && echo "  T10 post-roll frame adopts live W5+W7 authority (value + countdown + effective-key sample) OK" || fail=1
+# T11 class isolation: with only a live W7 authority, an expired 5h window must NOT cross-adopt it — the 5h segment keeps the
+# frozen fallback (own value + 0m countdown, the documented no-authority residual), while 7d adopts its own class authority.
+printf 'S sFrozen %s\nS sFresh %s\nW7 %s 24 %s\n' "$OLD" "$RECENT" "$RT7" "$RECENT" > "$SLC"
+t11=$(run 200 "$(rsj2 87 $((NOW-2000)) 79 $((NOW-1000)) sFrozen)" | nocol)
+t11bad=0
+case "$t11" in *"0m 13%"*) ;; *) echo "  ★ FAIL T11 expected frozen 5h fallback (0m 13%): [$t11]"; t11bad=1 ;; esac
+case "$t11" in *" 76%"*) ;; *) echo "  ★ FAIL T11 7d did not adopt its class authority: [$t11]"; t11bad=1 ;; esac
+if grep -q "^W5 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T11 an expired 5h report was persisted as authority"; t11bad=1; fi
+[ "$t11bad" -eq 0 ] && echo "  T11 class isolation: 5h keeps frozen fallback, 7d adopts W7 OK" || fail=1
+# T12 window-key sanity bound: an absurd far-future key (>= now+691200, 8d) must be refused on load AND on report — it can never
+# become an immortal authority (the real user cache carried a W 9999999999 line for over a month before this guard).
+printf 'S sFroz %s\nW5 9999999999 28 %s\n' "$OLD" "$RECENT" > "$SLC"
+t12=$(run 200 "$(rsj 10 "$RT" sFroz)" | nocol)
+t12bad=0
+case "$t12" in *" 90%"*) ;; *) echo "  ★ FAIL T12 absurd stored key won authority (expected own 90%): [$t12]"; t12bad=1 ;; esac
+if grep -q " 9999999999 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T12 absurd key survived the rewrite"; t12bad=1; fi
+run 200 "$(rsj 10 9999999999 sAbsRep)" >/dev/null
+if grep -q " 9999999999 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T12 absurd reported key was persisted"; t12bad=1; fi
+[ "$t12bad" -eq 0 ] && echo "  T12 far-future keys refused on load and report (no immortal authority) OK" || fail=1
+# T13 legacy migration: an untagged old-schema `W` line must be dropped, never adopted — an OLDER frame reporting its own value
+# seeds the class fresh instead of bowing to the legacy authority; the rewrite carries no legacy line forward.
+printf 'S sOld2 %s\nW %s 40 %s\n' "$OLD" "$RT" "$RECENT" > "$SLC"
+t13=$(run 200 "$(rsj 75 "$RT" sOld2)" | nocol)
+t13bad=0
+case "$t13" in *" 25%"*) ;; *"60%"*) echo "  ★ FAIL T13 legacy W line adopted as authority (showed 60%): [$t13]"; t13bad=1 ;; *) echo "  ★ FAIL T13 expected 25%: [$t13]"; t13bad=1 ;; esac
+if grep -q "^W $RT " "$SLC" 2>/dev/null; then echo "  ★ FAIL T13 legacy W line carried forward"; t13bad=1; fi
+grep -q "^W5 $RT 75 " "$SLC" 2>/dev/null || { echo "  ★ FAIL T13 own report did not seed the class authority"; t13bad=1; }
+[ "$t13bad" -eq 0 ] && echo "  T13 legacy untagged W dropped on rewrite; frame's own report seeds W5 OK" || fail=1
 rm -f "$SLC"
 
 echo "── T2. RATE-SYNC CONCURRENCY: mkdir-lock serialises read+awk+mv (no lost-update), lock-contention safe-skip, empty-sid read-only, torn-cache survives"
@@ -343,37 +388,42 @@ rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
 # T2.0 spec Example (5.1): now≈now, window unexpired, OLD first_seen far back reports frozen-low 12, NEW first_seen recent reports 47 →
 # the persisted W must be NEW's (47, NEW first_seen); the OLD frame must DISPLAY 47 (adopt), never its own 12. (relative first_seen mirrors the now=1000 example)
 RTc=$((NOW + 9000)); OLDc=$((NOW - 5000)); NEWc=$((NOW - 100))
-printf 'S sNew %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"     # NEW already wrote authority 47
+printf 'S sNew %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"    # NEW already wrote authority 47
 t20=$(run 120 "$(rsj 12 "$RTc" sOldLow)" | nocol)                    # OLD frozen-low (first render → first_seen=now>OLDc? no: not seeded, defaults to now) reports 12
 # sOldLow has no S line → its first_seen defaults to `now` (this render), which is NEWER than NEW's NEWc → by the rule it WOULD become authority.
 # To honour the spec example (OLD must be the older one), pre-seed sOldLow as the genuinely-older session:
-printf 'S sNew %s\nS sOldLow %s\nW %s 47 %s\n' "$NEWc" "$OLDc" "$RTc" "$NEWc" > "$SLC"
+printf 'S sNew %s\nS sOldLow %s\nW5 %s 47 %s\n' "$NEWc" "$OLDc" "$RTc" "$NEWc" > "$SLC"
 t20=$(run 120 "$(rsj 12 "$RTc" sOldLow)" | nocol)
 case "$t20" in *" 53%"*) echo "  T2.0 old frozen-low adopts newer authority 47 → remaining 53% OK" ;;
   *" 88%"*) echo "  ★ FAIL T2.0 old session used its own frozen 12 (showed 88%): [$t20]"; fail=1 ;;
   *) echo "  ★ FAIL T2.0 expected 53% remaining: [$t20]"; fail=1 ;; esac
-wline=$(grep "^W $RTc " "$SLC")
-case "$wline" in "W $RTc 47 $NEWc") echo "  T2.0 persisted W = newer session's value+first_seen (47 $NEWc), old frame didn't clobber OK" ;;
+wline=$(grep "^W5 $RTc " "$SLC")
+case "$wline" in "W5 $RTc 47 $NEWc") echo "  T2.0 persisted W5 = newer session's value+first_seen (47 $NEWc), old frame didn't clobber OK" ;;
   *) echo "  ★ FAIL T2.0 W line clobbered by older session: [$wline]"; fail=1 ;; esac
 
-# T2.1 (5.1) Two sessions render CONCURRENTLY with DISTINCT windows → both W authority lines survive (no lost-update from racing rewrites)
+# T2.1 (5.1) Two sessions render CONCURRENTLY on DIFFERENT classes (one 5h, one 7d) → both class authority lines survive
+# (no lost-update from racing rewrites; same-class distinct keys converge to the newest by design, so the race is cross-class)
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-WA=$((NOW + 9000)); WB=$((NOW + 18000))                              # two distinct unexpired 5h-style windows
+rsj7() {  # $1=used% $2=resets_at $3=session_id → seven_day-only json (mirror of rsj for the other class)
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --arg sid "${3:-sl-selftest}" --argjson u "$1" --argjson r "$2" '
+  { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
+    rate_limits:{seven_day:{used_percentage:$u, resets_at:$r}}, session_id:$sid, transcript_path:$tp }'; }
+WA=$((NOW + 9000)); WB=$((NOW + 300000))                             # a live 5h window and a live 7d window
 N=16
 for i in $(seq 1 $N); do
   run 120 "$(rsj 30 "$WA" sConcA)" >/dev/null 2>&1 &
-  run 120 "$(rsj 55 "$WB" sConcB)" >/dev/null 2>&1 &
+  run 120 "$(rsj7 55 "$WB" sConcB)" >/dev/null 2>&1 &
 done
 wait
-ca=$(grep -c "^W $WA " "$SLC" 2>/dev/null); ca=${ca:-0}
-cb=$(grep -c "^W $WB " "$SLC" 2>/dev/null); cb=${cb:-0}
-if [ "$ca" -ge 1 ] && [ "$cb" -ge 1 ]; then echo "  T2.1 concurrent distinct-window renders: both authority lines survive (no lost-update) OK"
-else echo "  ★ FAIL T2.1 lost-update under concurrency: WA-lines=$ca WB-lines=$cb"; fail=1; fi
+ca=$(grep -c "^W5 $WA " "$SLC" 2>/dev/null); ca=${ca:-0}
+cb=$(grep -c "^W7 $WB " "$SLC" 2>/dev/null); cb=${cb:-0}
+if [ "$ca" -ge 1 ] && [ "$cb" -ge 1 ]; then echo "  T2.1 concurrent cross-class renders: both class authorities survive (no lost-update) OK"
+else echo "  ★ FAIL T2.1 lost-update under concurrency: W5-lines=$ca W7-lines=$cb"; fail=1; fi
 rm -rf "$LOCK" 2>/dev/null
 
 # T2.2 (5.1) Lock CONTENTION: a held (fresh) lock makes the frame SKIP the write, but it STILL displays the adopted authority value.
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-printf 'S sNew %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"     # cache holds authority 47
+printf 'S sNew %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"    # cache holds authority 47
 mkdir "$LOCK" 2>/dev/null                                           # another writer "holds" the lock (fresh mtime → not stealable)
 szbefore=$(wc -c < "$SLC"); szbefore=${szbefore// /}; mtbefore=$(stat -f '%m' "$SLC")
 t22=$(run 120 "$(rsj 12 "$RTc" sContend)" | nocol)                  # this frame can't get the lock → must read-only adopt 47
@@ -387,7 +437,7 @@ rm -rf "$LOCK" 2>/dev/null
 
 # T2.3 (5.1) STALE lock (older than the steal horizon) is stolen → the frame proceeds with its write
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-printf 'S sNew %s\nW %s 47 %s\n' "$OLDc" "$RTc" "$OLDc" > "$SLC"    # authority owned by an OLD session
+printf 'S sNew %s\nW5 %s 47 %s\n' "$OLDc" "$RTc" "$OLDc" > "$SLC"   # authority owned by an OLD session
 mkdir "$LOCK" 2>/dev/null
 touch -t 200001010000 "$LOCK" 2>/dev/null                          # make the lock ancient → stealable
 t23=$(run 120 "$(rsj 60 "$RTc" sFresh)" | nocol)                   # a fresh session reports 60 → after stealing the lock it becomes authority
@@ -402,7 +452,7 @@ rsjempty() {  # $1=used% $2=resets_at → five_hour-only json with an EMPTY sess
   { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
     rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:"", transcript_path:$tp }'; }
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-printf 'S sessA %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"
+printf 'S sessA %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"
 inob=$(stat -f '%i' "$SLC"); szb=$(wc -c < "$SLC"); szb=${szb// /}; mtb=$(stat -f '%m' "$SLC")
 t24=$(run 120 "$(rsjempty 80 "$RTc")" | nocol)                     # empty sid reporting a HIGHER 80 — must be ignored, 47 adopted
 case "$t24" in *" 53%"*) echo "  T2.4 empty-sid frame adopts authority 47 (ignores its own 80) -> 53% OK" ;;
@@ -412,12 +462,12 @@ inoa=$(stat -f '%i' "$SLC"); sza=$(wc -c < "$SLC"); sza=${sza// /}; mta=$(stat -
 cafter=$(cat "$SLC")
 if [ "$inob" = "$inoa" ] && [ "$szb" = "$sza" ] && [ "$mtb" = "$mta" ]; then echo "  T2.4 empty-sid did NOT rewrite the cache (inode/size/mtime unchanged) OK"
 else echo "  ★ FAIL T2.4 empty-sid rewrote the cache (inode $inob-$inoa size $szb-$sza mtime $mtb-$mta)"; fail=1; fi
-case "$cafter" in "S sessA $NEWc"*"W $RTc 47 $NEWc"*) echo "  T2.4 empty-sid left S and W lines intact OK" ;;
+case "$cafter" in "S sessA $NEWc"*"W5 $RTc 47 $NEWc"*) echo "  T2.4 empty-sid left S and W lines intact OK" ;;
   *) echo "  ★ FAIL T2.4 empty-sid mutated cache contents: [$cafter]"; fail=1 ;; esac
 
 # T2.5 (5.3) TORN / BINARY cache fixture: reconcile must not crash, frame stays single-line with a valid %, stderr clean
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-{ printf 'S sNew %s\nW %s 47 %s\n' "$NEWc" "$RTc" "$NEWc"; printf 'W garbage notnum xx\n'; head -c 64 /dev/urandom; printf '\nP %s notime nope\n' "$RTc"; } > "$SLC"
+{ printf 'S sNew %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc"; printf 'W5 garbage notnum xx\nW garbage notnum xx\n'; head -c 64 /dev/urandom; printf '\nP %s notime nope\n' "$RTc"; } > "$SLC"
 t25o=$(run 120 "$(rsj 33 "$RTc" sTorn)" 2>/dev/null)
 t25e=$(run 120 "$(rsj 33 "$RTc" sTorn)" 2>&1 >/dev/null)
 t25nl=$(printf '%s' "$t25o" | grep -c ''); t25p=$(printf '%s' "$t25o" | nocol)
@@ -436,7 +486,7 @@ grep -q 'exec [0-9]*< <(_reconcile.*</dev/null)' "$SL/lib/collect.sh" && echo " 
 # T2.7 (1.1) mv guard: an awk-FAILURE frame (empty tmpfile) must NOT clobber the shared authority cache — a failing awk (here a PATH-shim
 # awk that exits 0 producing nothing) leaves an empty per-pid temp; the unconditional mv would wipe what prior sessions persisted.
 mkdir -p "$WORK/awkfail"; printf '#!/bin/sh\nexit 0\n' > "$WORK/awkfail/awk"; chmod +x "$WORK/awkfail/awk"
-printf 'S sKeep %s\nW %s 47 %s\n' "$RECENT" "$RT" "$RECENT" > "$SLC"; t27seed=$(cat "$SLC")
+printf 'S sKeep %s\nW5 %s 47 %s\n' "$RECENT" "$RT" "$RECENT" > "$SLC"; t27seed=$(cat "$SLC")
 printf '%s' "$(rsj 80 "$RT" sKeep)" | env PATH="$WORK/awkfail:$PATH" COLUMNS=120 HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >/dev/null 2>&1
 t27after=$(cat "$SLC" 2>/dev/null)
 [ "$t27seed" = "$t27after" ] && echo "  T2.7 awk-failure frame preserved the authority cache (mv guarded on empty tmpfile) OK" || { echo "  ★ FAIL T2.7 empty tmpfile clobbered the cache: before=[$t27seed] after=[$t27after]"; fail=1; }
@@ -843,7 +893,7 @@ case "$c9" in *"P $RL "*) ;; *) echo "  ★ FAIL Y9 live-window sample wrongly d
 
 # Y10 sampled quantity is the reconciled authority, not the frozen report (task 3.1)
 RA=$((NOWB+9000)); OLDA=$((NOWB-5000)); RECA=$((NOWB-100))
-printf 'S sRec %s\nS sOldF %s\nW %s 75 %s\n' "$RECA" "$OLDA" "$RA" "$RECA" > "$SLC"   # authority 75 set by a RECENT session
+printf 'S sRec %s\nS sOldF %s\nW5 %s 75 %s\n' "$RECA" "$OLDA" "$RA" "$RECA" > "$SLC"  # authority 75 set by a RECENT session
 run 200 "$(rsj 40 "$RA" sOldF)" >/dev/null   # an OLDER frozen session reports 40 but must adopt 75 → the sample records 75
 case "$(grep "^P $RA " "$SLC")" in
   *" 75") echo "  Y10 sample records reconciled authority (75), not frozen report (40) OK" ;;

@@ -220,9 +220,15 @@ collect_status() {
 # session keeps reporting its stale used% while only the countdown moves; a freshly-started session reports the true current value.
 # This shares the truest value across sessions through a tiny cache so a frozen session adopts it.
 #
-# Rule — "the newest session is the authority": per reset-window we persist (value, authority_first_seen) = the used% reported by the
-# session with the LATEST first-seen time. A report overrides the stored value only if its session is newer-or-equal (first_seen >=
-# the authority's); an OLDER session can never overwrite it. This is correct in BOTH directions, unlike a plain max:
+# Rule — "the newest session is the authority", per window CLASS: the cache persists ONE record per class (W5 = five-hour,
+# W7 = seven-day), each carrying (resets_at, used%, authority_first_seen) = the report of the session with the LATEST first-seen
+# time. A report overrides the stored class record — key, value and first_seen together — only if its session is newer-or-equal
+# (first_seen >= the authority's) AND its own window key is live; an OLDER session can never overwrite it. Because the record
+# keeps its own resets_at, a session whose OWN snapshot window has ROLLED (frozen resets_at <= now — the roll-staleness bug:
+# key-exact lookup left such sessions permanently stale on their pre-roll used% with a 0m countdown) adopts the live class
+# authority WHOLE: used% for the remaining%, resets_at for the countdown. Class-isolated: 5h never adopts a W7 record and vice
+# versa; with no live class authority the frame keeps its own frozen values (upstream has nothing truer). Correct in BOTH
+# directions, unlike a plain max:
 #   • used% climbs (normal): a newer session reports higher → adopt it; a stale older session reporting lower is ignored.
 #   • used% drops (Anthropic raised the cap → % recomputed down): a newer session reports lower → adopt it; the obsolete high is dropped.
 # The authority is PERSISTED — not pruned when a session ends. used% is cumulative, so a past high is still real until the window rolls;
@@ -231,19 +237,24 @@ collect_status() {
 # wall — the one direction this display must never get wrong). first_seen is the first render time we saw a session_id (a seconds-grained
 # proxy for session start; the error is sub-second-of-usage, negligible).
 #
-# Cache lines, three kinds (malformed / old-format lines are simply not carried forward on the next write):
-#   S <session_id> <first_seen>             registry of each session's first-seen epoch (used to rank freshness)
-#   W <resets_at>  <used> <auth_first_seen> per-window authority value + the first_seen of the session that set it
-#   P <resets_at>  <timestamp> <used>       burn-projection sample: (when, adopted used%) for a window, bounded series
-# Pruning on rewrite: W/P lines with resets_at <= now (window rolled) and S lines older than RL_REG_TTL (past the longest window) are
-# dropped; P samples older than the sampling horizon, or beyond the per-window retention bound, are also dropped (keep the newest few).
-# One awk pass reads all three kinds, applies this frame's report per the rule, rewrites survivors to a per-pid temp (atomic mv tolerates
-# concurrent sessions), and emits "<five>|<seven>|<burn_tte>". Mutates five_h / seven_d in place; add_rate renders them unchanged.
+# Cache lines, four kinds (malformed / old-format lines — including the legacy untagged `W` schema — are simply not carried forward):
+#   S  <session_id> <first_seen>             registry of each session's first-seen epoch (used to rank freshness)
+#   W5 <resets_at>  <used> <auth_first_seen> five-hour class authority (single record; key+value+fs replaced together)
+#   W7 <resets_at>  <used> <auth_first_seen> seven-day class authority (same shape)
+#   P  <resets_at>  <timestamp> <used>       burn-projection sample: (when, adopted used%) for a window, bounded series
+# Pruning on rewrite: W5/W7/P lines with resets_at <= now (window rolled) OR resets_at >= now+691200 (8d sanity bound = the longest
+# 7d window + 1d skew margin; an absurd far-future key — the real cache once carried W 9999999999 — must never become immortal),
+# and S lines older than RL_REG_TTL (past the longest window), are dropped; P samples older than the sampling horizon, or beyond
+# the per-window retention bound, are also dropped (keep the newest few).
+# One awk pass reads all four kinds, applies this frame's report per the rule, rewrites survivors to a per-pid temp (atomic mv tolerates
+# concurrent sessions), and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>" (adopted value + adopted effective window key per class).
+# Mutates five_h / seven_d / five_reset / seven_reset in place; build_rate renders them unchanged.
 # Degrades safely: any awk/mv failure (e.g. read-only HOME) leaves out empty → the guards below keep this frame's own values and no alarm.
 # An empty session_id contributes nothing (cannot be ranked) but still adopts an existing authority.
 #
-# Burn projection (5h window only): each frame appends a P sample (now, the ADOPTED used% — Wval, not the frozen report) for each live
-# window, keeps a bounded recent series, and computes a two-point slope (oldest→newest in-horizon sample) for the 5h window. When the
+# Burn projection (5h window only): each frame appends a P sample (now, the ADOPTED used% of the 5h class — never the frozen report)
+# under the EFFECTIVE 5h key (the adopted authority's resets_at, = this frame's r5 whenever its snapshot window is live), keeps a
+# bounded recent series, and computes a two-point slope (oldest→newest in-horizon sample) against that same key. When the
 # slope is positive AND extrapolating it would hit 100% used strictly before resets_at, it emits burn_tte = seconds-to-exhaust (= remaining
 # × Δt / Δused). Both gates are mandatory and live here (they need now/resets_at); the sensitivity ceiling + colour live in render's
 # build_burn. <2 in-horizon samples → no slope → empty. Sampling the reconciled authority (not the frozen snapshot) is what makes the
@@ -256,7 +267,7 @@ collect_status() {
 #     frame) but STILL run the awk read-only so this frame DISPLAYS the correct adopted authority it read — never a stale/empty number.
 #   • empty session_id (cannot be ranked for freshness → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line
 #     left intact) but STILL adopt the existing authority read-only. No lock is taken on this path (we never write).
-# The awk ALWAYS writes survivors to a per-pid temp and emits "<five>|<seven>|<burn_tte>"; only the mv is conditional. So the emitted
+# The awk ALWAYS writes survivors to a per-pid temp and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>"; only the mv is conditional. So the emitted
 # (adopted) values are computed identically on every path; whether we persist them is the only difference. reconcile_start launches this
 # as a background FD job overlapping the git stage (</dev/null per the stdin hard rule — reconcile reads/writes only the cache file, never
 # the stdin JSON); reconcile_read reaps the FD and applies the numeric adoption guards. Degrades safely: any awk/mv/lock failure leaves
@@ -275,20 +286,27 @@ reconcile_start() {
     exec 9< <(_reconcile_core </dev/null)
 }
 
-# Reap the reconcile FD job and adopt its result. Numeric guards (digits + at most one dot) gate adoption: an empty/non-numeric reconciled
-# value (awk/mv/lock failure, read-only HOME, torn cache) leaves this frame's own parse_input value unchanged — and never errors out.
+# Reap the reconcile FD job and adopt its result. Per-field numeric guards gate adoption: an empty/non-numeric reconciled field
+# (awk/mv/lock failure, read-only HOME, torn cache, no live class authority) leaves this frame's own parse_input value for that
+# field unchanged — and never errors out. eff5/eff7 are the adopted effective window keys: overwriting five_reset/seven_reset with
+# them is what makes a post-roll frame's countdown track the LIVE window instead of a permanent 0m.
 reconcile_read() {
     $RL_SYNC || return 0
-    local out rest new5 new7
+    local out rest new5 eff5 new7 eff7
     IFS= read -r out <&9 || :                      # EOF with no trailing newline returns rc=1 as a normal path (never set -e)
     exec 9<&-
-    new5=${out%%|*}; rest=${out#*|}; new7=${rest%%|*}; burn_tte=${rest#*|}   # _reconcile_core emits exactly two "|"; robust to newline stripping
+    new5=${out%%|*}; rest=${out#*|}                # _reconcile_core emits exactly four "|"; robust to newline stripping
+    eff5=${rest%%|*}; rest=${rest#*|}
+    new7=${rest%%|*}; rest=${rest#*|}
+    eff7=${rest%%|*}; burn_tte=${rest#*|}
     case "$new5" in ''|*[!0-9.]*|*.*.*) ;; *) five_h="$new5" ;; esac          # adopt only a clean numeric (digits + ≤1 dot; *.*.* rejects ≥2 dots)
+    case "$eff5" in ''|*[!0-9]*) ;; *) five_reset="$eff5" ;; esac              # all-digits epoch only; countdown follows the adopted window
     case "$new7" in ''|*[!0-9.]*|*.*.*) ;; *) seven_d="$new7" ;; esac
+    case "$eff7" in ''|*[!0-9]*) ;; *) seven_reset="$eff7" ;; esac
     case "$burn_tte" in ''|*[!0-9]*) burn_tte="" ;; esac                     # non-numeric / empty → no alarm
 }
 
-# The serialized worker. Emits "<five>|<seven>|<burn_tte>" on stdout. Acquires the mkdir lock (bounded retry + stale steal) around the
+# The serialized worker. Emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>" on stdout. Acquires the mkdir lock (bounded retry + stale steal) around the
 # read+awk+mv; on lock failure OR empty session_id it still runs the awk read-only and emits the adopted value but skips the mv.
 _reconcile_core() {
     umask 077                                      # cache/tmp/lock created private (600/700): they hold session IDs + usage — no cross-user read on a shared machine. Subshell-scoped (only ever run via procsub in reconcile_start).
@@ -314,7 +332,7 @@ _reconcile_core() {
     # before the lock would freeze src=/dev/null for a writer that then waits behind a peer who creates/updates the cache, making this
     # writer's awk read NOTHING and its mv clobber the peer's authority (the exact lost-update the lock exists to prevent).
     src="$cache"; [ -f "$src" ] || src=/dev/null   # first run / read-only: no cache yet → read nothing, just seed/adopt from this frame
-    : > "$tmpfile" 2>/dev/null || { [ "$have_lock" = 1 ] && rmdir "$lock" 2>/dev/null; printf '%s|%s|%s\n' '' '' ''; return 0; }
+    : > "$tmpfile" 2>/dev/null || { [ "$have_lock" = 1 ] && rmdir "$lock" 2>/dev/null; printf '%s|%s|%s|%s|%s\n' '' '' '' '' ''; return 0; }
     # writable = this frame will persist (lock held AND a rankable non-empty sid). A read-only frame (lock-contention or empty-sid) must
     # adopt the EXISTING authority it read and NOT fold in its own (possibly frozen) report — the spec is explicit that a contention frame
     # displays the value it READ (e.g. 47), never its own (e.g. 12). So `writable` gates whether the awk applies this frame's report.
@@ -323,46 +341,56 @@ _reconcile_core() {
     out=$(awk -v now="$now" -v sid="$session_id" -v r5="$five_reset" -v u5="$five_h" \
               -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" -v writable="$writable" '
         function isnum(x){ return (x ~ /^[0-9]+(\.[0-9]+)?$/) }
-        # apply this frame report (window r, used u): newest-or-equal session wins, older is ignored; expired/non-numeric skipped
-        function applywin(r, u) {
-            if (!isnum(r) || !isnum(u) || r+0 <= now+0) return
-            if (!(r in Wval) || myfs+0 >= Wfs[r]+0) { Wval[r]=u+0; Wfs[r]=myfs }
+        # sane live window key: strictly in the future AND below the 8d bound (longest 7d window 604800 + 1d skew margin) —
+        # an absurd far-future key (the real cache once carried W 9999999999) would otherwise survive pruning forever
+        function sane(k){ return (isnum(k) && k+0 > now+0 && k+0 < now+0 + MAXWIN) }
+        # apply this frame report to class c (window key r, used u): newest-or-equal session wins the WHOLE record (key+value+fs)
+        # — a fresher session re-keys the class to its own window after a roll; expired/insane/non-numeric reports are ignored
+        function applycls(c, r, u) {
+            if (!sane(r) || !isnum(u)) return
+            if (!(c in Rv) || myfs+0 >= Rf[c]+0) { Rk[c]=r; Rv[c]=u+0; Rf[c]=myfs }
         }
-        BEGIN { MAXSAMP=5; HORIZON=10800 }                             # keep ≤5 samples/window over a ~3h horizon
+        BEGIN { MAXSAMP=5; HORIZON=10800; MAXWIN=691200 }              # ≤5 samples/window over ~3h; window keys sane below now+8d
         $1=="S" && NF==3 {                                              # session registry line
             if ($2==sid) myfs=$3                                        #   my own first_seen — preserved across renders
             else if (isnum($3) && $3+0 > now+0 - regttl) Sf[$2]=$3      #   keep other not-too-old sessions
             next
         }
-        $1=="W" && NF==4 && isnum($2) && $2+0 > now+0 {                 # unexpired per-window authority
-            Wval[$2]=$3+0; Wfs[$2]=$4; next
+        # per-class authority (W5=five-hour, W7=seven-day): keep the newest-fs record per class. Keys stay STRINGS end-to-end
+        # (a numeric round-trip would CONVFMT-mangle a non-integral epoch); legacy untagged W lines fall through and are dropped
+        ($1=="W5" || $1=="W7") && NF==4 && isnum($3) && isnum($4) && sane($2) {
+            c = ($1=="W5") ? 5 : 7
+            if (!(c in Rv) || $4+0 >= Rf[c]+0) { Rk[c]=$2; Rv[c]=$3+0; Rf[c]=$4 }
+            next
         }
-        # burn sample for a still-live window, still inside the horizon — load in file (chronological) order; others dropped (pruned)
-        $1=="P" && NF==4 && isnum($2) && isnum($3) && isnum($4) && $2+0 > now+0 && $3+0 > now+0 - HORIZON {
-            np++; Pk[np]=$2+0; Pt[np]=$3+0; Pu[np]=$4+0; next
+        # burn sample for a sane still-live window, still inside the horizon — load in file (chronological) order; others dropped (pruned)
+        $1=="P" && NF==4 && isnum($3) && isnum($4) && sane($2) && $3+0 > now+0 - HORIZON {
+            np++; Pk[np]=$2; Pt[np]=$3+0; Pu[np]=$4+0; next
         }
-        # any other / malformed / old-format line: dropped (not written to tmp)
+        # any other / malformed / old-format line (incl. the legacy untagged `W <key> <used> <fs>` schema): dropped (not written to tmp)
         END{
             # Only a WRITABLE frame (lock held + rankable non-empty sid) folds its own report into the authority and registers itself.
-            # A read-only frame (lock-contention or empty-sid) leaves Wval exactly as read from cache, so it adopts/displays the value it
-            # READ (never its own possibly-frozen report) and contributes no S/W mutation — matching the spec safe-degradation rules.
+            # A read-only frame (lock-contention or empty-sid) leaves the class records exactly as read from cache, so it adopts/displays
+            # the value it READ (never its own possibly-frozen report) and contributes no S/W mutation — matching the spec safe-degradation rules.
             if (writable+0 == 1 && sid != "") {
                 if (myfs=="" || !isnum(myfs)) myfs=now                  # new session → first seen is now
                 Sf[sid]=myfs
-                applywin(r5, u5); applywin(r7, u7)
+                applycls(5, r5, u5); applycls(7, r7, u7)
             }
-            # append this frame’s sample (now, adopted used%) for the 5h window only — it is the sole window the alarm projects,
-            # so sampling 7d would persist bounded series that nothing downstream ever reads (the slope gate below is r5-only).
-            if (isnum(r5) && (r5 in Wval)) { np++; Pk[np]=r5+0; Pt[np]=now+0; Pu[np]=Wval[r5] }
+            # append this frame’s sample (now, adopted used%) under the EFFECTIVE 5h key — the adopted authority’s resets_at, which
+            # equals r5 whenever this frame’s snapshot window is live. 7d is never sampled (nothing downstream reads such a series).
+            # The isnum(r5) gate keeps a frame that reports no 5h data at all from sampling another session’s quota.
+            if (isnum(r5) && (5 in Rv)) { np++; Pk[np]=Rk[5]; Pt[np]=now+0; Pu[np]=Rv[5] }
             for (s in Sf) if (isnum(Sf[s]) && Sf[s]+0 > now+0 - regttl) printf "S %s %s\n", s, Sf[s] >> tmp
-            for (k in Wval) if (isnum(k) && k+0 > now+0) printf "W %s %s %s\n", k, Wval[k], Wfs[k] >> tmp
+            if (5 in Rv) printf "W5 %s %s %s\n", Rk[5], Rv[5], Rf[5] >> tmp
+            if (7 in Rv) printf "W7 %s %s %s\n", Rk[7], Rv[7], Rf[7] >> tmp
             # rewrite samples bounded to the newest MAXSAMP per window (chronological); track 5h oldest/newest for the slope
             for (i=1;i<=np;i++) cnt[Pk[i]]++
             for (i=1;i<=np;i++) {
                 k=Pk[i]; seen[k]++
                 if (seen[k] > cnt[k]-MAXSAMP) {                         # this sample is within the newest MAXSAMP for its window
                     printf "P %s %s %s\n", k, Pt[i], Pu[i] >> tmp
-                    if (isnum(r5) && k==r5+0) {
+                    if ((5 in Rv) && k""==Rk[5]"") {
                         rc++
                         if (rc==1) { pt0=Pt[i]; pu0=Pu[i] }             # oldest retained 5h sample
                         pt1=Pt[i]; pu1=Pu[i]                            # newest retained 5h sample (this frame)
@@ -370,15 +398,19 @@ _reconcile_core() {
                 }
             }
             tte=""                                                     # 5h burn projection — both mandatory gates applied here
-            if (isnum(r5) && rc>=2 && pt1>pt0) {
+            if ((5 in Rv) && rc>=2 && pt1>pt0) {
                 dp=pu1-pu0; dt=pt1-pt0
                 if (dp>0 && dt>=60) {                                   # slope-positive gate + min-Δt gate: a sub-minute render burst (dt 1-2s) with a used% jump would otherwise project a false imminent alarm; 60 is inclusive & load-bearing (Y4 row 6 is a legit dt≈60 red)
                     rem=100-pu1; if (rem<0) rem=0
                     x=rem*dt/dp                                         # seconds-to-exhaust = remaining ÷ (slope per second)
-                    if (now+0+x < r5+0) tte=sprintf("%d", x)           # before-reset gate: must run dry before the window rolls
+                    if (now+0+x < Rk[5]+0) tte=sprintf("%d", x)        # before-reset gate: must run dry before the (effective) window rolls
                 }
             }
-            printf "%s|%s|%s\n", ((isnum(r5) && (r5 in Wval)) ? Wval[r5]"" : ""), ((isnum(r7) && (r7 in Wval)) ? Wval[r7]"" : ""), tte
+            # 5 fields: adopted value + adopted effective key per class. The isnum(rX) gates keep a frame that reports NO rate-limit
+            # data for a class (API-key auth, older CC) on its own silent segment instead of surfacing another session’s quota.
+            printf "%s|%s|%s|%s|%s\n", \
+                ((isnum(r5) && (5 in Rv)) ? Rv[5]"" : ""), ((isnum(r5) && (5 in Rv)) ? Rk[5] : ""), \
+                ((isnum(r7) && (7 in Rv)) ? Rv[7]"" : ""), ((isnum(r7) && (7 in Rv)) ? Rk[7] : ""), tte
         }
     ' "$src" 2>/dev/null)
     # Persist ONLY when this frame both holds the lock AND has a rankable (non-empty) sid; otherwise this is a read-only frame:

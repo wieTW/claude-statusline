@@ -22,11 +22,12 @@ EDGE_PAD=3         # CC's statusline drawable area is N cols narrower than the w
 JGAP=2             # minimum whitespace gap for the two parts to count as "separated": gap>=JGAP → plain whitespace, no junction │; <JGAP → the parts are too tight,
                    # so insert a │ separator (truncating the name to make room if needed). Larger → fewer │; set 1 → a │ appears as soon as they nearly touch
 RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a session's START snapshot (upstream limitation): an old
-                   # session keeps showing its stale used%, only the countdown moves. When true, each reset-window's used% in
-                   # ~/.claude/sl-ratelimit-cache is the value reported by the NEWEST session (latest first-seen) — an older session can
-                   # never override it, a newer one can in either direction. So a frozen session adopts a fresher session's value, and a
-                   # genuine drop (Anthropic raised the cap → % recomputed down) is honoured instead of staying stuck at a stale high.
-                   # false → trust only this session's (possibly frozen) value. See reconcile_rates in lib/collect.sh for the full rule.
+                   # session keeps showing its stale used%, only the countdown moves. When true, each window CLASS's (5h / 7d)
+                   # authority in ~/.claude/sl-ratelimit-cache is the (used%, resets_at) reported by the NEWEST session (latest
+                   # first-seen) — an older session can never override it, a newer one can in either direction. So a frozen session
+                   # adopts a fresher session's value, a genuine drop (Anthropic raised the cap → % recomputed down) is honoured, and
+                   # after a window ROLLS a frozen session adopts the live window's value AND countdown (no more stale % + 0m).
+                   # false → trust only this session's (possibly frozen) value. See _reconcile_core in lib/collect.sh for the full rule.
 RL_REG_TTL=604800  # session-registry retention (sec): drop a session's first-seen record once it is older than the longest reset window
                    # (7d) — it can no longer be the authority for any live window. Authority VALUES persist independently of this.
 BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SYNC=true — it samples the reconciled authority

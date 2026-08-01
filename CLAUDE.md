@@ -144,12 +144,20 @@ shrink-before-drop, and core survival at pathological widths.
 CC freezes `rate_limits` at each session's **start snapshot** (upstream limitation): an old
 session keeps showing a stale used%, only the countdown moves. Reconcile (in `lib/collect.sh`,
 gated by `RL_SYNC`) fixes this via a shared cache at `~/.claude/sl-ratelimit-cache` — an `awk`
-pass over three line types: `S <session_id> <first_seen>` (a registry of each session's first
-render time), `W <resets_at> <used> <auth_first_seen>` (per reset-window authority value), and
-`P <resets_at> <timestamp> <used>` (bounded burn-projection sample series; see below).
-**Rule: the newest session is the authority** — a window's used% is overwritten only by a
-report whose session's `first_seen` is newer-or-equal, so a frozen old session can't override
-a fresher one in either direction (adopt a climb, honour a genuine cap-raise drop). `RL_REG_TTL`
+pass over four line types: `S <session_id> <first_seen>` (a registry of each session's first
+render time), `W5 <resets_at> <used> <auth_first_seen>` / `W7 …` (ONE authority record per
+window class — five-hour / seven-day), and `P <resets_at> <timestamp> <used>` (bounded
+burn-projection sample series; see below).
+**Rule: the newest session is the authority, per class** — a class's record (key, used% and
+first_seen replaced together) is overwritten only by a report whose session's `first_seen` is
+newer-or-equal, so a frozen old session can't override a fresher one in either direction (adopt
+a climb, honour a genuine cap-raise drop). Because the record carries its own `resets_at`, a
+session whose snapshot window has ROLLED adopts the live class authority whole — used% AND
+countdown (`reconcile_read` overwrites `five_reset`/`seven_reset` with the adopted effective
+key) — instead of staying stale on its pre-roll % with a permanent `0m` (the roll-staleness
+bug). Window keys are sane only below `now+691200` (8d = the longest 7d window + 1d skew
+margin), so an absurd far-future key can never become an immortal cache line; legacy untagged
+`W` lines are dropped on rewrite. `RL_REG_TTL`
 prunes registry records older than the longest reset window. Test section `T` covers the full
 rule matrix.
 
