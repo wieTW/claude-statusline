@@ -139,6 +139,19 @@ fmt_dur_s() {   # $1=seconds (non-negative integer) → _dur="45s"/"3m45s"/"1H15
     else fmt_dur "$s"; fi
 }
 
+# Usability gate for the two cost.*_ms fields, mirroring ctx_aligned_pct's: jq's tostring erases the JSON type, so a
+# string-typed "0900000" arrives verbatim and bash reads the leading zero as OCTAL — either aborting the expression with
+# "value too great for base" (the error text lands on the statusline's stderr) or, for a legal octal literal like
+# "04521000", silently formatting the wrong duration. Digits only (which also rejects "-5000" and "12a"), at most 15
+# digits (the same 64-bit headroom rule as ctx_aligned_pct), and positive once read as DECIMAL; both call sites then
+# divide with the same 10# prefix. A rejected value falls through the existing three-level chain, exactly as an absent
+# or <=0 field always has, so no new output path is introduced.
+_ms_ok() {   # $1=candidate cost.*_ms value → rc 0 when it is usable as a positive decimal millisecond count
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 15 ] || return 1
+    [ "$(( 10#$1 ))" -gt 0 ]
+}
+
 ttl() {   # $1=resets_at (Unix seconds) → _ttl="1D3H"/"2H2m"/"5m"; non-numeric returns empty
     _ttl=""
     case "$1" in ''|*[!0-9]*) return ;; esac
@@ -362,10 +375,10 @@ build_left() {
     #      the test suite's no-cost frames exercise.
     # Levels 1 and 2 both land in dur_str so the segment-emit guard, the (Δ) delta logic, and the clock-fallback branch below are shared.
     dur_str=""
-    if [ -n "$api_ms" ] && [ "$api_ms" -gt 0 ] 2>/dev/null; then
-        fmt_dur_s "$(( api_ms / 1000 ))"; dur_str="$_dur"
-    elif [ -n "$dur_ms" ] && [ "$dur_ms" -gt 0 ] 2>/dev/null; then
-        fmt_dur "$(( dur_ms / 1000 ))"; dur_str="$_dur"
+    if _ms_ok "$api_ms"; then
+        fmt_dur_s "$(( 10#$api_ms / 1000 ))"; dur_str="$_dur"
+    elif _ms_ok "$dur_ms"; then
+        fmt_dur "$(( 10#$dur_ms / 1000 ))"; dur_str="$_dur"
     fi
     # Render "<primary> (Δ)": the primary text (API time, session duration, or the clock fallback) is dim; Δ ("how long since the last prompt") is
     # colored as a prompt-cache-freshness signal (thresholds = the two real cache TTLs, see LASTMSG_WARN/STALE in statusline-command.sh).

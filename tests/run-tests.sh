@@ -658,6 +658,26 @@ case "$a7" in
   *"3m45s (1D2H)"*|*"3m45s (1D3H)"*) echo "  API7 cross-day api primary: no date prefix, elapsed Δ kept OK" ;;
   *) echo "  ★ FAIL API7 expected bare 3m45s with (1D2H) Δ: [$a7]"; fail=1 ;;
 esac
+# API8-API10 string-typed cost fields. CC sends numbers, but jq's tostring erases the type, so a string-typed value
+# reaches the arithmetic verbatim and a leading zero would be read as octal: "0900000" aborts the expression and spills
+# "value too great for base" onto the statusline (its output IS the screen), while a legal octal like "04521000" is
+# worse, formatting a wrong duration with no symptom. Each case asserts exit 0, empty stderr, and the DECIMAL reading.
+runapi() {   # $1=cost object → stdout in $WORK/api.out, stderr in $WORK/api.err, exit code in ARC
+  printf '%s' "$(mkapi "$1")" | env COLUMNS=200 HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >"$WORK/api.out" 2>"$WORK/api.err"; ARC=$?
+}
+chkapi() {   # $1=label $2=expected substring in the rendered line
+  local out errb; out=$(strip < "$WORK/api.out"); errb=$(wc -c < "$WORK/api.err" | tr -d ' ')
+  if   [ "$ARC" -ne 0 ];   then echo "  ★ FAIL $1 exited $ARC (expected 0)"; fail=1
+  elif [ "$errb" != "0" ]; then echo "  ★ FAIL $1 wrote $errb bytes to stderr: [$(cat "$WORK/api.err")]"; fail=1
+  else case "$out" in *"$2"*) echo "  $1 OK" ;; *) echo "  ★ FAIL $1 expected [$2]: [$out]"; fail=1 ;; esac; fi
+}
+rm -f "$LMF"                                                   # bare primary, no Δ noise
+# API8 api time as a leading-zero string → decimal 900000ms = 900s → 15m0s (octal would abort the expression)
+runapi '{"total_api_duration_ms":"0900000"}'; chkapi API8 "15m0s"
+# API9 junk api time → falls through to the session-duration primary, still silently
+runapi '{"total_duration_ms":4521000,"total_api_duration_ms":"12a"}'; chkapi API9 "1H15m"
+# API10 the level-2 field carries the leading zero → decimal 4521000ms = 1H15m (octal 04521000 would render 20m)
+runapi '{"total_duration_ms":"04521000"}'; chkapi API10 "1H15m"
 printf '06-07 19:38\n' > "$LMF"   # restore baseline
 
 echo "── W. TOKENS: cumulative in+out, subagent ⊂ only when >0, foreground reads cache (never blocks)"
