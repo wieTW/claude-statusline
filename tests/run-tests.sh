@@ -685,7 +685,9 @@ echo "── V. parse_input positional contract: each field lands in its own glo
 VFEED=$(jq -cn '{
   workspace:{current_dir:"S_cwd", project_dir:"S_proj"},
   model:{display_name:"S_model"}, session_name:"S_sname",
-  context_window:{used_percentage:"S_used", exceeds_200k_tokens:true}, worktree:{name:"S_wt"},
+  context_window:{used_percentage:"S_used", exceeds_200k_tokens:true, context_window_size:"S_win",
+                  current_usage:{input_tokens:"S_in", cache_creation_input_tokens:"S_cc",
+                                 cache_read_input_tokens:"S_cr", output_tokens:"S_out"}}, worktree:{name:"S_wt"},
   effort:{level:"S_effort"}, thinking:{enabled:false},
   rate_limits:{ five_hour:{used_percentage:"S_5h", resets_at:"S_5r"},
                 seven_day:{used_percentage:"S_7d", resets_at:"S_7r"} },
@@ -702,8 +704,11 @@ if printf '%s' "$VFEED" | ( . "$SL/lib/collect.sh"; parse_input
    chkv session_id "$session_id" S_sid;   chkv transcript_path "$transcript_path" S_tp
    chkv exceeds_200k "$exceeds_200k" true; chkv dur_ms "$dur_ms" 4521000
    chkv api_ms "$api_ms" 987654
+   chkv ctx_in_tok "$ctx_in_tok" S_in;    chkv ctx_cc_tok "$ctx_cc_tok" S_cc
+   chkv ctx_cr_tok "$ctx_cr_tok" S_cr;    chkv ctx_out_tok "$ctx_out_tok" S_out
+   chkv ctx_win_size "$ctx_win_size" S_win
    case "$now" in ''|*[!0-9]*) echo "  ★ FAIL now not numeric: [$now]"; rc=1 ;; esac
-   exit $rc ); then echo "  all 18 fields land in their own global OK"; else fail=1; fi
+   exit $rc ); then echo "  all 23 fields land in their own global OK"; else fail=1; fi
 
 echo "── CTX. CONTEXT-METER: budget-aware red threshold (1M model not red at 85%, 200k model is) + decoupled 200k cliff marker ⚑"
 # mkctx: build a statusline JSON with controllable model / used% / exceeds_200k. Width is roomy (no degrade) so the ctx% renders full.
@@ -749,6 +754,131 @@ c7out=$(run 200 "$(mkctx 'Sonnet 4.6' 85 true)"); c7=$(printf '%s' "$c7out" | ct
 if [ "$c7" = "$RDCODE" ]; then case "$c7out" in *"⚑"*) echo "  CTX7 200k @85% true → red % + ⚑ (both independent) OK" ;;
   *) echo "  ★ FAIL CTX7 ⚑ missing"; fail=1 ;; esac
 else echo "  ★ FAIL CTX7 % not red ([$c7])"; fail=1; fi
+
+# CTX8-CTX14: warning-aligned percentage source. The displayed % is computed locally on Claude Code's
+# "Context low (N% remaining)" basis instead of echoing the upstream used_percentage: T = the four current_usage token
+# counts summed, P = context_window_size - CTX_RESERVE, R = round-half-up(100*(P-T)/P) with (P-T) clamped at 0, and the
+# displayed N = 100 - R. So the statusline number and the warning's remaining number always add up to 100.
+mkctxa() {  # $1=model $2=input $3=cache_creation $4=cache_read $5=output $6=context_window_size $7=used% ("omit") $8=exceeds ("omit")
+  jq -cn --arg cwd "$SL" --arg m "$1" --argjson i "$2" --argjson cc "$3" --argjson cr "$4" --argjson o "$5" \
+     --arg win "$6" --arg up "$7" --arg ex "$8" --arg tp "$TP" '
+    { workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:$m},
+      context_window: ( {current_usage:{input_tokens:$i, cache_creation_input_tokens:$cc, cache_read_input_tokens:$cr, output_tokens:$o}}
+        + (if $win == "omit" then {} else {context_window_size:($win|tonumber)} end)
+        + (if $up  == "omit" then {} else {used_percentage:($up|tonumber)} end)
+        + (if $ex  == "omit" then {} else {exceeds_200k_tokens:($ex == "true")} end) ),
+      session_id:"sl-selftest", transcript_path:$tp }'
+}
+# ctxpct: the percentage NUMBER the ctx segment displays (last "\e[<code>m[ctx:]NN%" match — these frames carry no rate
+# segment, so the only percentage on the line is the ctx one). Empty when the segment is suppressed.
+ctxpct() { perl -ne 'while(/\x1b\[[0-9;]*m(?:ctx:)?([0-9]+)%/g){$p=$1} END{print $p}'; }
+# CTX8 aligned basis, the design's anchor frame: T=960400, window=1000000 → P=980000, R=round(100*19600/980000)=2 → 98
+p8=$(run 200 "$(mkctxa 'Opus 4.8 (1M context)' 400000 60000 500000 400 1000000 omit omit)" | ctxpct)
+case "$p8" in 98) echo "  CTX8 aligned basis (T=960400, win=1M) → 98% OK" ;; *) echo "  ★ FAIL CTX8 expected 98 got [$p8]"; fail=1 ;; esac
+# CTX9 priority: the same frame ALSO carrying used_percentage 96 still shows 98 — the aligned value beats the upstream one
+p9=$(run 200 "$(mkctxa 'Opus 4.8 (1M context)' 400000 60000 500000 400 1000000 96 omit)" | ctxpct)
+case "$p9" in 98) echo "  CTX9 aligned value wins over upstream used_percentage 96 OK" ;; *) echo "  ★ FAIL CTX9 expected 98 got [$p9]"; fail=1 ;; esac
+# CTX10 saturation: T=985000 exceeds P=980000 → (P-T) clamps to 0, R=0 → 100 (never a negative remaining)
+p10=$(run 200 "$(mkctxa 'Opus 4.8 (1M context)' 500000 85000 400000 0 1000000 omit omit)" | ctxpct)
+case "$p10" in 100) echo "  CTX10 usage past the reserve boundary clamps to 100% OK" ;; *) echo "  ★ FAIL CTX10 expected 100 got [$p10]"; fail=1 ;; esac
+# CTX11 window not ABOVE the reserve (exactly 20000) → the aligned computation must not run; used_percentage 96 shows through
+p11=$(run 200 "$(mkctxa 'Opus 4.8 (1M context)' 400000 60000 500000 400 20000 96 omit)" | ctxpct)
+case "$p11" in 96) echo "  CTX11 window not above the reserve falls back to used_percentage 96 OK" ;; *) echo "  ★ FAIL CTX11 expected 96 got [$p11]"; fail=1 ;; esac
+# CTX14 half-up boundary: T=955500 → exact remaining 100*24500/980000 = 2.5 → R rounds up to 3 → N=97. An independently
+# rounded used% (97.5 → 98) would break the complement, which is why N is defined as 100 - R.
+p14=$(run 200 "$(mkctxa 'Opus 4.8 (1M context)' 500000 55000 400000 500 1000000 omit omit)" | ctxpct)
+case "$p14" in 97) echo "  CTX14 .5 remaining rounds half-up (R=3 → 97%) OK" ;; *) echo "  ★ FAIL CTX14 expected 97 got [$p14]"; fail=1 ;; esac
+# CTX12 legacy frame (used_percentage only, no current_usage): the ctx segment must stay byte-identical to the pre-change
+# output. CTX12_EXPECT was CAPTURED from the real pre-change script, not hand-written:
+#   printf '{"workspace":{"current_dir":"'"$PWD"'"},"model":{"display_name":"Opus 4.8 (1M context)"},
+#            "context_window":{"used_percentage":96},"session_id":"sl-selftest"}' | COLUMNS=200 bash statusline-command.sh
+# (captured 2026-08-14 with the default STYLE=tokyo-night-claude; re-capture with that command if the default palette changes).
+# ctxseg: the COMPLETE ctx segment, from the bar/percentage start up to the segment boundary (the " │ " separator, a
+# >=2-space gap, or end of line). It deliberately does NOT stop at the % or the ⚑: anything trailing inside the segment
+# (a duplicated marker, an unreset SGR, stray bytes) lands INSIDE the compared string instead of being cropped away.
+ctxseg() { perl -0777 -ne 'chomp; print $1 if /(((?:\x1b\[48;2;[0-9;]+m )+\x1b\[0m )?\x1b\[[0-9;]+m(?:ctx:)?\d+%.*?)(?:\x1b\[[0-9;]+m │ \x1b\[0m|  |$)/s'; }
+CTX12_EXPECT=$'\033[48;2;158;206;106m \033[48;2;158;206;106m \033[48;2;158;206;106m \033[48;2;224;175;104m \033[48;2;224;175;104m \033[48;2;224;175;104m \033[48;2;255;158;100m \033[48;2;255;158;100m \033[48;2;255;158;100m \033[48;2;247;118;142m \033[48;2;247;118;142m \033[48;2;41;46;66m \033[0m \033[38;2;247;118;142m96%\033[0m'
+s12=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 96 omit)" | ctxseg)
+if [ "$s12" = "$CTX12_EXPECT" ]; then echo "  CTX12 legacy used_percentage-only frame byte-identical to the pre-change capture (full segment, suffix included) OK"
+else echo "  ★ FAIL CTX12 ctx segment differs from the pre-change capture: [$(printf '%s' "$s12" | cat -v)]"; fail=1; fi
+# CTX13 neither source numeric → the WHOLE segment is suppressed, cliff marker included. exceeds_200k is true here on
+# purpose: the ⚑ has no percentage to ride on, so it must not be emitted either.
+c13out=$(run 200 "$(jq -cn --arg cwd "$SL" --arg tp "$TP" \
+  '{workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{exceeds_200k_tokens:true}, session_id:"sl-selftest", transcript_path:$tp}')")
+p13=$(printf '%s' "$c13out" | ctxpct)
+case "$c13out" in
+  *"⚑"*) echo "  ★ FAIL CTX13 ⚑ emitted with no numeric percentage to host it"; fail=1 ;;
+  *) case "$p13" in '') echo "  CTX13 neither source numeric → whole ctx segment (and ⚑) suppressed OK" ;;
+       *) echo "  ★ FAIL CTX13 percentage [$p13] rendered with no numeric source"; fail=1 ;; esac ;;
+esac
+# CTX15-CTX17 CTX_BAR knob on the aligned percentage: one fixed frame (aligned 98%, over-200k true) rendered by both builds.
+# The knob selects between the two FULL forms only — it must not touch the bare compact form or the cliff marker.
+mkdir -p "$WORK/nobar/lib" && cp "$SL"/lib/*.sh "$WORK/nobar/lib/"
+sed 's/^CTX_BAR=true/CTX_BAR=false/' "$SL/statusline-command.sh" > "$WORK/nobar/statusline-command.sh"
+runnobar() { printf '%s' "$2" | env COLUMNS="$1" HOME="$FAKE_HOME" bash "$WORK/nobar/statusline-command.sh"; }
+barcells() { perl -0777 -ne '$n=()=/\x1b\[48;2;[0-9;]+m /g; print $n'; }   # count of background-painted bar cells
+KNOBF=$(mkctxa 'Opus 4.8 (1M context)' 400000 60000 500000 400 1000000 omit true)
+k15=$(run 200 "$KNOBF" | ctxseg); n15=$(printf '%s' "$k15" | barcells)
+case "$n15:$(printf '%s' "$k15" | ctxpct):$k15" in
+  12:98:*"⚑"*) echo "  CTX15 CTX_BAR=true full form = 12-cell bar + aligned 98% + ⚑ OK" ;;
+  *) echo "  ★ FAIL CTX15 expected 12 cells/98%/⚑, got cells=[$n15] pct=[$(printf '%s' "$k15" | ctxpct)]"; fail=1 ;; esac
+k16=$(runnobar 200 "$KNOBF" | ctxseg); n16=$(printf '%s' "$k16" | barcells)
+case "$k16" in
+  *"ctx:98%"*"⚑"*) case "$n16" in 0) echo "  CTX16 CTX_BAR=false full form = ctx:98% text, no bar, ⚑ kept OK" ;;
+                     *) echo "  ★ FAIL CTX16 bar cells present with CTX_BAR=false: [$n16]"; fail=1 ;; esac ;;
+  *) echo "  ★ FAIL CTX16 expected ctx:98% + ⚑, got [$(printf '%s' "$k16" | cat -v)]"; fail=1 ;; esac
+# CTX17 compact form: at a width that forces degrade step 4 the bare N% is byte-identical under both knob settings, ⚑ included
+k17a=$(run 45 "$KNOBF" | ctxseg); k17b=$(runnobar 45 "$KNOBF" | ctxseg); n17=$(printf '%s' "$k17a" | barcells)
+if [ "$k17a" = "$k17b" ]; then
+  case "$k17a" in *"ctx:"*) echo "  ★ FAIL CTX17 compact form carries the ctx: label"; fail=1 ;;
+    *"98%"*"⚑"*) case "$n17" in 0) echo "  CTX17 bare 98%+⚑ compact form identical under both CTX_BAR settings, no bar cells OK" ;;
+                   *) echo "  ★ FAIL CTX17 compact form still paints $n17 bar cells"; fail=1 ;; esac ;;
+    *) echo "  ★ FAIL CTX17 compact form is not the bare 98%+⚑: [$(printf '%s' "$k17a" | cat -v)]"; fail=1 ;; esac
+else echo "  ★ FAIL CTX17 compact form differs by knob: [$(printf '%s' "$k17a" | cat -v)] vs [$(printf '%s' "$k17b" | cat -v)]"; fail=1; fi
+
+# CTX18-CTX22 hostile counter values. jq's tostring erases the JSON type, so a STRING-typed counter reaches the
+# arithmetic verbatim — these frames send exactly that shape. Every case must exit 0 and keep stderr empty, because the
+# statusline's output IS the screen: an arithmetic error message there is itself the bug.
+mkctxh() {  # $1..$4 = the four current_usage counters, $5 = context_window_size (all JSON strings), $6 = used% ("omit")
+  jq -cn --arg cwd "$SL" --arg i "$1" --arg cc "$2" --arg cr "$3" --arg o "$4" --arg win "$5" --arg up "$6" --arg tp "$TP" '
+    { workspace:{current_dir:$cwd, project_dir:$cwd}, model:{display_name:"Opus 4.8 (1M context)"},
+      context_window: ( {current_usage:{input_tokens:$i, cache_creation_input_tokens:$cc, cache_read_input_tokens:$cr, output_tokens:$o},
+                         context_window_size:$win}
+        + (if $up == "omit" then {} else {used_percentage:($up|tonumber)} end) ),
+      session_id:"sl-selftest", transcript_path:$tp }'
+}
+runh() {   # $1=COLUMNS $2=json → stdout in $WORK/h.out, stderr in $WORK/h.err, exit code in HRC
+  printf '%s' "$2" | env COLUMNS="$1" HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >"$WORK/h.out" 2>"$WORK/h.err"; HRC=$?
+}
+chkh() {   # $1=label $2=expected displayed % → assert exit 0 + empty stderr + that percentage
+  local got errb; got=$(ctxpct < "$WORK/h.out"); errb=$(wc -c < "$WORK/h.err" | tr -d ' ')
+  if   [ "$HRC" -ne 0 ];    then echo "  ★ FAIL $1 exited $HRC (expected 0)"; fail=1
+  elif [ "$errb" != "0" ];  then echo "  ★ FAIL $1 wrote $errb bytes to stderr: [$(cat "$WORK/h.err")]"; fail=1
+  elif [ "$got" != "$2" ];  then echo "  ★ FAIL $1 expected $2% got [$got]"; fail=1
+  else echo "  $1 OK"; fi
+}
+# CTX18 leading zero "08": bash reads a leading zero as octal, and "08" is not even a legal octal literal — unguarded it
+# aborts the expression and spills "value too great for base" onto the statusline. It must count as decimal 8:
+# T = 8+60000+500000+400 = 560408, P = 980000 → R = round(100*419592/980000) = 43 → 57.
+runh 200 "$(mkctxh 08 60000 500000 400 1000000 omit)"; chkh CTX18 57
+# CTX19 leading zero "040000": a legal octal literal, so an unguarded read is SILENT — 16384 instead of 40000 (which
+# would show 53% instead of 55%). T = 40000+0+500000+0 = 540000 → R = round(100*440000/980000) = 45 → 55.
+runh 200 "$(mkctxh 040000 0 500000 0 1000000 omit)"; chkh CTX19 55
+# CTX20 negative counter → ineligible → the used_percentage fallback (96), not a nonsense percentage
+runh 200 "$(mkctxh -5 60000 500000 400 1000000 96)"; chkh CTX20 96
+# CTX21 16-digit counter (past the 15-digit cap that keeps 200*(P-T) inside 64-bit) → fallback, no wrap-around
+runh 200 "$(mkctxh 1234567890123456 0 0 0 1000000 96)"; chkh CTX21 96
+# CTX22 mixed alphanumeric "12a" → fallback
+runh 200 "$(mkctxh 12a 60000 500000 400 1000000 96)"; chkh CTX22 96
+# CTX23-CTX26 walk the leading zero across the REMAINING four operands, one per case, so that dropping the decimal
+# prefix on any single one of the five is caught: CTX18/19 cover input_tokens, these cover the other three counters and
+# the window. The counter cases use "08" (illegal as octal → the expression aborts and stderr is no longer empty); the
+# window uses "01000000", a legal octal literal that would silently read as 262144 and show 100% instead of 98%.
+runh 200 "$(mkctxh 400000 08 500000 400 1000000 omit)"; chkh CTX23 92   # cache_creation: T=900408 → R=8
+runh 200 "$(mkctxh 400000 60000 08 400 1000000 omit)"; chkh CTX24 47    # cache_read:     T=460408 → R=53
+runh 200 "$(mkctxh 400000 60000 500000 08 1000000 omit)"; chkh CTX25 98 # output_tokens:  T=960008 → R=2
+runh 200 "$(mkctxh 400000 60000 500000 400 01000000 omit)"; chkh CTX26 98 # window: P=980000 as decimal, 242144 as octal
 
 echo "── X. _sum_inout dedups by message.id (CC logs one row per content block, each repeating the same message usage)"
 # m1 appears 3× with the same usage (10+5), m2 once (100+20); a naive per-row sum = 165, the correct dedup = 135.

@@ -214,15 +214,46 @@ the same signal the model-name compaction keys on) has ~5x the budget, so 80% th
 huge headroom and would falsely flag red; the threshold is **80% for 200k-class models, 92%
 for 1M-context models** (keeps the spec's worked 85% example normal-coloured while still
 warning as the 1M window nears full). Separately, a **200k cost/cache cliff marker** `⚑` is
-appended iff the upstream `exceeds_200k_tokens` flag is true. The marker is **decoupled** from
-the percentage colour — driven solely by the flag, independent of used% or which budget the
-colour threshold picked (a normal-coloured 1M frame can still show the cliff). Section `CTX`
+appended iff the upstream `exceeds_200k_tokens` flag is true AND a numeric selected percentage is
+present to host it (from either the aligned computation or the `used_percentage` fallback). The
+marker is **decoupled** from the percentage colour: driven solely by the flag, independent of the
+percentage's VALUE and its COLOUR, and of which budget the colour threshold picked (a
+normal-coloured 1M frame can still show the cliff). "Solely" scopes to those two things and
+nothing else: the marker still needs a
+percentage to ride on, so when NO numeric percentage can be produced from either source the whole
+segment is suppressed and the `⚑` goes with it (layer 3 of the three layers below). Section `CTX`
 covers the budget-aware threshold and the decoupled marker.
 
 ### Session duration + last-message age (`build_left`, time segment)
 
 The time segment's **primary** text is selected by a **three-level fallback chain**, all shown
 dim and all **replacing** the absolute last-prompt clock:
+**The percentage itself is NOT the upstream `used_percentage`.** Every ctx form (bar, `ctx:N%`,
+bare `N%`, the colour threshold, the cliff marker's host gate) consumes one *selected context
+percentage* produced by **`ctx_aligned_pct`** (render.sh), which recomputes the figure on the
+basis Claude Code uses for its own `Context low (N% remaining)` banner: `T` = the four
+`context_window.current_usage` counters summed (output tokens included, unlike `used_percentage`),
+`P` = `context_window_size - CTX_RESERVE`, `R` = round-half-up(`100*(P-T)/P`) with `P-T` clamped at
+0, and the displayed `N` = `100 - R`. Deriving `N` from `R` (rather than rounding `T/P`
+independently) is what keeps the two readings exact complements on a `.5` boundary. The two
+bases differ by ~2 points near a full window, which is where the meter matters: a frame that
+showed `96%` now shows `98%` while CC warns `2% remaining`. `CTX_RESERVE` (20000) is a named
+constant in statusline-command.sh's config area, **not a user knob**: it mirrors a constant
+inside the CC binary (verified against 2.1.232, 2026-08-14; the comment carries the
+re-verification method), and render.sh reads that variable rather than repeating the number.
+The five counters are collected the usual way: appended at the **tail** of `parse_input`'s jq
+array with the positional `read` order extended one-for-one (fields 19-23), so there is still
+exactly one stdin reader and one sanitization entry.
+
+Three layers decide what the segment shows: (1) all five counters numeric **and**
+`context_window_size` > `CTX_RESERVE` → the aligned value; (2) otherwise `ctx_aligned_pct`
+returns an empty string and the legacy `used_percentage` → `fmt_pct` path runs, byte-identical
+to the pre-change output (older CC builds send no `current_usage`); (3) neither source numeric →
+the whole segment is suppressed, cliff marker included. The gate is also the safety gate: it
+guarantees a positive denominator, and every arithmetic step is pure bash integer math with no
+fork. Cases `CTX8`-`CTX17` cover the aligned basis, the priority over `used_percentage`, the
+clamp, the half-up boundary, both fallback layers, and the `CTX_BAR` knob on all three forms.
+
 1. **API thinking-time** (top priority): `cost.total_api_duration_ms` when present and `>0` —
    the cumulative time Claude spent *waiting on the API to produce responses this session*,
    **excluding idle** and **excluding local tool execution**; the closest available proxy for

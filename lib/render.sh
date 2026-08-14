@@ -80,6 +80,35 @@ fmt_pct() {
     esac
 }
 
+# Warning-aligned context percentage: the ctx % Claude Code itself would report, so the statusline number and CC's
+# "Context low (N% remaining)" banner are exact complements (they always add up to 100) instead of differing by ~2 points
+# near a full window. CC's basis, not the upstream used_percentage's: the numerator T counts OUTPUT tokens too, and the
+# denominator P leaves CTX_RESERVE tokens of output headroom out of the window. R (the remaining % CC shows) is
+# round-half-up(100*(P-T)/P) and this returns 100-R — deriving the displayed value FROM R rather than rounding T/P
+# independently is what keeps the pair complementary on a .5 boundary (2.5 remaining → R=3 → 97, never 98/2).
+# Eligibility gate (all five counters numeric, window strictly above the reserve) doubles as the safety gate: it makes the
+# denominator positive, so no guard is needed at the division. Ineligible → empty string → the caller keeps the legacy
+# used_percentage path. Pure bash integer math, no fork, no external command (it runs on every frame).
+# Every counter enters arithmetic as 10#<value>, which is mandatory, not stylistic: jq's tostring erases the JSON type,
+# so a string-typed counter reaches here verbatim, and bash reads a leading zero as OCTAL. Without the prefix "08"/"09"
+# abort the whole expression ("value too great for base", with the error text landing on the statusline's stderr) and
+# "040000" silently evaluates to 16384, i.e. a wrong percentage with no symptom. The digit-only + length gate below runs
+# to completion BEFORE any arithmetic, so 10#$var can never see an empty or non-numeric operand.
+ctx_aligned_pct() {   # no args; reads the five collect.sh globals → prints "0".."100", or nothing when ineligible
+    local f t p rem
+    for f in "$ctx_in_tok" "$ctx_cc_tok" "$ctx_cr_tok" "$ctx_out_tok" "$ctx_win_size"; do
+        case "$f" in ''|*[!0-9]*) return 0 ;; esac   # absent (older CC), negative, or non-integer → fall back
+        # Digit cap: bash arithmetic is 64-bit signed (max ~9.2e18), and the widest intermediate here is 200*(P-T).
+        # 15 digits keeps that below 2e17 even after summing four counters, so a hostile value cannot wrap the result.
+        [ "${#f}" -le 15 ] || return 0
+    done
+    p=$(( 10#$ctx_win_size - CTX_RESERVE ))
+    [ "$p" -gt 0 ] || return 0                       # window at or below the reserve → no meaningful budget → fall back
+    t=$(( 10#$ctx_in_tok + 10#$ctx_cc_tok + 10#$ctx_cr_tok + 10#$ctx_out_tok ))
+    rem=$(( p - t )); [ "$rem" -ge 0 ] || rem=0       # usage past the reserve boundary → 0 remaining, i.e. 100% shown
+    printf '%s' "$(( 100 - (200 * rem + p) / (2 * p) ))"   # (200*rem + p) / (2*p) == round-half-up(100*rem/p)
+}
+
 # token count → human: <1000 raw integer, <1e6 "Nk" (integer thousands), else "N.NM" (one decimal). Pure integer math
 # (LC_ALL=C, bash 3.2 — no float printf): the M form derives one decimal from n/100000 (e.g. 1100000→11→"1.1M", 33400000→334→"33.4M").
 fmt_tok() {   # $1=integer → _tok ; empty on non-numeric
@@ -227,7 +256,13 @@ build_left() {
     # models, 92% for 1M-context models (a value that keeps 85% — the spec's worked example — in normal colour while still warning
     # as the 1M window genuinely nears full). Defaults to the 200k threshold when no extended-context marker is present.
     # When CTX_BAR=true, a 12-cell gradient bar is prepended: used portion colored in four zones (green→yellow→orange→red), unused drawn as gray track
-    fmt_pct "$used_pct"
+    # The number every ctx form consumes (bar, ctx:N%, bare N%, the colour threshold, the cliff marker's host gate) is the
+    # warning-aligned percentage — see ctx_aligned_pct: it is what CC's own "Context low (N% remaining)" banner is computed
+    # from, so the two readings agree instead of drifting ~2 points apart near a full window. Frames that lack the usage
+    # counters (older CC) get an empty string back and keep the legacy used_percentage → fmt_pct path, byte-identical to
+    # before; only the INPUT value changes here — thresholds, forms, marker and degrade behaviour are untouched.
+    _pct=$(ctx_aligned_pct)
+    [ -n "$_pct" ] || fmt_pct "$used_pct"
     if [ -n "$_pct" ]; then
         case "$model" in *"1M context"*|*"(1M)"*) ctx_red_at=92 ;; *) ctx_red_at=80 ;; esac
         if [ "$_pct" -gt "$ctx_red_at" ]; then ctx_color="$RD"; else ctx_color="$WH"; fi

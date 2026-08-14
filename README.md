@@ -81,13 +81,39 @@ A healthy frame — every example in the table below is taken from it, character
 | **Path** | `claude-statusline` | The project / sub-path you're in |
 | **Model** | `Opus 4.8` | Active model; a 1M-context variant shows `(1M)` |
 | **Thinking** | `no-think` | Only when abnormal: red `no-think` = extended thinking is off |
-| **Context** | `█████░░░░░░░ 42%` | How full the window is before Claude Code compacts the conversation; red only near the limit. `⚑` = crossed 200k tokens, where cost rises and caching changes |
+| **Context** | `█████░░░░░░░ 42%` | How full the window is, on the same basis as Claude Code's own `Context low (N% remaining)` warning, so the two always add up to 100; red only near the limit. `⚑` = crossed 200k tokens, where cost rises and caching changes |
 | **Tokens** | `128k ⊂23k` | Session input+output, subagents after `⊂`; cache tokens excluded |
 | **5h quota** | `2H10m 37%` | Resets in 2h10m, 37% left; `↘23m` = projected to run dry *before* the reset |
 | **7d quota** | `5D6H 72%` | The same, for the weekly limit |
 | **Time** | `45m25s (3m)` | Time Claude spent producing responses (idle and local tool runs excluded); `(3m)` = time since your last prompt — its color says whether the prompt cache is still warm (see below) |
 | **Git** | `main* +68/-14` | Branch, `*` if dirty, diffstat — pinned to the right edge |
 | **Name** | `auth-refactor` | Worktree / session name, when set (sessions: `/rename`) |
+
+### How the context % is computed
+
+Claude Code's `used_percentage` field and its own `Context low (N% remaining)` warning do **not** agree: the warning
+counts output tokens too, and it leaves an output reserve out of the window. Near a full window the two readings drift
+about 2 points apart, which is exactly when you need the number to be right. So the statusline recomputes the warning's
+figure locally and shows its complement:
+
+```
+T = current_usage.input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens
+P = context_window_size - 20000            # 20000 = the output reserve Claude Code keeps back
+R = round(100 * (P - T) / P)               # what "Context low (R% remaining)" shows; (P - T) never goes below 0
+displayed % = 100 - R
+```
+
+Worked example, a 1M window at `T = 960400`: `P = 980000`, `R = round(100 * 19600 / 980000) = 2`, so the line shows
+`98%` while Claude Code warns `Context low (2% remaining)`. The old behaviour showed `96%` for that same frame.
+
+A frame that carries no `current_usage` block (older Claude Code builds) falls back to the upstream `used_percentage`
+unchanged, so nothing regresses.
+
+**If the number looks wrong:** the reserve was verified against **Claude Code 2.1.232** (2026-08-14) and a future build
+may change it. It is the single `CTX_RESERVE` constant at the top of `statusline-command.sh`, with the re-verification
+method in its comment. One known gap: with auto-compact **on**, Claude Code's `N% until auto-compact` indicator holds
+back a further 13000 tokens, so against that particular indicator this reading stays slightly optimistic. It is aligned
+to the `Context low` warning, which is the auto-compact-off basis.
 
 ## Why this one
 

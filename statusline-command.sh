@@ -14,6 +14,12 @@
 export LC_ALL=C   # pin the %.0f decimal format; avoids parse failures under comma-decimal locales
 
 CTX_BAR=true       # ctx shows a gradient progress bar (█████░░░ N%); false falls back to plain text ctx:N%
+CTX_RESERVE=20000  # output reserve (tokens) subtracted from the context window when the ctx % is computed locally. NOT a user
+                   # preference: it mirrors Claude Code's own "Context low (N% remaining)" arithmetic, so the ctx % shown here and
+                   # that warning's remaining % always add up to 100. Provenance: the value is a constant inside the CC binary,
+                   # verified against CC 2.1.232 on 2026-08-14 by string-searching the binary; a future CC build may change it, so
+                   # re-verify the same way and edit it HERE — this is the repo's single definition (lib/render.sh's ctx_aligned_pct
+                   # reads this variable rather than repeating the number).
 NORM_THINKING=true # thinking normally on: warn in red (no-think) only when it's off, stay silent when on (set false to invert: show gray "thinking" only when on)
 STYLE="tokyo-night-claude"     # color style: claude / tokyo-night / tokyo-night-claude / catppuccin / rose-pine (for dark themes; light themes always use the light palette)
 RIGHT_ALIGN=true   # right-align the git/session part to the terminal edge; falls back to a │-separated join when width is unavailable or it doesn't fit

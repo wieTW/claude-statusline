@@ -6,6 +6,7 @@
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
 #         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now act_epoch
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
+#         ctx_in_tok ctx_cc_tok ctx_cr_tok ctx_out_tok ctx_win_size
 #         session_tokens subagent_tokens burn_tte
 #
 # Sync model: background jobs run via process substitution opening an FD; a read blocks until that job hits EOF, which is the
@@ -95,6 +96,11 @@ parse_input() {
         IFS= read -r dur_ms            # 16 dur_ms (cost.total_duration_ms — session wall-clock since start, ms)
         IFS= read -r api_ms            # 17 api_ms (cost.total_api_duration_ms — cumulative API-wait/"thinking" time, ms; excl. idle + local tools)
         IFS= read -r now               # 18 now
+        IFS= read -r ctx_in_tok        # 19 ctx_in_tok   (context_window.current_usage.input_tokens)
+        IFS= read -r ctx_cc_tok        # 20 ctx_cc_tok   (context_window.current_usage.cache_creation_input_tokens)
+        IFS= read -r ctx_cr_tok        # 21 ctx_cr_tok   (context_window.current_usage.cache_read_input_tokens)
+        IFS= read -r ctx_out_tok       # 22 ctx_out_tok  (context_window.current_usage.output_tokens)
+        IFS= read -r ctx_win_size      # 23 ctx_win_size (context_window.context_window_size)
         # NOTE: this read order is positional one-for-one with the jq array below. Each line carries a "# NN field"
         # number that MUST match the same-numbered jq element. Inserting/removing a field means editing BOTH lists at
         # the same position. Section V (sentinel test) in tests/run-tests.sh asserts every field lands in its own global.
@@ -117,7 +123,14 @@ parse_input() {
              else .context_window.exceeds_200k_tokens end),
           .cost.total_duration_ms // "",                                     # 16 dur_ms (session wall-clock since start, ms)
           .cost.total_api_duration_ms // "",                                 # 17 api_ms (cumulative API-wait/"thinking" ms; excl. idle + local tools)
-          (now | floor)                                                      # 18 now
+          (now | floor),                                                     # 18 now
+          # 19-23: the raw usage counters behind the "Context low (N% remaining)" warning CC prints for itself. They feed
+          # ctx_aligned_pct in render.sh (T = 19+20+21+22, P = 23 - CTX_RESERVE); absent on older CC builds → "" → fallback.
+          .context_window.current_usage.input_tokens // "",                  # 19 ctx_in_tok
+          .context_window.current_usage.cache_creation_input_tokens // "",   # 20 ctx_cc_tok
+          .context_window.current_usage.cache_read_input_tokens // "",       # 21 ctx_cr_tok
+          .context_window.current_usage.output_tokens // "",                 # 22 ctx_out_tok
+          .context_window.context_window_size // ""                          # 23 ctx_win_size
         ] | map(tostring | gsub("\n"; "\\n") | gsub("\r"; "\\r")
             | explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode | .[0:256])[]
     ' 2>/dev/null)
