@@ -14,7 +14,7 @@ audit: true
 parallel_tasks: true
 
 # Claude slash commands (set true to also generate /spectra:X commands)
-claude_slash_commands: true
+claude_slash_commands: false  # 2026-07-04 colon commands retired
 
 # Enable git worktree support for isolated change branches
 worktree: true
