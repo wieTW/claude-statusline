@@ -489,6 +489,37 @@ start_tokens_job() {
     tokens_update "$transcript_path" "$session_id" "$now" >/dev/null 2>&1 </dev/null &
 }
 
+# Publish "this pane's working directory" so something OUTSIDE Claude Code can resolve it (PATH_CLICK).
+# Why this exists: CC re-renders the statusline through its own style model, which drops OSC 8 hyperlinks, so the
+# path segment cannot carry a clickable link itself (verified: zero OSC 8 bytes reach the terminal, with and without
+# FORCE_HYPERLINK). The workable route is for the terminal to do the opening, and the only identity the terminal has
+# is the tty. CC's children get NO controlling terminal (`ps -o tty=` is `??`, /dev/tty is unopenable), so the tty
+# cannot be read here — but `$PPID` of the statusline command IS the claude process, and THAT process does own the
+# pane's tty. So we key the record by claude's pid and let the opener go tty -> pid -> directory.
+# One file per pid instead of one shared file: no lock, no read-modify-write, so concurrent panes cannot clobber
+# each other (the token/rate caches need a lock precisely because they share a file). Dead pids are reaped on write.
+CWD_MAP_DIR="$HOME/.claude/sl-cwd"
+start_cwdmap_job() {   # $1=claude pid (the caller passes $PPID from the main shell — a subshell's $PPID is not it)
+    [ -n "$cwd" ] || return 0
+    case "$1" in ''|*[!0-9]*) return 0 ;; esac
+    cwdmap_update "$cwd" "$1" >/dev/null 2>&1 </dev/null &
+}
+
+cwdmap_update() {   # $1=cwd $2=claude pid — detached worker: publish, then reap records of panes that are gone
+    umask 077                                            # holds directory paths: keep it private (600/700), subshell-scoped
+    mkdir -p "$CWD_MAP_DIR" 2>/dev/null || return 0
+    printf '%s\n' "$1" > "$CWD_MAP_DIR/$2" 2>/dev/null
+    local f p alive
+    # One ps for the whole sweep, and `ps` rather than `kill -0`: kill -0 fails with EPERM on a process this user does
+    # not own, which is indistinguishable from "gone" and would delete a live pane's record.
+    alive=" $(/bin/ps -A -o pid= 2>/dev/null | tr -s ' \n' '  ') "
+    for f in "$CWD_MAP_DIR"/*; do
+        p=${f##*/}
+        case $p in ''|*[!0-9]*) continue ;; esac          # skip the literal glob when the dir is empty, and any stray file
+        case $alive in *" $p "*) ;; *) rm -f "$f" 2>/dev/null ;; esac
+    done
+}
+
 tokens_update() {   # $1=transcript_path $2=sid $3=now — detached worker: gate on size/mtime, recompute + rewrite this sid's line
     umask 077                                            # token cache/tmp/lock created private (600/700): holds session IDs + token counts. Subshell-scoped (detached bg job / test subshell).
     local tp=$1 sid=$2 nowsec=$3 cache="$TOKENS_CACHE" lock="$TOKENS_CACHE.lock"

@@ -1161,6 +1161,49 @@ for cols in 1 2; do
 done
 [ "$z5bad" -eq 0 ] && echo "  Z5 core (path basename + ctx%) survives 20..1 cols, perl present/absent, single line OK" || fail=1
 
+# CLK (PATH_CLICK) The statusline cannot make its own path clickable — CC re-renders the line through its own style model
+# and drops OSC 8 hyperlinks (measured: zero OSC 8 bytes reach the terminal, FORCE_HYPERLINK included). So the terminal
+# does the opening and the statusline only publishes what the terminal cannot see: this pane's working directory, keyed by
+# the claude pid (CC's children have no controlling terminal, so the tty is unknowable on this side; $PPID is claude).
+echo "── CLK. PATH_CLICK: publish claude-pid → cwd for the terminal-side opener, reap dead panes, opener guards"
+cbad=0
+CWDMAP="$FAKE_HOME/.claude/sl-cwd"
+OPENER="$SL/scripts/open-pane-dir.sh"
+rm -rf "$CWDMAP"
+run 140 "$J" >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -d "$CWDMAP" ] && [ -n "$(ls -A "$CWDMAP" 2>/dev/null)" ] && break; sleep 0.2; done   # detached job
+pub=$(ls -A "$CWDMAP" 2>/dev/null | head -1)
+if [ -z "$pub" ]; then echo "  ★ FAIL CLK nothing published"; cbad=1; else
+  case $pub in ''|*[!0-9]*) echo "  ★ FAIL CLK record not keyed by pid: [$pub]"; cbad=1 ;; esac
+  [ "$(cat "$CWDMAP/$pub" 2>/dev/null)" = "$SL" ] || { echo "  ★ FAIL CLK published dir [$(cat "$CWDMAP/$pub" 2>/dev/null)] != [$SL]"; cbad=1; }
+  # the map leaks directory paths of every open pane → must not be world-readable
+  perm=$(stat -f '%Lp' "$CWDMAP" 2>/dev/null); [ "$perm" = "700" ] || { echo "  ★ FAIL CLK dir mode $perm != 700"; cbad=1; }
+  perm=$(stat -f '%Lp' "$CWDMAP/$pub" 2>/dev/null); [ "$perm" = "600" ] || { echo "  ★ FAIL CLK file mode $perm != 600"; cbad=1; }
+fi
+# a pane that is gone must not leave its directory behind forever (pid 1 is alive and must survive; a free high pid must not)
+deadpid=$(( 99000 + RANDOM % 900 )); while kill -0 "$deadpid" 2>/dev/null; do deadpid=$((deadpid+1)); done
+echo /tmp > "$CWDMAP/$deadpid"; echo /tmp > "$CWDMAP/1"; echo /tmp > "$CWDMAP/not-a-pid"
+run 140 "$J" >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$CWDMAP/$deadpid" ] || break; sleep 0.2; done
+[ -f "$CWDMAP/$deadpid" ] && { echo "  ★ FAIL CLK dead pane record not reaped"; cbad=1; }
+[ -f "$CWDMAP/1" ]       || { echo "  ★ FAIL CLK live pid record wrongly reaped"; cbad=1; }
+[ -f "$CWDMAP/not-a-pid" ] || { echo "  ★ FAIL CLK non-pid file wrongly removed"; cbad=1; }
+# PATH_CLICK=false publishes nothing at all
+mkdir -p "$WORK/noclick/lib" && cp "$SL"/lib/*.sh "$WORK/noclick/lib/"
+sed 's/^PATH_CLICK=true/PATH_CLICK=false/' "$SL/statusline-command.sh" > "$WORK/noclick/statusline-command.sh"
+rm -rf "$CWDMAP"
+printf '%s' "$J" | env COLUMNS=140 HOME="$FAKE_HOME" bash "$WORK/noclick/statusline-command.sh" >/dev/null
+sleep 0.6
+[ -d "$CWDMAP" ] && { echo "  ★ FAIL CLK PATH_CLICK=false still published"; cbad=1; }
+# opener guards: a tty string that is not a plain device name must be rejected before it reaches ps, and an unknown
+# pane must fail cleanly rather than open something arbitrary. SL_OPEN_NOTIFY=0 keeps these paths silent.
+out=$(SL_OPEN_NOTIFY=0 HOME="$FAKE_HOME" bash "$OPENER" '/dev/../etc/passwd' 2>&1); rc=$?
+[ "$rc" -eq 1 ] && case "$out" in *"unexpected tty"*) ;; *) echo "  ★ FAIL CLK traversal tty not rejected: [$out]"; cbad=1 ;; esac
+[ "$rc" -eq 1 ] || { echo "  ★ FAIL CLK traversal tty exit=$rc"; cbad=1; }
+out=$(SL_OPEN_NOTIFY=0 HOME="$FAKE_HOME" bash "$OPENER" /dev/ttys999 2>&1); rc=$?
+[ "$rc" -eq 1 ] || { echo "  ★ FAIL CLK unknown pane should fail, exit=$rc"; cbad=1; }
+[ "$cbad" -eq 0 ] && echo "  CLK publish + reap + private perms + disable + opener guards OK" || fail=1
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 

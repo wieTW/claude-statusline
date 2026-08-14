@@ -78,7 +78,7 @@ A healthy frame — every example in the table below is taken from it, character
 
 | Segment | Example | What it tells you |
 |---------|---------|-------------------|
-| **Path** | `claude-statusline` | The project / sub-path you're in |
+| **Path** | `claude-statusline` | The project / sub-path you're in. Cmd+click opens that folder in Finder, once the iTerm2 rule below is set up |
 | **Model** | `Opus 4.8` | Active model; a 1M-context variant shows `(1M)` |
 | **Thinking** | `no-think` | Only when abnormal: red `no-think` = extended thinking is off |
 | **Context** | `█████░░░░░░░ 42%` | How full the window is, on the same basis as Claude Code's own `Context low (N% remaining)` warning, so the two always add up to 100; red only near the limit. `⚑` = crossed 200k tokens, where cost rises and caching changes |
@@ -152,10 +152,42 @@ Five themes, picked with `STYLE` at the top of `statusline-command.sh`:
 | `STYLE` | `tokyo-night-claude` | `claude` / `tokyo-night` / `tokyo-night-claude` / `catppuccin` / `rose-pine` |
 | `CTX_BAR` | `true` | Gradient context bar; `false` for plain `ctx:42%` text |
 | `NORM_THINKING` | `true` | Thinking is the norm — warn (red `no-think`) only when it's off |
+| `PATH_CLICK` | `true` | Publish this pane's directory so cmd+click on the path can open it (see below); `false` publishes nothing |
 | `RIGHT_ALIGN` | `true` | Pin the git/session half to the terminal's right edge |
 | `RL_SYNC` | `true` | Cross-session rate-limit sync; off = each session keeps its frozen startup snapshot |
 | `BURN_SENS` | `balanced` | Burn-alarm eagerness: `conservative` / `balanced` / `sensitive` |
 | `LASTMSG_WARN` / `LASTMSG_STALE` | `300` / `3600` | Idle seconds before the `(Δ)` turns yellow / red — matched to the 5-min / 1-h cache TTLs |
+
+### Clickable path
+
+Cmd+click the path segment and that folder opens in Finder, while the segment keeps showing the short name.
+
+It takes one setup step, because the statusline itself cannot carry a hyperlink: Claude Code re-renders the line through
+its own style model and drops OSC 8 escapes, so the terminal has to do the opening. The statusline publishes this pane's
+directory to `~/.claude/sl-cwd/<claude pid>`; a small script turns the pane's tty back into that directory.
+
+In iTerm2: **Settings > Profiles > _your profile_ > Advanced > Smart Selection > Edit > `+`**
+
+1. **Regular Expression** — matches the statusline's first segment, and nothing in ordinary prose:
+
+   ```
+   (?<![\w·])(?<!· )[A-Za-z0-9._@][A-Za-z0-9._@/-]*(?= ·)
+   ```
+
+2. Select that row, open its **Actions**, add one, set it to **Run Command…**, tick **Use interpolated strings for
+   parameters**, and give it the script plus the pane's tty:
+
+   ```
+   /path/to/claude-statusline/scripts/open-pane-dir.sh \(session.tty)
+   ```
+
+   Without interpolated strings, pass no argument: the script then asks iTerm2 for the frontmost session, which is the
+   pane you just clicked.
+
+A cmd+click on text matching a smart selection rule runs that rule's first action. Claude Code having mouse reporting on
+does not interfere: iTerm2 keeps cmd+click for itself.
+
+If nothing opens, check `ls ~/.claude/sl-cwd/` — it should hold one file per open pane, named by that pane's claude pid.
 
 ---
 

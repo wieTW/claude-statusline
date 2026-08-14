@@ -46,6 +46,10 @@ and a **right** part (git · worktree · session name),
 right-aligned to the terminal edge with a `│` junction that appears only when the two halves
 nearly touch. When the terminal is too narrow, the line degrades through a fixed 14-step
 sacrifice order (shrink before drop; path + ctx% never dropped) so it never wraps.
+The path segment is cmd+clickable **without changing what it displays** (`PATH_CLICK`). It is not a hyperlink:
+CC re-renders the statusline through its own style model and drops OSC 8, so the line cannot carry one. Instead the
+statusline publishes this pane's directory to `~/.claude/sl-cwd/<claude pid>`, and an iTerm2 Smart Selection rule
+opens it through `scripts/open-pane-dir.sh`. See "Clickable path" below.
 
 ## Commands
 
@@ -70,7 +74,7 @@ bash assets/generate.sh
 `T`/`T2` = rate-sync rule matrix + concurrency, `U` = last-msg age (incl. cross-day),
 `DUR` = session-duration primary, `API` = API-thinking-time primary + `fmt_dur_s` + 3-level fallback,
 `V` = parse_input positional sentinel, `W`/`X`/`X2` = token display/dedup/prune,
-`CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `Z`/`Z1`–`Z5` =
+`CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `CLK` = path-click publish + opener, `Z`/`Z1`–`Z5` =
 adaptive-layout 14-step degrade. A failure prints `★ FAIL` and the script exits 1. There is **no
 per-test flag**; to isolate a case, read its labeled output or temporarily edit the
 script. The harness is self-locating (`SL=$(cd "$(dirname "$0")/.." …)`) and uses a
@@ -224,10 +228,6 @@ percentage to ride on, so when NO numeric percentage can be produced from either
 segment is suppressed and the `⚑` goes with it (layer 3 of the three layers below). Section `CTX`
 covers the budget-aware threshold and the decoupled marker.
 
-### Session duration + last-message age (`build_left`, time segment)
-
-The time segment's **primary** text is selected by a **three-level fallback chain**, all shown
-dim and all **replacing** the absolute last-prompt clock:
 **The percentage itself is NOT the upstream `used_percentage`.** Every ctx form (bar, `ctx:N%`,
 bare `N%`, the colour threshold, the cliff marker's host gate) consumes one *selected context
 percentage* produced by **`ctx_aligned_pct`** (render.sh), which recomputes the figure on the
@@ -254,6 +254,10 @@ guarantees a positive denominator, and every arithmetic step is pure bash intege
 fork. Cases `CTX8`-`CTX17` cover the aligned basis, the priority over `used_percentage`, the
 clamp, the half-up boundary, both fallback layers, and the `CTX_BAR` knob on all three forms.
 
+### Session duration + last-message age (`build_left`, time segment)
+
+The time segment's **primary** text is selected by a **three-level fallback chain**, all shown
+dim and all **replacing** the absolute last-prompt clock:
 1. **API thinking-time** (top priority): `cost.total_api_duration_ms` when present and `>0` —
    the cumulative time Claude spent *waiting on the API to produce responses this session*,
    **excluding idle** and **excluding local tool execution**; the closest available proxy for
@@ -332,9 +336,37 @@ both inject into the terminal and desync `vis_width` into a line wrap); `session
 last-msg file path; width bounding guarantees **no overflow/wrap** even on 1–2 column
 terminals or with perl absent; rate-limit "remaining" is clamped to ≥0%.
 
+### Clickable path (`PATH_CLICK` + `scripts/open-pane-dir.sh`)
+
+Goal: cmd+click the path segment, that folder opens in Finder, and the segment still shows the short name.
+
+**The statusline cannot do this itself.** CC does not pass the statusline string through to the terminal: it parses it
+into its own style model and re-emits it (our `\033[0m` comes out as `\033[22m`), which drops OSC 8 hyperlinks. Measured
+on a real session's raw pty output: zero OSC 8 bytes, with `FORCE_HYPERLINK=1` making no difference, and the binary has
+no hyperlink support anywhere near the statusline renderer. So the terminal has to do the opening.
+
+The terminal's only handle on a pane is its **tty**, and CC's children get **no controlling terminal** (`ps -o tty=` →
+`??`, `/dev/tty` unopenable), so the statusline cannot record the tty. What it can see is **`$PPID`, which is the claude
+process** — and that process does own the pane's tty. Hence the split:
+
+- **Publisher** (`start_cwdmap_job` / `cwdmap_update` in `lib/collect.sh`): a detached job writes `cwd` to
+  `~/.claude/sl-cwd/<claude pid>`. `$PPID` is read in the **main shell** and passed in, because a subshell's own `$PPID`
+  is not claude. One file per pid means no lock and no read-modify-write, so concurrent panes cannot clobber each other
+  (unlike the token/rate caches, which share a file and therefore need one). Each write sweeps records whose pid is gone,
+  using one `ps -A` rather than `kill -0` — `kill -0` returns EPERM for another user's process, indistinguishable from
+  "gone", which would delete a live pane's record. Mode is 700/600: the map lists the directories of every open pane.
+- **Opener** (`scripts/open-pane-dir.sh`): resolves tty → claude pid (`ps -t`) → published directory → `open`. The tty
+  comes from the rule's `\(session.tty)`, or from asking iTerm2 for the frontmost session when no argument is given (the
+  click focuses the pane first). Nested sessions put several claude processes on one tty, so it takes the most recently
+  written record. Failures surface as a desktop notification, because a Smart Selection action's output goes nowhere.
+
+The iTerm2 half is a one-off Smart Selection rule; the regex and action are in the README. Section `CLK` covers the
+publish format, the reaping rule, the private permissions, the disable path, and the opener's guards.
+
 ## Config knobs
 
-Top of `statusline-command.sh`: `CTX_BAR` (gradient ctx bar vs plain text), `NORM_THINKING`
+Top of `statusline-command.sh`: `CTX_BAR` (gradient ctx bar vs plain text), `PATH_CLICK` (publish this pane's
+directory to `~/.claude/sl-cwd/<claude pid>` for the terminal-side opener; false publishes nothing), `NORM_THINKING`
 (whether thinking-on is the norm), `STYLE` (`claude` / `tokyo-night` /
 `tokyo-night-claude` / `catppuccin` / `rose-pine`; light themes always use a fixed light
 palette), `RIGHT_ALIGN`, `EDGE_PAD` (drawable-width correction; bump if a CC build

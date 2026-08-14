@@ -21,6 +21,12 @@ CTX_RESERVE=20000  # output reserve (tokens) subtracted from the context window 
                    # re-verify the same way and edit it HERE — this is the repo's single definition (lib/render.sh's ctx_aligned_pct
                    # reads this variable rather than repeating the number).
 NORM_THINKING=true # thinking normally on: warn in red (no-think) only when it's off, stay silent when on (set false to invert: show gray "thinking" only when on)
+PATH_CLICK=true    # make the path segment cmd+clickable WITHOUT changing what it displays. The statusline itself cannot carry a
+                   # hyperlink: CC re-renders the line through its own style model and drops OSC 8 (measured on a real session — zero
+                   # OSC 8 bytes reach the terminal, and FORCE_HYPERLINK does not change that). So the terminal does the opening
+                   # instead, and this knob only publishes what it needs: this pane's working directory, written to
+                   # ~/.claude/sl-cwd/<claude pid> by a detached job that never blocks a frame. The iTerm2 half is a one-off Smart
+                   # Selection rule whose action runs scripts/open-pane-dir.sh (see README "Clickable path"). false = publish nothing.
 STYLE="tokyo-night-claude"     # color style: claude / tokyo-night / tokyo-night-claude / catppuccin / rose-pine (for dark themes; light themes always use the light palette)
 RIGHT_ALIGN=true   # right-align the git/session part to the terminal edge; falls back to a │-separated join when width is unavailable or it doesn't fit
 EDGE_PAD=3         # CC's statusline drawable area is N cols narrower than the width stty reports (overflow gets truncated to …);
@@ -68,6 +74,9 @@ start_theme_job    # t=0: kick off the theme background job first; it overlaps t
 start_width_job    # at the same instant, start the terminal-width job (for the right-align gap); also never touches stdin
 parse_input        # main shell blocks parsing the stdin JSON (the only reader of stdin)
 start_tokens_job   # fire-and-forget: detached, gated token re-sum updates the cache for the next frame (never blocks this one)
+$PATH_CLICK && start_cwdmap_job "$PPID"   # fire-and-forget: publish claude-pid → cwd for the terminal-side folder opener.
+                   # $PPID must be read HERE, in the main shell: it is the claude process that owns this pane's tty, and a
+                   # subshell's own $PPID is not it. CC's children have no controlling terminal, so the tty cannot be read on this side.
 reconcile_start    # cross-session rate-limit sync as a background FD job — its serialized cache read+awk+mv overlaps the git stage below
 collect_status     # git×3 + effort scan collected concurrently, blocking until the slowest job finishes
 read_theme         # the theme/width jobs are long done by now (covered by the two steps above), zero wait
