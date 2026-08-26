@@ -29,8 +29,11 @@ PATH_CLICK=true    # make the path segment cmd+clickable WITHOUT changing what i
                    # Selection rule whose action runs scripts/open-pane-dir.sh (see README "Clickable path"). false = publish nothing.
 STYLE="tokyo-night-claude"     # color style: claude / tokyo-night / tokyo-night-claude / catppuccin / rose-pine (for dark themes; light themes always use the light palette)
 RIGHT_ALIGN=true   # right-align the git/session part to the terminal edge; falls back to a │-separated join when width is unavailable or it doesn't fit
-EDGE_PAD=3         # CC's statusline drawable area is N cols narrower than the width stty reports (overflow gets truncated to …);
-                   # measured correction = 3 (aligning to the true terminal width eats 4 cols of the right part, keeping D-1 cols + …); tune here if a future CC build truncates again
+EDGE_PAD=4         # CC's statusline drawable area is N cols narrower than the width stty reports (overflow gets truncated to …);
+                   # measured correction = 4. CC renders the line inside Ink's <Text wrap="truncate">, so it re-truncates whatever this script emits:
+                   # drawable = COLUMNS - 4. Re-measured 2026-08-26 on CC 2.1.246 at a 166-col iTerm2 window, two independent ways:
+                   # a session name ending in a CJK char lost exactly that char + …, and a git diffstat lost exactly its deletion count + ….
+                   # With EDGE_PAD=3 the emitted line is 1 col too wide and CC eats the tail. Tune here if a future CC build changes its drawable area.
 JGAP=2             # minimum whitespace gap for the two parts to count as "separated": gap>=JGAP → plain whitespace, no junction │; <JGAP → the parts are too tight,
                    # so insert a │ separator (truncating the name to make room if needed). Larger → fewer │; set 1 → a │ appears as soon as they nearly touch
 RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a session's START snapshot (upstream limitation): an old
