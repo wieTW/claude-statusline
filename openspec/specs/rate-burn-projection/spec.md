@@ -10,9 +10,9 @@ The rate-burn-projection capability defines the depletion alarm on the five-hour
 
 The statusline SHALL estimate the rate of change of a reset window's used-percentage by computing a smoothed positive slope (used% per hour) over the recent persisted samples of that window, and a two-point estimate using the oldest and newest in-range samples SHALL be an acceptable smoothing.
 
-The sampled quantity SHALL be the cross-session reconciled "newest-session authority" adopted used% (the value `reconcile_rates` writes into `five_h` / `seven_d`), so the slope reflects the truest known usage rather than a frozen session's stale snapshot.
+The sampled quantity SHALL be the cross-session reconciled "newest-session authority" adopted used% (the value the reconciliation writes into `five_h` / `seven_d`), so the slope reflects the truest known usage rather than a frozen session's stale snapshot.
 
-Each sample SHALL be a `(timestamp, adopted_used%)` pair persisted as a bounded series piggybacked on the existing rate-limit cache (`~/.claude/sl-ratelimit-cache`), keyed by the window's `resets_at`, written under the same per-pid temp + atomic `mv` discipline as the existing cache so concurrent sessions do not corrupt it. When fewer than two in-range samples exist for a window, the slope SHALL be treated as undefined and no alarm SHALL be produced for that window.
+Each sample SHALL be a `(timestamp, adopted_used%)` pair persisted as a bounded series piggybacked on the existing rate-limit cache (`~/.claude/sl-ratelimit-cache`), keyed by the reconciled EFFECTIVE five-hour window key — the adopted class authority's `resets_at`, which equals the frame's own `five_reset` whenever that snapshot is live — written under the same per-pid temp + atomic `mv` discipline as the existing cache so concurrent sessions do not corrupt it. Keying by the effective window key means a frame whose own snapshot window has rolled still samples (and projects) against the live window it adopted, instead of producing no samples at all. When fewer than two in-range samples exist for a window, the slope SHALL be treated as undefined and no alarm SHALL be produced for that window.
 
 #### Scenario: Two-point slope over recent samples
 
@@ -38,20 +38,28 @@ Each sample SHALL be a `(timestamp, adopted_used%)` pair persisted as a bounded 
 
 #### Scenario: Sampled quantity is the reconciled authority value
 
-- **WHEN** `reconcile_rates` adopts a fresher session's used% for a window, mutating `five_h` in place from a frozen `30` to a reconciled `42`
+- **WHEN** the reconciliation adopts a fresher session's used% for the five-hour class, mutating `five_h` in place from a frozen `30` to a reconciled `42`
 - **THEN** the sample appended for that window SHALL record `42` (the adopted value), NOT the pre-reconciliation `30`
 
 
 <!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
+source: fix-rate-window-roll-staleness
+updated: 2026-08-27
 code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
+  - .agents/skills/spectra-debug/SKILL.md
+  - .agents/skills/spectra-ingest/SKILL.md
+  - reports/20260827-plan-statusline-weekly-authority.dot
+  - .agents/skills/spectra-commit/SKILL.md
+  - .agents/skills/spectra-propose/SKILL.md
+  - .agents/skills/spectra-discuss/SKILL.md
+  - .agents/skills/spectra-audit/SKILL.md
+  - .agents/skills/spectra-drift/SKILL.md
+  - .DS_Store
+  - AGENTS.md
+  - reports/20260827-plan-statusline-weekly-authority.svg
+  - .agents/skills/spectra-apply/SKILL.md
+  - .agents/skills/spectra-ask/SKILL.md
+  - .agents/skills/spectra-archive/SKILL.md
 -->
 
 ---
@@ -200,7 +208,7 @@ code:
 ---
 ### Requirement: Bounded persisted sample series on the rate-limit cache
 
-The sample series SHALL be bounded so the cache cannot grow without limit: per window, only the most recent samples needed to compute a smoothed slope over the sampling horizon SHALL be retained, and samples for a window whose `resets_at` is at or before `now` SHALL be pruned on rewrite (mirroring the existing `W` and `S` line pruning). The series SHALL be encoded as an additional cache line type that the existing `awk` reconciliation pass reads and rewrites in the same single pass, and malformed or old-format sample lines SHALL be dropped (not carried forward) exactly as malformed `W`/`S` lines already are. Any failure to write the cache (for example a read-only `$HOME`) SHALL degrade safely, leaving the current frame's values untouched and producing no alarm rather than an error.
+The sample series SHALL be bounded so the cache cannot grow without limit: per window, only the most recent samples needed to compute a smoothed slope over the sampling horizon SHALL be retained, and samples for a window whose `resets_at` is at or before `now` SHALL be pruned on rewrite (mirroring the existing `W5`/`W7` and `S` line pruning). The series SHALL be encoded as an additional cache line type that the existing `awk` reconciliation pass reads and rewrites in the same single pass, and malformed or old-format sample lines SHALL be dropped (not carried forward) exactly as malformed `W5`/`W7`/`S` lines already are. Any failure to write the cache (for example a read-only `$HOME`) SHALL degrade safely, leaving the current frame's values untouched and producing no alarm rather than an error.
 
 #### Scenario: Expired window samples are pruned
 
@@ -225,15 +233,23 @@ The sample series SHALL be bounded so the cache cannot grow without limit: per w
 
 
 <!-- @trace
-source: statusline-tokens-burn-and-fixes
-updated: 2026-06-16
+source: fix-rate-window-roll-staleness
+updated: 2026-08-27
 code:
-  - statusline-command.sh
-  - .spectra.yaml
-  - lib/render.sh
-  - lib/collect.sh
-  - tests/run-tests.sh
-  - CLAUDE.md
+  - .agents/skills/spectra-debug/SKILL.md
+  - .agents/skills/spectra-ingest/SKILL.md
+  - reports/20260827-plan-statusline-weekly-authority.dot
+  - .agents/skills/spectra-commit/SKILL.md
+  - .agents/skills/spectra-propose/SKILL.md
+  - .agents/skills/spectra-discuss/SKILL.md
+  - .agents/skills/spectra-audit/SKILL.md
+  - .agents/skills/spectra-drift/SKILL.md
+  - .DS_Store
+  - AGENTS.md
+  - reports/20260827-plan-statusline-weekly-authority.svg
+  - .agents/skills/spectra-apply/SKILL.md
+  - .agents/skills/spectra-ask/SKILL.md
+  - .agents/skills/spectra-archive/SKILL.md
 -->
 
 ---
@@ -348,12 +364,12 @@ code:
 ---
 ### Requirement: Sampling and projection are five-hour-window only
 
-The burn-projection sample series and the slope projection SHALL be confined to the 5-hour window; the 7-day window SHALL NOT be sampled and SHALL NOT produce a burn alarm. Each frame's `_reconcile_core` awk pass SHALL append at most one `P` sample — the pair `(now, adopted used% of the 5-hour window)` — and only when the 5-hour `resets_at` (`r5`) is numeric and present in the reconciled authority map. The 7-day `resets_at` (`r7`) SHALL NOT be sampled, because the slope gate downstream reads only the 5-hour retained samples, so any 7-day series would be persisted but never read. The two-point slope, the positive-slope gate, the before-reset gate, and the emitted `burn_tte` SHALL all be computed from the 5-hour window's retained samples alone.
+The burn-projection sample series and the slope projection SHALL be confined to the 5-hour window; the 7-day window SHALL NOT be sampled and SHALL NOT produce a burn alarm. Each frame's `_reconcile_core` awk pass SHALL append at most one `P` sample — the pair `(now, adopted used% of the 5-hour class)` — and only when a reconciled five-hour class authority exists; the sample SHALL be keyed by that authority's effective window key. The 7-day class SHALL NOT be sampled, because the slope gate downstream reads only the 5-hour retained samples, so any 7-day series would be persisted but never read. The two-point slope, the positive-slope gate, the before-reset gate, and the emitted `burn_tte` SHALL all be computed from the 5-hour window's retained samples alone, matched against the effective five-hour key.
 
 #### Scenario: Only the five-hour window is sampled
 
-- **WHEN** a writable frame reconciles both the 5-hour and 7-day windows into the authority map
-- **THEN** exactly one `P` sample keyed by the 5-hour `resets_at` SHALL be appended for that frame, and no `P` sample keyed by the 7-day `resets_at` SHALL ever be appended
+- **WHEN** a writable frame reconciles both the 5-hour and 7-day classes into the authority records
+- **THEN** exactly one `P` sample keyed by the effective 5-hour window key SHALL be appended for that frame, and no `P` sample keyed by the 7-day window SHALL ever be appended
 
 #### Scenario: The seven-day window never produces a burn alarm
 
@@ -366,11 +382,25 @@ The burn-projection sample series and the slope projection SHALL be confined to 
 - WHEN the burn projection runs
 - THEN the 5-hour slope is zero so its alarm is hidden, the 7-day window is never sampled, and no depletion indicator SHALL be shown for either window
 
+
 <!-- @trace
-source: statusline-spec-completeness
-updated: 2026-07-02
+source: fix-rate-window-roll-staleness
+updated: 2026-08-27
 code:
-  - lib/collect.sh
-  - lib/render.sh
-  - statusline-command.sh
+  - .agents/skills/spectra-debug/SKILL.md
+  - .agents/skills/spectra-ingest/SKILL.md
+  - reports/20260827-plan-statusline-weekly-authority.dot
+  - .agents/skills/spectra-commit/SKILL.md
+  - .agents/skills/spectra-propose/SKILL.md
+  - .agents/skills/spectra-discuss/SKILL.md
+  - .agents/skills/spectra-audit/SKILL.md
+  - .agents/skills/spectra-drift/SKILL.md
+  - .DS_Store
+  - AGENTS.md
+  - reports/20260827-plan-statusline-weekly-authority.svg
+  - .agents/skills/spectra-apply/SKILL.md
+  - .agents/skills/spectra-ask/SKILL.md
+  - .agents/skills/spectra-archive/SKILL.md
 -->
+
+---
