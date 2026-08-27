@@ -1322,6 +1322,111 @@ qrun() {  # $1=cols $2=json ; same as run() plus a configured gateway
     SL_QUOTA_MATCH="gw.example.invalid" SL_QUOTA_LABEL="TEAM" SL_QUOTA_DIR="$qdir" \
     bash "$SL/statusline-command.sh"
 }
+qrun_stale() {  # $1=stale seconds $2=cols $3=json
+  printf '%s' "$3" | env COLUMNS="$2" HOME="$FAKE_HOME" SL_QUOTA_STALE="$1" \
+    ANTHROPIC_BASE_URL="https://gw.example.invalid/v1" \
+    SL_QUOTA_MATCH="gw.example.invalid" SL_QUOTA_LABEL="TEAM" SL_QUOTA_DIR="$qdir" \
+    bash "$SL/statusline-command.sh"
+}
+# Extract the SGR code immediately before the quota value or label. References
+# are derived from the live palette in one frame, so no colour triple is fixed.
+qvaluecode() { perl -ne 'while(/\x1b\[([0-9;]*)m63%\*/g){$c=$1} END{print $c}'; }
+qlabelcode() { perl -ne 'while(/\x1b\[([0-9;]*)mTEAM/g){$c=$1} END{print $c}'; }
+
+# QS0: derive distinct severity and DM role codes from the current palette.
+printf '63%%* red\n' > "$qdir/claude-opus-4-8"
+qsref=$(qrun 200 "$J"); qs_sev=$(printf '%s' "$qsref" | qvaluecode); qs_dm=$(printf '%s' "$qsref" | qlabelcode)
+if [ -n "$qs_sev" ] && [ -n "$qs_dm" ] && [ "$qs_sev" != "$qs_dm" ]; then
+  echo "  QS0 quota severity/DM colours derived OK"
+else
+  echo "  ★ FAIL QS0 could not derive distinct quota colours (severity=[$qs_sev] DM=[$qs_dm])"; qbad=1
+fi
+
+qnow=$(date +%s)
+# QS1: a timestamp 60 seconds ago remains in its severity role.
+printf '63%%* red %s\n' "$((qnow-60))" > "$qdir/claude-opus-4-8"
+qs1=$(qrun 200 "$J"); qs1code=$(printf '%s' "$qs1" | qvaluecode); qs1plain=$(printf '%s' "$qs1" | nocol)
+[ "$qs1code" = "$qs_sev" ] || { echo "  ★ FAIL QS1 fresh value not in severity role (got=[$qs1code] want=[$qs_sev])"; qbad=1; }
+case "$qs1plain" in *"63%*"*) ;; *) echo "  ★ FAIL QS1 value text changed: [$qs1plain]"; qbad=1 ;; esac
+case "$qs1plain" in *"$((qnow-60))"*) echo "  ★ FAIL QS1 timestamp reached screen: [$qs1plain]"; qbad=1 ;; esac
+
+# QS2: 901 seconds is strictly outside the default window, so only the value
+# role changes to DM; the stripped frame stays byte-identical to QS1.
+printf '63%%* red %s\n' "$((qnow-901))" > "$qdir/claude-opus-4-8"
+qs2=$(qrun 200 "$J"); qs2code=$(printf '%s' "$qs2" | qvaluecode); qs2dm=$(printf '%s' "$qs2" | qlabelcode); qs2plain=$(printf '%s' "$qs2" | nocol)
+[ "$qs2code" = "$qs2dm" ] || { echo "  ★ FAIL QS2 stale value not in DM role (value=[$qs2code] DM=[$qs2dm])"; qbad=1; }
+[ "$qs2code" != "$qs_sev" ] || { echo "  ★ FAIL QS2 stale value retained severity role"; qbad=1; }
+[ "$qs2plain" = "$qs1plain" ] || { echo "  ★ FAIL QS2 dimming changed stripped frame"; qbad=1; }
+
+# QS3/QS4: old two-field files and unusable third fields keep severity colour;
+# neither the timestamp nor any trailing content may reach the screen.
+for qline in '63%* red' '63%* red abc' '63%* red 1756300000 extra'; do
+  printf '%s\n' "$qline" > "$qdir/claude-opus-4-8"
+  qso=$(qrun 200 "$J"); qscode=$(printf '%s' "$qso" | qvaluecode); qsplain=$(printf '%s' "$qso" | nocol)
+  [ "$qscode" = "$qs_sev" ] || { echo "  ★ FAIL QS3/QS4 unusable timestamp changed severity for [$qline]"; qbad=1; }
+  case "$qsplain" in *abc*|*1756300000*|*extra*) echo "  ★ FAIL QS3/QS4 third field reached screen: [$qsplain]"; qbad=1 ;; esac
+done
+
+# QS5: an environment override of 60 seconds dims age 61, while the same file
+# remains fresh under the default 900-second window.
+printf '63%%* red %s\n' "$((qnow-61))" > "$qdir/claude-opus-4-8"
+qs5=$(qrun_stale 60 200 "$J"); qs5code=$(printf '%s' "$qs5" | qvaluecode); qs5dm=$(printf '%s' "$qs5" | qlabelcode)
+[ "$qs5code" = "$qs5dm" ] || { echo "  ★ FAIL QS5 override did not dim age 61 (value=[$qs5code] DM=[$qs5dm])"; qbad=1; }
+qs5default=$(qrun 200 "$J" | qvaluecode)
+[ "$qs5default" = "$qs_sev" ] || { echo "  ★ FAIL QS5 default window dimmed age 61"; qbad=1; }
+
+# QS6: unusable windows fall back to 900, and a leading zero is decimal. Ages
+# 61 and 600 bind the fresh side (including against a bogus fallback of 100),
+# while age 1200 binds the stale side of the same default.
+for qwindow in '' sixty 1234567890123456789012345678901234567890 00900; do
+  printf '63%%* red %s\n' "$((qnow-61))" > "$qdir/claude-opus-4-8"
+  qscode=$(qrun_stale "$qwindow" 200 "$J" | qvaluecode)
+  [ "$qscode" = "$qs_sev" ] || { echo "  ★ FAIL QS6 window [$qwindow] dimmed age 61"; qbad=1; }
+  printf '63%%* red %s\n' "$((qnow-600))" > "$qdir/claude-opus-4-8"
+  qscode=$(qrun_stale "$qwindow" 200 "$J" | qvaluecode)
+  [ "$qscode" = "$qs_sev" ] || { echo "  ★ FAIL QS6 window [$qwindow] did not retain default/decimal 900"; qbad=1; }
+  printf '63%%* red %s\n' "$((qnow-1200))" > "$qdir/claude-opus-4-8"
+  qso=$(qrun_stale "$qwindow" 200 "$J"); qscode=$(printf '%s' "$qso" | qvaluecode); qsdm=$(printf '%s' "$qso" | qlabelcode)
+  [ "$qscode" = "$qsdm" ] || { echo "  ★ FAIL QS6 window [$qwindow] did not use decimal/default 900"; qbad=1; }
+done
+
+# QS7: future/millisecond/oversized timestamps are never stale; a usable
+# leading-zero timestamp is read in base 10 and remains fresh here.
+for qat in "$((qnow+3600))" 1756300000000 1234567890123456789012345678901234567890 "0$((qnow-60))"; do
+  printf '63%%* red %s\n' "$qat" > "$qdir/claude-opus-4-8"
+  qscode=$(qrun 200 "$J" | qvaluecode)
+  [ "$qscode" = "$qs_sev" ] || { echo "  ★ FAIL QS7 timestamp [$qat] was incorrectly dimmed"; qbad=1; }
+done
+
+# A colon is not a digit. It must fail closed to severity without entering
+# arithmetic, printing diagnostics, or terminating the frame.
+printf '63%%* red 123:456\n' > "$qdir/claude-opus-4-8"
+qs7err="$WORK/qs7-colon.err"
+qs7colon=$(qrun 200 "$J" 2>"$qs7err"); qs7rc=$?
+qs7code=$(printf '%s' "$qs7colon" | qvaluecode); qs7lines=$(printf '%s' "$qs7colon" | grep -c '')
+[ "$qs7rc" -eq 0 ] || { echo "  ★ FAIL QS7 colon timestamp terminated frame (exit=$qs7rc)"; qbad=1; }
+[ ! -s "$qs7err" ] || { echo "  ★ FAIL QS7 colon timestamp wrote stderr"; qbad=1; }
+[ "$qs7lines" -eq 1 ] || { echo "  ★ FAIL QS7 colon timestamp output lines=$qs7lines"; qbad=1; }
+[ "$qs7code" = "$qs_sev" ] || { echo "  ★ FAIL QS7 colon timestamp changed severity"; qbad=1; }
+
+# QS8: guarantee the writer timestamp and jq's render time are in the same
+# wall-clock second, then bind the strict default boundary: age 900 is fresh.
+qs8=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  qs8now=$(date +%s)
+  printf '63%%* red %s\n' "$((qs8now-900))" > "$qdir/claude-opus-4-8"
+  qs8try=$(qrun 200 "$J")
+  [ "$(date +%s)" = "$qs8now" ] || continue
+  qs8=$qs8try
+  break
+done
+if [ -n "$qs8" ]; then
+  qs8code=$(printf '%s' "$qs8" | qvaluecode)
+  [ "$qs8code" = "$qs_sev" ] || { echo "  ★ FAIL QS8 age exactly 900 was dimmed"; qbad=1; }
+else
+  echo "  ★ FAIL QS8 could not capture a same-second boundary frame"; qbad=1
+fi
+[ "$qbad" -ne 0 ] || echo "  QS1-QS8 freshness, strict boundary, guards, fallback, and override cases OK"
 
 # mkjson reports "Opus 4.8 (1M context)", which maps to claude-opus-4-8.
 printf '3.3%% green\n' > "$qdir/claude-opus-4-8"

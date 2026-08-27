@@ -8,6 +8,7 @@
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
 #         ctx_in_tok ctx_cc_tok ctx_cr_tok ctx_out_tok ctx_win_size
 #         session_tokens subagent_tokens burn_tte
+#         quota_label quota_pct quota_sev quota_at
 #
 # Sync model: background jobs run via process substitution opening an FD; a read blocks until that job hits EOF, which is the
 # sync point — no wait / temp file needed. Jobs are independent and run in parallel, so wall-clock = the slowest one, not the sum.
@@ -518,7 +519,7 @@ read_tokens() {
 # string per model, because a ~26ms frame has no room to parse anything, and
 # because every session must render the identical number.
 read_quota_field() {
-    quota_label=""; quota_pct=""; quota_sev=""
+    quota_label=""; quota_pct=""; quota_sev=""; quota_at=""
     [ -n "${SL_QUOTA_MATCH:-}" ] || return 0
     case "${ANTHROPIC_BASE_URL:-}" in
         *"$SL_QUOTA_MATCH"*) quota_label="${SL_QUOTA_LABEL:-QUOTA}" ;;
@@ -544,7 +545,7 @@ read_quota_field() {
 
     dir="${SL_QUOTA_DIR:-$HOME/.claude/state/statusline-quota}"
     [ -f "$dir/claude-$fam-$ver" ] || return 0
-    IFS=' ' read -r quota_pct quota_sev < "$dir/claude-$fam-$ver" 2>/dev/null
+    IFS=' ' read -r quota_pct quota_sev quota_at < "$dir/claude-$fam-$ver" 2>/dev/null
 }
 
 # Kick off the detached recompute (gated). Fire-and-forget: the frame never waits on it. </dev/null per the stdin hard rule

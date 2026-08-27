@@ -362,10 +362,29 @@ build_left() {
         parts+=("$seg_5h_full")
         seg_7d=""
         if [ -n "${quota_pct:-}" ]; then
-            local _qc
+            local _qc _quota_stale _quota_at_ok _quota_now_ok
             case "${quota_sev:-}" in
                 red) _qc="$RD" ;; orange) _qc="$OG" ;; yellow) _qc="$YL" ;; *) _qc="$GR" ;;
             esac
+            _quota_stale="${SL_QUOTA_STALE:-900}"
+            case "$_quota_stale" in
+                ''|*[!0-9]*) _quota_stale=900 ;;
+                *) [ "${#_quota_stale}" -le 15 ] || _quota_stale=900 ;;
+            esac
+            _quota_at_ok=false
+            case "${quota_at:-}" in
+                ''|*[!0-9]*) ;;
+                *) [ "${#quota_at}" -le 15 ] && _quota_at_ok=true ;;
+            esac
+            _quota_now_ok=false
+            case "${now:-}" in
+                ''|*[!0-9]*) ;;
+                *) [ "${#now}" -le 15 ] && _quota_now_ok=true ;;
+            esac
+            if $_quota_at_ok && $_quota_now_ok &&
+               [ "$(( 10#$now - 10#$quota_at ))" -gt "$(( 10#$_quota_stale ))" ]; then
+                _qc="$DM"
+            fi
             seg_7d="${_qc}${quota_pct}${RS}"
             parts+=("$seg_7d")
         fi
