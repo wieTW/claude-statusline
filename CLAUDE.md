@@ -211,12 +211,13 @@ Test sections `W` (display) / `X` (dedup) / `X2` (prune) cover it.
 
 ### Context meter (`build_left`, ctx segment)
 
-The ctx% turns red only near the model's context limit, on a **budget-aware** threshold —
-NOT a fixed 80%. A 1M-context model (display name carries the `1M context` / `(1M)` marker,
-the same signal the model-name compaction keys on) has ~5x the budget, so 80% there is still
-huge headroom and would falsely flag red; the threshold is **80% for 200k-class models, 92%
-for 1M-context models** (keeps the spec's worked 85% example normal-coloured while still
-warning as the 1M window nears full). Separately, a **200k cost/cache cliff marker** `⚑` is
+The ctx% turns red only near the session's context limit, on a **budget-aware** threshold —
+NOT a fixed 80%. The reported `context_window.context_window_size` is the primary signal;
+the display name's exact ` (1M context)` marker is the fallback when that size is unusable.
+A 1M window has ~5x the budget, so 80% there is still huge headroom and would falsely flag
+red; the threshold is **80% for 200k-class windows, 92% for 1M windows** (keeps the spec's
+worked 85% example normal-coloured while still warning as the 1M window nears full).
+Separately, a **200k cost/cache cliff marker** `⚑` is
 appended iff the upstream `exceeds_200k_tokens` flag is true AND a numeric selected percentage is
 present to host it (from either the aligned computation or the `used_percentage` fallback). The
 marker is **decoupled** from the percentage colour: driven solely by the flag, independent of the

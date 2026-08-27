@@ -793,6 +793,69 @@ RDCODE=$(run 200 "$(mkctx 'Sonnet 4.6' 99 omit)" | ctxpcode)             # guara
 NMCODE=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 10 omit)" | ctxpcode)  # guaranteed-normal reference (1M @10%)
 if [ -n "$RDCODE" ] && [ -n "$NMCODE" ] && [ "$RDCODE" != "$NMCODE" ]; then echo "  CTX0 red/normal ctx colours derived OK"
 else echo "  ★ FAIL CTX0 could not derive distinct red/normal colours (red=[$RDCODE] normal=[$NMCODE])"; fail=1; fi
+
+echo "── M1-M7. 1M detection follows context_window_size, with display-name fallback and unchanged compact form"
+# mk1m: one-line statusline JSON with independently controlled model and reported window. The window is deliberately
+# string-typed so the render gate sees the same hostile shapes jq's tostring preserves; "omit" leaves the field absent.
+# Existing mkctx/mkctxa signatures remain unchanged because their CTX fixtures exercise separate contracts.
+mk1m() {  # $1=model display_name $2=context_window_size (or omit) $3=used_percentage
+  jq -cn --arg m "$1" --arg win "$2" --arg up "$3" '
+    { workspace:{current_dir:"/private/tmp"}, model:{display_name:$m},
+      context_window: ({used_percentage:($up|tonumber)}
+        + (if $win == "omit" then {} else {context_window_size:$win} end)) }'
+}
+
+m1=$(run 200 "$(mk1m 'Opus 5' 1000000 85)" | nocol)
+case "$m1" in
+  *"Opus 5(1M)"*) case "$m1" in *"Opus 5 (1M)"*) echo "  ★ FAIL M1 appended marker has a separating space: [$m1]"; fail=1 ;;
+                     *) echo "  M1 reported 1000000 appends Opus 5(1M) with no space OK" ;; esac ;;
+  *) echo "  ★ FAIL M1 missing appended marker: [$m1]"; fail=1 ;;
+esac
+m2=$(run 200 "$(mk1m 'Sonnet 5' 200000 85)" | nocol)
+case "$m2" in *"Sonnet 5"*) case "$m2" in *"(1M)"*) echo "  ★ FAIL M2 standard window gained marker: [$m2]"; fail=1 ;;
+                                      *) echo "  M2 reported 200000 leaves Sonnet 5 unmarked OK" ;; esac ;;
+  *) echo "  ★ FAIL M2 model missing: [$m2]"; fail=1 ;;
+esac
+m3=$(run 200 "$(mk1m 'Opus 4.8 (1M context)' 1000000 85)" | nocol)
+case "$m3" in *"Opus 4.8(1M)"*) case "$m3" in *"(1M)(1M)"*) echo "  ★ FAIL M3 duplicate marker: [$m3]"; fail=1 ;;
+                                             *) echo "  M3 announced + reported extended window yields one marker OK" ;; esac ;;
+  *) echo "  ★ FAIL M3 legacy rewrite missing: [$m3]"; fail=1 ;;
+esac
+m4=$(run 200 "$(mk1m 'Opus 4.8 (1M context)' omit 85)" | nocol)
+case "$m4" in *"Opus 4.8(1M)"*) echo "  M4 absent size falls back to announced 1M name OK" ;;
+  *) echo "  ★ FAIL M4 display-name fallback missing: [$m4]"; fail=1 ;;
+esac
+m5=$(run 200 "$(mk1m 'Sonnet 5' omit 85)" | nocol)
+case "$m5" in *"Sonnet 5"*) case "$m5" in *"(1M)"*) echo "  ★ FAIL M5 absent size invented marker: [$m5]"; fail=1 ;;
+                                      *) echo "  M5 absent size + silent name remains unmarked OK" ;; esac ;;
+  *) echo "  ★ FAIL M5 model missing: [$m5]"; fail=1 ;;
+esac
+m6=$(run 22 "$(mk1m 'Opus 5' 1000000 85)" | nocol)
+case "$m6" in *"Opus"*) case "$m6" in *"Opus 5(1M)"*) echo "  ★ FAIL M6 full model survived compact tier: [$m6]"; fail=1 ;;
+                                  *) echo "  M6 compact form stays the raw leading word Opus OK" ;; esac ;;
+  *) echo "  ★ FAIL M6 compact model missing: [$m6]"; fail=1 ;;
+esac
+m7e=$(run 200 "$(mk1m 'Opus 5' 1000000 85)" | ctxpcode)
+m7s=$(run 200 "$(mk1m 'Sonnet 5' 200000 85)" | ctxpcode)
+if [ "$m7e" = "$NMCODE" ] && [ "$m7s" = "$RDCODE" ] && [ "$m7e" != "$m7s" ]; then
+  echo "  M7 reported window drives 92/80 threshold at identical 85% OK"
+else
+  echo "  ★ FAIL M7 threshold did not follow size (1M=[$m7e] normal=[$NMCODE] 200k=[$m7s] red=[$RDCODE])"; fail=1
+fi
+
+# Predicate robustness: every unusable size falls back without arithmetic diagnostics; a leading-zero decimal remains usable.
+m8bad=0
+for spec in 'nonnumeric|abc|Opus 4.8 (1M context)|Opus 4.8(1M)' 'leading-zero|01000000|Opus 5|Opus 5(1M)' '40-digit|9999999999999999999999999999999999999999|Sonnet 5|Sonnet 5'; do
+  label=${spec%%|*}; rest=${spec#*|}; win=${rest%%|*}; rest=${rest#*|}; m8model=${rest%%|*}; want=${rest#*|}
+  printf '%s' "$(mk1m "$m8model" "$win" 85)" | env COLUMNS=200 HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >"$WORK/m8.out" 2>"$WORK/m8.err"; m8rc=$?
+  m8plain=$(nocol < "$WORK/m8.out"); m8lines=$(grep -c '' "$WORK/m8.out"); m8err=$(wc -c < "$WORK/m8.err" | tr -d ' ')
+  [ "$m8rc" -eq 0 ] || { echo "  ★ FAIL M8 $label exited $m8rc"; m8bad=1; }
+  [ "$m8lines" -eq 1 ] || { echo "  ★ FAIL M8 $label emitted $m8lines lines"; m8bad=1; }
+  [ "$m8err" = 0 ] || { echo "  ★ FAIL M8 $label wrote $m8err stderr bytes: [$(cat "$WORK/m8.err")]"; m8bad=1; }
+  case "$m8plain" in *"$want"*) ;; *) echo "  ★ FAIL M8 $label fallback/decimal result missing [$want]: [$m8plain]"; m8bad=1 ;; esac
+done
+[ "$m8bad" -eq 0 ] && echo "  M8 nonnumeric/leading-zero/40-digit frames: one line, stderr clean, correct fallback OK" || fail=1
+
 # CTX1 1M model at 85% → NOT red (the spec worked example)
 c1=$(run 200 "$(mkctx 'Opus 4.8 (1M context)' 85 omit)" | ctxpcode)
 if [ "$c1" != "$RDCODE" ]; then echo "  CTX1 1M @85% ctx% NOT red OK"; else echo "  ★ FAIL CTX1 1M @85% wrongly red ([$c1] == RD)"; fail=1; fi

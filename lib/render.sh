@@ -109,6 +109,25 @@ ctx_aligned_pct() {   # no args; reads the five collect.sh globals → prints "0
     printf '%s' "$(( 100 - (200 * rem + p) / (2 * p) ))"   # (200*rem + p) / (2*p) == round-half-up(100*rem/p)
 }
 
+# Single extended-context predicate for every render decision keyed on a 1M window. The reported size is the primary
+# signal; the exact legacy display-name marker remains an OR fallback for older/odd frames where the size is unusable.
+# Keep the arithmetic behind the same digit-only / 15-digit gate as ctx_aligned_pct and force base 10 so a leading zero
+# is never octal. Unusable values never enter arithmetic and therefore cannot abort a frame or write diagnostics.
+set_is_1m() {   # no args; reads ctx_win_size + model → global is_1m=true|false
+    is_1m=false
+    case "$ctx_win_size" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ "${#ctx_win_size}" -le 15 ] && [ "$(( 10#$ctx_win_size ))" -ge 1000000 ]; then
+                is_1m=true
+            fi
+            ;;
+    esac
+    if ! $is_1m; then
+        case "$model" in *" (1M context)"*) is_1m=true ;; esac
+    fi
+}
+
 # token count → human: <1000 raw integer, <1e6 "Nk" (integer thousands), else "N.NM" (one decimal). Pure integer math
 # (LC_ALL=C, bash 3.2 — no float printf): the M form derives one decimal from n/100000 (e.g. 1100000→11→"1.1M", 33400000→334→"33.4M").
 fmt_tok() {   # $1=integer → _tok ; empty on non-numeric
@@ -212,6 +231,7 @@ build_left() {
     parts=()
     seg_path=""; seg_model_full=""; seg_model_compact=""; seg_effort=""; seg_thinking=""
     seg_ctx_full=""; seg_ctx_compact=""; seg_tok=""; seg_5h_full=""; seg_5h_compact=""; seg_7d=""; seg_lastmsg=""
+    set_is_1m
 
     # Path display: cwd under project_dir → project name + relative path, otherwise basename
     display_dir=""
@@ -227,9 +247,14 @@ build_left() {
     # Core path segment: the basename is the never-dropped anchor (degrade_layout head-truncates it only at the core-only tier).
     [ -n "$display_dir" ] && { seg_path="${CY}${BOLD}${display_dir}${RS}"; parts+=("$seg_path"); }
 
-    # Model name carries a compact form ("Opus 4.8(1M)" → "Opus", the leading word) so degrade_layout shrinks before dropping (steps 9/10).
+    # The full model name rewrites the exact legacy marker first; otherwise the shared predicate appends (1M) with no
+    # space. The mutually exclusive paths prevent a double suffix. Compact stays the raw name's leading word.
     if [ -n "$model" ]; then
-        seg_model_full="${MD}${model/ (1M context)/(1M)}${RS}"
+        case "$model" in
+            *" (1M context)"*) model_full=${model/ (1M context)/(1M)} ;;
+            *) if $is_1m; then model_full="${model}(1M)"; else model_full=$model; fi ;;
+        esac
+        seg_model_full="${MD}${model_full}${RS}"
         seg_model_compact="${MD}${model%% *}${RS}"   # first whitespace-delimited word, e.g. "Opus"
         parts+=("$seg_model_full")
     fi
@@ -262,12 +287,11 @@ build_left() {
         [ -n "$seg_thinking" ] && parts+=("$seg_thinking")
     fi
 
-    # ctx %: the % number is normally white, turns red as a warning only near the model's context limit. The red threshold is
-    # BUDGET-AWARE, not a fixed 80%: a 1M-context model (display name carries the "1M context" marker, same signal build_left
-    # already keys on for the model-name compaction above) has ~5x the budget, so 80% there is still huge headroom — applying the
-    # 200k-class 80% rule would falsely flag it red. So pick the threshold from the model's context budget: 80% for 200k-class
-    # models, 92% for 1M-context models (a value that keeps 85% — the spec's worked example — in normal colour while still warning
-    # as the 1M window genuinely nears full). Defaults to the 200k threshold when no extended-context marker is present.
+    # ctx %: the % number is normally white, turns red as a warning only near the session's context limit. The red threshold is
+    # BUDGET-AWARE, not a fixed 80%: the shared is_1m predicate primarily reads Claude Code's reported window size and retains the
+    # exact display-name marker as a fallback. A 1M window has ~5x the budget, so 80% there is still huge headroom — applying the
+    # 200k-class 80% rule would falsely flag it red. Pick 80% for 200k-class windows and 92% for extended windows (keeping the spec's
+    # worked 85% example normal-coloured while still warning as the 1M window genuinely nears full).
     # When CTX_BAR=true, a 12-cell gradient bar is prepended: used portion colored in four zones (green→yellow→orange→red), unused drawn as gray track
     # The number every ctx form consumes (bar, ctx:N%, bare N%, the colour threshold, the cliff marker's host gate) is the
     # warning-aligned percentage — see ctx_aligned_pct: it is what CC's own "Context low (N% remaining)" banner is computed
@@ -277,7 +301,7 @@ build_left() {
     _pct=$(ctx_aligned_pct)
     [ -n "$_pct" ] || fmt_pct "$used_pct"
     if [ -n "$_pct" ]; then
-        case "$model" in *"1M context"*|*"(1M)"*) ctx_red_at=92 ;; *) ctx_red_at=80 ;; esac
+        if $is_1m; then ctx_red_at=92; else ctx_red_at=80; fi
         if [ "$_pct" -gt "$ctx_red_at" ]; then ctx_color="$RD"; else ctx_color="$WH"; fi
         # 200k cost/cache cliff marker: appended iff the upstream over-200k indicator (exceeds_200k_tokens) is true. It is DECOUPLED
         # from the percentage colour above — driven solely by the indicator, independent of used_percentage or which budget the colour

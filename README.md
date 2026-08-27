@@ -79,7 +79,7 @@ A healthy frame — every example in the table below is taken from it, character
 | Segment | Example | What it tells you |
 |---------|---------|-------------------|
 | **Path** | `claude-statusline` | The project / sub-path you're in. Cmd+click opens that folder in Finder, once the iTerm2 rule below is set up |
-| **Model** | `Opus 4.8` | Active model; a 1M-context variant shows `(1M)` |
+| **Model** | `Opus 4.8` | Active model; `(1M)` appears when the session's context window is 1M |
 | **Thinking** | `no-think` | Only when abnormal: red `no-think` = extended thinking is off |
 | **Context** | `█████░░░░░░░ 42%` | How full the window is, on the same basis as Claude Code's own `Context low (N% remaining)` warning, so the two always add up to 100; red only near the limit. `⚑` = crossed 200k tokens, where cost rises and caching changes |
 | **Tokens** | `128k ⊂23k` | Session input+output, subagents after `⊂`; cache tokens excluded |
