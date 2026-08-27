@@ -6,6 +6,7 @@
 set -u
 SL=$(cd "$(dirname "$0")/.." && pwd)
 SLDIR=$(basename "$SL")   # project-dir basename, shown as the path segment; derived (not hardcoded) so the order check survives a repo rename
+SLBR=$(git -C "$SL" branch --show-current 2>/dev/null); SLBR=${SLBR:-main}  # current worktree branch; the order check must not assume main
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/sl-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 FAKE_HOME="$WORK/home"
@@ -93,7 +94,7 @@ chk check exact $((W+20-EDGE_PAD)) < <(run $((W+20)) "$J")
 echo "── A2. content order dir→model→ultra→ctx→quota→time→git→session"
 plain=$(run $((W+20)) "$J" | python3 -c 'import sys,re;sys.stdout.write(re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read()))')
 case "$plain" in
-  "$SLDIR"*"Opus 4.8(1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*main*"Consolidate statusline from two rows to one") echo "  order OK" ;;
+  "$SLDIR"*"Opus 4.8(1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*"$SLBR"*"Consolidate statusline from two rows to one") echo "  order OK" ;;
   *) echo "  ★ FAIL order mismatch: [$plain]"; fail=1 ;;
 esac
 
@@ -279,39 +280,39 @@ JS=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
 sout=$(run 200 "$JS" | sed 's/\x1b\[[0-9;]*m//g')
 case "$sout" in *-[0-9]*%*) echo "  ★ FAIL negative remaining %: [$sout]"; fail=1 ;; *) echo "  no negative % OK" ;; esac
 
-echo "── T. RATE-SYNC: per-CLASS (W5/W7) authority = the NEWEST session's value (older sessions can't override) — climb / cap-raise drop / anti-reversal / persistence / re-key / toggle / prune / legacy / roll-adoption / class-isolation / sanity-bound"
+echo "── T. RATE-SYNC: per-CLASS (W5/W7) authority = the freshest observation — climb / cap-raise drop / anti-reversal / persistence / re-key / toggle / prune / legacy / roll-adoption / class-isolation / sanity-bound"
 SLC="$FAKE_HOME/.claude/sl-ratelimit-cache"
 nocol() { sed 's/\x1b\[[0-9;]*m//g'; }
 rsj() {  # $1=used% $2=resets_at $3=session_id → minimal five_hour-only json (ctx pinned 5% so the only other "%" token is the rate)
   jq -cn --arg cwd "$SL" --arg tp "$TP" --arg sid "${3:-sl-selftest}" --argjson u "$1" --argjson r "$2" '
   { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
     rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:$sid, transcript_path:$tp }'; }
-# Scenarios are set up by PRE-SEEDING the cache with controlled first_seen epochs (render-time alone is sub-second so can't order sessions in-test).
+# Scenarios pre-seed controlled observation epochs; the one legacy fixture also checks first_seen-based upgrade behavior.
 NOW=$(jq -n 'now|floor'); RT=$((NOW + 9000))   # active window key (~2.5h to reset)
 OLD=$((NOW - 5000)); RECENT=$((NOW - 100))     # an old vs a recent session's first_seen
 # T1 climb: authority is an OLD session at 40; a NEW session (first_seen=now > OLD) reports higher 75 → adopt → remaining 25%
-printf 'S sessOld %s\nW5 %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s %s 40 %s - - -\nW5 %s 40 %s\n' "$OLD" "$RT" "$OLD" "$RT" "$OLD" > "$SLC"
 t1=$(run 120 "$(rsj 75 "$RT" sessNew)" | nocol)
 case "$t1" in *" 25%"*) echo "  T1 newer session raises (climb) → 25% OK" ;; *) echo "  ★ FAIL T1 expected 25% remaining: [$t1]"; fail=1 ;; esac
 # T2 cap-raise (THE incident): authority OLD at 70; a NEW session reports LOWER 38 → adopt → remaining 62%, not the stale 30%
-printf 'S sessOld %s\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s %s 70 %s - - -\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" "$RT" "$OLD" > "$SLC"
 t2=$(run 120 "$(rsj 38 "$RT" sessNew)" | nocol)
 case "$t2" in *" 62%"*) echo "  T2 newer session lowers (cap raised) → 62%, not stale 30% OK" ;; *" 30%"*) echo "  ★ FAIL T2 stuck on stale high 70 (showed 30%): [$t2]"; fail=1 ;; *) echo "  ★ FAIL T2 expected 62%: [$t2]"; fail=1 ;; esac
 # T3 older can't override + persistence: authority set by a RECENT session at 75; an OLD frozen-low session reports 40 → ignored → stays 25% (setter need not be rendering)
-printf 'S sessRecent %s\nS sessOldFrozen %s\nW5 %s 75 %s\n' "$RECENT" "$OLD" "$RT" "$RECENT" > "$SLC"
+printf 'S sessRecent %s %s 75 %s - - -\nS sessOldFrozen %s %s 40 %s - - -\nW5 %s 75 %s\n' "$RECENT" "$RT" "$RECENT" "$OLD" "$RT" "$OLD" "$RT" "$RECENT" > "$SLC"
 t3=$(run 120 "$(rsj 40 "$RT" sessOldFrozen)" | nocol)
 case "$t3" in *" 25%"*) echo "  T3 older session can't lower authority (no under-report) → 25% OK" ;; *" 60%"*) echo "  ★ FAIL T3 old frozen-low session overrode authority (showed 60%): [$t3]"; fail=1 ;; *) echo "  ★ FAIL T3 expected 25%: [$t3]"; fail=1 ;; esac
 # T4 anti-reversal: after a newer session lowers 70→38, the OLD frozen-HIGH session rendering again must NOT bounce it back to 30%
-printf 'S sessOld %s\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s %s 70 %s - - -\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" "$RT" "$OLD" > "$SLC"
 run 120 "$(rsj 38 "$RT" sessNew)" >/dev/null     # newer session lowers to 38 (becomes authority @ now)
 t4=$(run 120 "$(rsj 70 "$RT" sessOld)" | nocol)  # the old session reports its stale 70 again
 case "$t4" in *" 62%"*) echo "  T4 stale-high old session can't undo the cap-raise → still 62% OK" ;; *" 30%"*) echo "  ★ FAIL T4 reverted to stale 70 (showed 30%): [$t4]"; fail=1 ;; *) echo "  ★ FAIL T4 expected 62%: [$t4]"; fail=1 ;; esac
 # T5 keying: a session reporting a NEWER window re-keys the class to its own report — it must NOT inherit the old window's value
-printf 'S sessOld %s\nW5 %s 40 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s %s 40 %s - - -\nW5 %s 40 %s\n' "$OLD" "$RT" "$OLD" "$RT" "$OLD" > "$SLC"
 t5=$(run 120 "$(rsj 0 "$((NOW + 22000))" sessOther)" | nocol)
 case "$t5" in *" 100%"*) echo "  T5 separate window not polluted → 100% OK" ;; *) echo "  ★ FAIL T5 window polluted: [$t5]"; fail=1 ;; esac
 # T6 toggle: RL_SYNC=false must ignore the cache entirely → a frozen used=0 shows the raw 100% (cache still holds the RT authority)
-printf 'S sessOld %s\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" > "$SLC"
+printf 'S sessOld %s %s 70 %s - - -\nW5 %s 70 %s\n' "$OLD" "$RT" "$OLD" "$RT" "$OLD" > "$SLC"
 mkdir -p "$WORK/nosync/lib" && cp "$SL"/lib/*.sh "$WORK/nosync/lib/"
 sed 's/^RL_SYNC=true/RL_SYNC=false/' "$SL/statusline-command.sh" > "$WORK/nosync/statusline-command.sh"
 t6=$(printf '%s' "$(rsj 0 "$RT" sessOld)" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/nosync/statusline-command.sh" | nocol)
@@ -330,7 +331,7 @@ t9bad=0; OLDF=$((NOW-18000))   # first_seen 5h ago, still well within the 7d win
 for ttl in 3600 abc; do
   mkdir -p "$WORK/ttl$ttl/lib" && cp "$SL"/lib/*.sh "$WORK/ttl$ttl/lib/"
   sed "s/^RL_REG_TTL=604800/RL_REG_TTL=$ttl/" "$SL/statusline-command.sh" > "$WORK/ttl$ttl/statusline-command.sh"
-  printf 'S sOldLive %s\nW5 %s 70 %s\n' "$OLDF" "$RT" "$OLDF" > "$SLC"
+  printf 'S sOldLive %s %s 70 %s - - -\nW5 %s 70 %s\n' "$OLDF" "$RT" "$OLDF" "$RT" "$OLDF" > "$SLC"
   printf '%s' "$(rsj 70 "$RT" sOldLive)" | env COLUMNS=120 HOME="$FAKE_HOME" bash "$WORK/ttl$ttl/statusline-command.sh" >/dev/null 2>&1
   grep -q "^S sOldLive " "$SLC" 2>/dev/null || { echo "  ★ FAIL T9 RL_REG_TTL=$ttl pruned a live session's registry (clamp missing)"; t9bad=1; }
 done
@@ -344,7 +345,9 @@ rsj2() {  # $1=used5 $2=reset5 $3=used7 $4=reset7 $5=session_id → five_hour+se
     rate_limits:{five_hour:{used_percentage:$u5, resets_at:$r5}, seven_day:{used_percentage:$u7, resets_at:$r7}},
     session_id:$sid, transcript_path:$tp }'; }
 RT7=$((NOW + 300000))
-printf 'S sFrozen %s\nS sFresh %s\nW5 %s 3 %s\nW7 %s 24 %s\n' "$OLD" "$RECENT" "$RT" "$RECENT" "$RT7" "$RECENT" > "$SLC"
+printf 'S sFrozen %s %s 87 %s %s 79 %s\nS sFresh %s %s 3 %s %s 24 %s\nW5 %s 3 %s\nW7 %s 24 %s\n' \
+  "$OLD" "$((NOW-2000))" "$OLD" "$((NOW-1000))" "$OLD" \
+  "$RECENT" "$RT" "$RECENT" "$RT7" "$RECENT" "$RT" "$RECENT" "$RT7" "$RECENT" > "$SLC"
 t10=$(run 200 "$(rsj2 87 $((NOW-2000)) 79 $((NOW-1000)) sFrozen)" | nocol)
 t10bad=0
 case "$t10" in *"2H"*" 97%"*) ;; *) echo "  ★ FAIL T10 5h did not adopt live authority value+countdown: [$t10]"; t10bad=1 ;; esac
@@ -354,7 +357,8 @@ grep -q "^P $RT " "$SLC" 2>/dev/null || { echo "  ★ FAIL T10 frozen frame did 
 [ "$t10bad" -eq 0 ] && echo "  T10 post-roll frame adopts live W5+W7 authority (value + countdown + effective-key sample) OK" || fail=1
 # T11 class isolation: with only a live W7 authority, an expired 5h window must NOT cross-adopt it — the 5h segment keeps the
 # frozen fallback (own value + 0m countdown, the documented no-authority residual), while 7d adopts its own class authority.
-printf 'S sFrozen %s\nS sFresh %s\nW7 %s 24 %s\n' "$OLD" "$RECENT" "$RT7" "$RECENT" > "$SLC"
+printf 'S sFrozen %s %s 87 %s %s 79 %s\nS sFresh %s - - - %s 24 %s\nW7 %s 24 %s\n' \
+  "$OLD" "$((NOW-2000))" "$OLD" "$((NOW-1000))" "$OLD" "$RECENT" "$RT7" "$RECENT" "$RT7" "$RECENT" > "$SLC"
 t11=$(run 200 "$(rsj2 87 $((NOW-2000)) 79 $((NOW-1000)) sFrozen)" | nocol)
 t11bad=0
 case "$t11" in *"0m 13%"*) ;; *) echo "  ★ FAIL T11 expected frozen 5h fallback (0m 13%): [$t11]"; t11bad=1 ;; esac
@@ -363,42 +367,80 @@ if grep -q "^W5 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T11 an expired 5h re
 [ "$t11bad" -eq 0 ] && echo "  T11 class isolation: 5h keeps frozen fallback, 7d adopts W7 OK" || fail=1
 # T12 window-key sanity bound: an absurd far-future key (>= now+691200, 8d) must be refused on load AND on report — it can never
 # become an immortal authority (the real user cache carried a W 9999999999 line for over a month before this guard).
-printf 'S sFroz %s\nW5 9999999999 28 %s\n' "$OLD" "$RECENT" > "$SLC"
+printf 'S sFroz %s %s 10 %s - - -\nW5 9999999999 28 %s\n' "$OLD" "$RT" "$OLD" "$RECENT" > "$SLC"
 t12=$(run 200 "$(rsj 10 "$RT" sFroz)" | nocol)
 t12bad=0
 case "$t12" in *" 90%"*) ;; *) echo "  ★ FAIL T12 absurd stored key won authority (expected own 90%): [$t12]"; t12bad=1 ;; esac
-if grep -q " 9999999999 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T12 absurd key survived the rewrite"; t12bad=1; fi
+if grep -q "^W[57] 9999999999 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T12 absurd authority key survived the rewrite"; t12bad=1; fi
 run 200 "$(rsj 10 9999999999 sAbsRep)" >/dev/null
-if grep -q " 9999999999 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T12 absurd reported key was persisted"; t12bad=1; fi
+if grep -q "^W[57] 9999999999 " "$SLC" 2>/dev/null; then echo "  ★ FAIL T12 absurd reported key became authority"; t12bad=1; fi
 [ "$t12bad" -eq 0 ] && echo "  T12 far-future keys refused on load and report (no immortal authority) OK" || fail=1
-# T13 legacy migration: an untagged old-schema `W` line must be dropped, never adopted — an OLDER frame reporting its own value
-# seeds the class fresh instead of bowing to the legacy authority; the rewrite carries no legacy line forward.
-printf 'S sOld2 %s\nW %s 40 %s\n' "$OLD" "$RT" "$RECENT" > "$SLC"
+# T13 legacy/malformed migration: the one retained 3-field S fixture upgrades in place, valid 9-field S survives,
+# wrong-arity S and untagged W are dropped, and the legacy session seeds W5 because no valid authority exists.
+printf 'S sOld2 %s\nS sNine %s %s 20 %s - - -\nS sBroken %s %s 20\nW %s 40 %s\n' \
+  "$OLD" "$RECENT" "$RT" "$RECENT" "$OLD" "$RT" "$RT" "$RECENT" > "$SLC"
 t13=$(run 200 "$(rsj 75 "$RT" sOld2)" | nocol)
 t13bad=0
 case "$t13" in *" 25%"*) ;; *"60%"*) echo "  ★ FAIL T13 legacy W line adopted as authority (showed 60%): [$t13]"; t13bad=1 ;; *) echo "  ★ FAIL T13 expected 25%: [$t13]"; t13bad=1 ;; esac
 if grep -q "^W $RT " "$SLC" 2>/dev/null; then echo "  ★ FAIL T13 legacy W line carried forward"; t13bad=1; fi
 grep -q "^W5 $RT 75 " "$SLC" 2>/dev/null || { echo "  ★ FAIL T13 own report did not seed the class authority"; t13bad=1; }
-[ "$t13bad" -eq 0 ] && echo "  T13 legacy untagged W dropped on rewrite; frame's own report seeds W5 OK" || fail=1
+awk -v r="$RT" -v fs="$OLD" '$1=="S"&&NF==9&&$2=="sOld2"&&$3==fs&&$4==r&&$5==75&&$6==fs&&$7=="-"&&$8=="-"&&$9=="-"{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T13 legacy S row was not upgraded to 9 fields with first_seen observation"; t13bad=1; }
+grep -q "^S sNine $RECENT $RT 20 $RECENT - - -$" "$SLC" || { echo "  ★ FAIL T13 valid 9-field S row did not survive"; t13bad=1; }
+grep -q '^S sBroken ' "$SLC" && { echo "  ★ FAIL T13 wrong-arity S row survived"; t13bad=1; }
+[ "$t13bad" -eq 0 ] && echo "  T13 legacy S upgraded; valid 9-field S kept; malformed S and untagged W dropped OK" || fail=1
+
+# T14 older active session overrides an idle newer session when its reported pair changes.
+printf 'S sActive %s %s 40 %s %s 24 %s\nS sIdle %s %s 70 %s %s 24 %s\nW5 %s 70 %s\nW7 %s 24 %s\n' \
+  "$OLD" "$RT" "$OLD" "$RT7" "$OLD" "$RECENT" "$RT" "$RECENT" "$RT7" "$RECENT" "$RT" "$RECENT" "$RT7" "$RECENT" > "$SLC"
+t14=$(run 200 "$(rsj2 75 "$RT" 24 "$RT7" sActive)" | nocol); t14bad=0
+case "$t14" in *" 25%"*) ;; *) echo "  ★ FAIL T14 older active session did not replace idle authority: [$t14]"; t14bad=1 ;; esac
+if ! awk -v r="$RT" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==75&&$4>min{ok=1} END{exit !ok}' "$SLC"; then echo "  ★ FAIL T14 W5 did not persist the changed pair with fresh observed_at"; t14bad=1; fi
+if ! awk -v r="$RT" -v min="$RECENT" '$1=="S"&&NF==9&&$2=="sActive"&&$4==r&&$5==75&&$6>min{ok=1} END{exit !ok}' "$SLC"; then echo "  ★ FAIL T14 active S row did not record the changed pair"; t14bad=1; fi
+[ "$t14bad" -eq 0 ] && echo "  T14 older active session overrides idle newer session with freshest observation OK" || fail=1
+
+# T17 follows T14: the idle session reports its unchanged stale pair and must not take authority back.
+wbefore=$(grep "^W5 $RT " "$SLC")
+t17=$(run 200 "$(rsj2 70 "$RT" 24 "$RT7" sIdle)" | nocol); t17bad=0
+case "$t17" in *" 25%"*) ;; *) echo "  ★ FAIL T17 idle unchanged session re-took authority: [$t17]"; t17bad=1 ;; esac
+wafter=$(grep "^W5 $RT " "$SLC")
+[ "$wbefore" = "$wafter" ] || { echo "  ★ FAIL T17 W5 changed: before=[$wbefore] after=[$wafter]"; t17bad=1; }
+awk -v r="$RT" -v o="$RECENT" '$1=="S"&&NF==9&&$2=="sIdle"&&$4==r&&$5==70&&$6==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T17 idle S row refreshed its carried observation"; t17bad=1; }
+[ "$t17bad" -eq 0 ] && echo "  T17 idle unchanged session cannot re-take authority OK" || fail=1
+
+# T15 a cap increase can lower used%; the changed lower pair is still the freshest observation.
+printf 'S sActive %s %s 70 %s - - -\nS sIdle %s %s 70 %s - - -\nW5 %s 70 %s\n' \
+  "$OLD" "$RT" "$OLD" "$RECENT" "$RT" "$RECENT" "$RT" "$RECENT" > "$SLC"
+t15=$(run 200 "$(rsj 38 "$RT" sActive)" | nocol); t15bad=0
+case "$t15" in *" 62%"*) ;; *) echo "  ★ FAIL T15 cap-raise drop was not adopted: [$t15]"; t15bad=1 ;; esac
+awk -v r="$RT" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==38&&$4>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T15 lower W5 value/observation not persisted"; t15bad=1; }
+awk -v r="$RT" -v min="$RECENT" '$1=="S"&&NF==9&&$2=="sActive"&&$4==r&&$5==38&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T15 active S row did not record the lowered pair"; t15bad=1; }
+[ "$t15bad" -eq 0 ] && echo "  T15 cap-raise drop adopted by freshest observation OK" || fail=1
+
+# T16 a changed reset key is a fresh observation and re-keys the whole class without retaining the old W5.
+RTOLD=$((NOW+120)); RTNEW=$((NOW+9000))
+printf 'S sActive %s %s 87 %s - - -\nS sIdle %s %s 87 %s - - -\nW5 %s 87 %s\n' \
+  "$OLD" "$RTOLD" "$OLD" "$RECENT" "$RTOLD" "$RECENT" "$RTOLD" "$RECENT" > "$SLC"
+t16=$(run 200 "$(rsj 3 "$RTNEW" sActive)" | nocol); t16bad=0
+case "$t16" in *" 97%"*) ;; *) echo "  ★ FAIL T16 rolled window was not adopted: [$t16]"; t16bad=1 ;; esac
+awk -v r="$RTNEW" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==3&&$4>min{n++} END{exit !(n==1)}' "$SLC" || { echo "  ★ FAIL T16 new W5 key/value/observation not persisted exactly once"; t16bad=1; }
+awk -v r="$RTNEW" -v min="$RECENT" '$1=="S"&&NF==9&&$2=="sActive"&&$4==r&&$5==3&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T16 active S row did not record the rolled pair"; t16bad=1; }
+grep -q "^W5 $RTOLD " "$SLC" && { echo "  ★ FAIL T16 old W5 key survived window re-key"; t16bad=1; }
+[ "$t16bad" -eq 0 ] && echo "  T16 window roll adopts new key and drops old class record OK" || fail=1
 rm -f "$SLC"
 
 echo "── T2. RATE-SYNC CONCURRENCY: mkdir-lock serialises read+awk+mv (no lost-update), lock-contention safe-skip, empty-sid read-only, torn-cache survives"
 LOCK="$SLC.lock"
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-# T2.0 spec Example (5.1): now≈now, window unexpired, OLD first_seen far back reports frozen-low 12, NEW first_seen recent reports 47 →
-# the persisted W must be NEW's (47, NEW first_seen); the OLD frame must DISPLAY 47 (adopt), never its own 12. (relative first_seen mirrors the now=1000 example)
+# T2.0 stale carried observation loses to a fresher authority for the same live window.
 RTc=$((NOW + 9000)); OLDc=$((NOW - 5000)); NEWc=$((NOW - 100))
-printf 'S sNew %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"    # NEW already wrote authority 47
-t20=$(run 120 "$(rsj 12 "$RTc" sOldLow)" | nocol)                    # OLD frozen-low (first render → first_seen=now>OLDc? no: not seeded, defaults to now) reports 12
-# sOldLow has no S line → its first_seen defaults to `now` (this render), which is NEWER than NEW's NEWc → by the rule it WOULD become authority.
-# To honour the spec example (OLD must be the older one), pre-seed sOldLow as the genuinely-older session:
-printf 'S sNew %s\nS sOldLow %s\nW5 %s 47 %s\n' "$NEWc" "$OLDc" "$RTc" "$NEWc" > "$SLC"
+printf 'S sNew %s %s 47 %s - - -\nS sOldLow %s %s 12 %s - - -\nW5 %s 47 %s\n' \
+  "$NEWc" "$RTc" "$NEWc" "$OLDc" "$RTc" "$OLDc" "$RTc" "$NEWc" > "$SLC"
 t20=$(run 120 "$(rsj 12 "$RTc" sOldLow)" | nocol)
 case "$t20" in *" 53%"*) echo "  T2.0 old frozen-low adopts newer authority 47 → remaining 53% OK" ;;
   *" 88%"*) echo "  ★ FAIL T2.0 old session used its own frozen 12 (showed 88%): [$t20]"; fail=1 ;;
   *) echo "  ★ FAIL T2.0 expected 53% remaining: [$t20]"; fail=1 ;; esac
 wline=$(grep "^W5 $RTc " "$SLC")
-case "$wline" in "W5 $RTc 47 $NEWc") echo "  T2.0 persisted W5 = newer session's value+first_seen (47 $NEWc), old frame didn't clobber OK" ;;
+case "$wline" in "W5 $RTc 47 $NEWc") echo "  T2.0 persisted W5 = freshest value+auth_observed_at (47 $NEWc), stale frame didn't clobber OK" ;;
   *) echo "  ★ FAIL T2.0 W line clobbered by older session: [$wline]"; fail=1 ;; esac
 
 # T2.1 (5.1) Two sessions render CONCURRENTLY on DIFFERENT classes (one 5h, one 7d) → both class authority lines survive
@@ -423,7 +465,7 @@ rm -rf "$LOCK" 2>/dev/null
 
 # T2.2 (5.1) Lock CONTENTION: a held (fresh) lock makes the frame SKIP the write, but it STILL displays the adopted authority value.
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-printf 'S sNew %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"    # cache holds authority 47
+printf 'S sNew %s %s 47 %s - - -\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" "$RTc" "$NEWc" > "$SLC"    # cache holds authority 47
 mkdir "$LOCK" 2>/dev/null                                           # another writer "holds" the lock (fresh mtime → not stealable)
 szbefore=$(wc -c < "$SLC"); szbefore=${szbefore// /}; mtbefore=$(stat -f '%m' "$SLC")
 t22=$(run 120 "$(rsj 12 "$RTc" sContend)" | nocol)                  # this frame can't get the lock → must read-only adopt 47
@@ -437,7 +479,7 @@ rm -rf "$LOCK" 2>/dev/null
 
 # T2.3 (5.1) STALE lock (older than the steal horizon) is stolen → the frame proceeds with its write
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-printf 'S sNew %s\nW5 %s 47 %s\n' "$OLDc" "$RTc" "$OLDc" > "$SLC"   # authority owned by an OLD session
+printf 'S sNew %s %s 47 %s - - -\nW5 %s 47 %s\n' "$OLDc" "$RTc" "$OLDc" "$RTc" "$OLDc" > "$SLC"   # authority carries an old observation
 mkdir "$LOCK" 2>/dev/null
 touch -t 200001010000 "$LOCK" 2>/dev/null                          # make the lock ancient → stealable
 t23=$(run 120 "$(rsj 60 "$RTc" sFresh)" | nocol)                   # a fresh session reports 60 → after stealing the lock it becomes authority
@@ -452,7 +494,7 @@ rsjempty() {  # $1=used% $2=resets_at → five_hour-only json with an EMPTY sess
   { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
     rate_limits:{five_hour:{used_percentage:$u, resets_at:$r}}, session_id:"", transcript_path:$tp }'; }
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-printf 'S sessA %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" > "$SLC"
+printf 'S sessA %s %s 47 %s - - -\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" "$RTc" "$NEWc" > "$SLC"
 inob=$(stat -f '%i' "$SLC"); szb=$(wc -c < "$SLC"); szb=${szb// /}; mtb=$(stat -f '%m' "$SLC")
 t24=$(run 120 "$(rsjempty 80 "$RTc")" | nocol)                     # empty sid reporting a HIGHER 80 — must be ignored, 47 adopted
 case "$t24" in *" 53%"*) echo "  T2.4 empty-sid frame adopts authority 47 (ignores its own 80) -> 53% OK" ;;
@@ -462,12 +504,12 @@ inoa=$(stat -f '%i' "$SLC"); sza=$(wc -c < "$SLC"); sza=${sza// /}; mta=$(stat -
 cafter=$(cat "$SLC")
 if [ "$inob" = "$inoa" ] && [ "$szb" = "$sza" ] && [ "$mtb" = "$mta" ]; then echo "  T2.4 empty-sid did NOT rewrite the cache (inode/size/mtime unchanged) OK"
 else echo "  ★ FAIL T2.4 empty-sid rewrote the cache (inode $inob-$inoa size $szb-$sza mtime $mtb-$mta)"; fail=1; fi
-case "$cafter" in "S sessA $NEWc"*"W5 $RTc 47 $NEWc"*) echo "  T2.4 empty-sid left S and W lines intact OK" ;;
+case "$cafter" in "S sessA $NEWc $RTc 47 $NEWc - - -"*"W5 $RTc 47 $NEWc"*) echo "  T2.4 empty-sid left S and W lines intact OK" ;;
   *) echo "  ★ FAIL T2.4 empty-sid mutated cache contents: [$cafter]"; fail=1 ;; esac
 
 # T2.5 (5.3) TORN / BINARY cache fixture: reconcile must not crash, frame stays single-line with a valid %, stderr clean
 rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
-{ printf 'S sNew %s\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc"; printf 'W5 garbage notnum xx\nW garbage notnum xx\n'; head -c 64 /dev/urandom; printf '\nP %s notime nope\n' "$RTc"; } > "$SLC"
+{ printf 'S sNew %s %s 47 %s - - -\nW5 %s 47 %s\n' "$NEWc" "$RTc" "$NEWc" "$RTc" "$NEWc"; printf 'W5 garbage notnum xx\nW garbage notnum xx\n'; head -c 64 /dev/urandom; printf '\nP %s notime nope\n' "$RTc"; } > "$SLC"
 t25o=$(run 120 "$(rsj 33 "$RTc" sTorn)" 2>/dev/null)
 t25e=$(run 120 "$(rsj 33 "$RTc" sTorn)" 2>&1 >/dev/null)
 t25nl=$(printf '%s' "$t25o" | grep -c ''); t25p=$(printf '%s' "$t25o" | nocol)
@@ -486,7 +528,7 @@ grep -q 'exec [0-9]*< <(_reconcile.*</dev/null)' "$SL/lib/collect.sh" && echo " 
 # T2.7 (1.1) mv guard: an awk-FAILURE frame (empty tmpfile) must NOT clobber the shared authority cache — a failing awk (here a PATH-shim
 # awk that exits 0 producing nothing) leaves an empty per-pid temp; the unconditional mv would wipe what prior sessions persisted.
 mkdir -p "$WORK/awkfail"; printf '#!/bin/sh\nexit 0\n' > "$WORK/awkfail/awk"; chmod +x "$WORK/awkfail/awk"
-printf 'S sKeep %s\nW5 %s 47 %s\n' "$RECENT" "$RT" "$RECENT" > "$SLC"; t27seed=$(cat "$SLC")
+printf 'S sKeep %s %s 47 %s - - -\nW5 %s 47 %s\n' "$RECENT" "$RT" "$RECENT" "$RT" "$RECENT" > "$SLC"; t27seed=$(cat "$SLC")
 printf '%s' "$(rsj 80 "$RT" sKeep)" | env PATH="$WORK/awkfail:$PATH" COLUMNS=120 HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >/dev/null 2>&1
 t27after=$(cat "$SLC" 2>/dev/null)
 [ "$t27seed" = "$t27after" ] && echo "  T2.7 awk-failure frame preserved the authority cache (mv guarded on empty tmpfile) OK" || { echo "  ★ FAIL T2.7 empty tmpfile clobbered the cache: before=[$t27seed] after=[$t27after]"; fail=1; }
@@ -1041,13 +1083,13 @@ case "$c9" in *"P $PASTR "*) echo "  ★ FAIL Y9 expired-window sample not prune
 case "$c9" in *"P $RL "*) ;; *) echo "  ★ FAIL Y9 live-window sample wrongly dropped: [$c9]"; y9bad=1 ;; esac
 [ "$y9bad" -eq 0 ] && echo "  Y9 expired-window samples pruned, live kept OK" || fail=1
 
-# Y10 sampled quantity is the reconciled authority, not the frozen report (task 3.1)
+# Y10 sampled quantity is the freshest-observation authority, not the stale session report (task 3.1)
 RA=$((NOWB+9000)); OLDA=$((NOWB-5000)); RECA=$((NOWB-100))
-printf 'S sRec %s\nS sOldF %s\nW5 %s 75 %s\n' "$RECA" "$OLDA" "$RA" "$RECA" > "$SLC"  # authority 75 set by a RECENT session
-run 200 "$(rsj 40 "$RA" sOldF)" >/dev/null   # an OLDER frozen session reports 40 but must adopt 75 → the sample records 75
+printf 'S sRec %s %s 75 %s - - -\nS sOldF %s %s 40 %s - - -\nW5 %s 75 %s\n' "$RECA" "$RA" "$RECA" "$OLDA" "$RA" "$OLDA" "$RA" "$RECA" > "$SLC"
+run 200 "$(rsj 40 "$RA" sOldF)" >/dev/null   # a stale carried observation reports 40 but adopts 75, so the sample records 75
 case "$(grep "^P $RA " "$SLC")" in
   *" 75") echo "  Y10 sample records reconciled authority (75), not frozen report (40) OK" ;;
-  *" 40") echo "  ★ FAIL Y10 sample recorded the frozen 40"; fail=1 ;;
+  *" 40") echo "  ★ FAIL Y10 sample recorded the stale report 40"; fail=1 ;;
   *) echo "  ★ FAIL Y10 no/odd P sample: [$(grep "^P $RA " "$SLC")]"; fail=1 ;; esac
 
 # Y11 the alarm is width-bounded like every other left segment — burn-active frame stays single-line, never overflows (task 3.3)

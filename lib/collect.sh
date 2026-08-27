@@ -229,32 +229,22 @@ collect_status() {
 }
 
 
-# Cross-session rate-limit sync. Claude Code freezes rate_limits at a session's START snapshot (upstream limitation): a long-lived
-# session keeps reporting its stale used% while only the countdown moves; a freshly-started session reports the true current value.
-# This shares the truest value across sessions through a tiny cache so a frozen session adopts it.
+# Cross-session rate-limit sync. Claude Code refreshes a session's rate_limits after each API round trip, but an idle session keeps
+# reporting the last value it received. This shares the freshest observation across sessions so an idle frame adopts current usage.
 #
-# Rule — "the newest session is the authority", per window CLASS: the cache persists ONE record per class (W5 = five-hour,
-# W7 = seven-day), each carrying (resets_at, used%, authority_first_seen) = the report of the session with the LATEST first-seen
-# time. A report overrides the stored class record — key, value and first_seen together — only if its session is newer-or-equal
-# (first_seen >= the authority's) AND its own window key is live; an OLDER session can never overwrite it. Because the record
-# keeps its own resets_at, a session whose OWN snapshot window has ROLLED (frozen resets_at <= now — the roll-staleness bug:
-# key-exact lookup left such sessions permanently stale on their pre-roll used% with a 0m countdown) adopts the live class
-# authority WHOLE: used% for the remaining%, resets_at for the countdown. Class-isolated: 5h never adopts a W7 record and vice
-# versa; with no live class authority the frame keeps its own frozen values (upstream has nothing truer). Correct in BOTH
-# directions, unlike a plain max:
-#   • used% climbs (normal): a newer session reports higher → adopt it; a stale older session reporting lower is ignored.
-#   • used% drops (Anthropic raised the cap → % recomputed down): a newer session reports lower → adopt it; the obsolete high is dropped.
-# The authority is PERSISTED — not pruned when a session ends. used% is cumulative, so a past high is still real until the window rolls;
-# only a *newer* session may lower it. That is exactly why freshness is keyed on session AGE, not on "is the session still alive": TTL-
-# pruning the authority would let an old frozen-LOW session re-take over and UNDER-report usage (you'd think you have budget and hit the
-# wall — the one direction this display must never get wrong). first_seen is the first render time we saw a session_id (a seconds-grained
-# proxy for session start; the error is sub-second-of-usage, negligible).
+# Rule — "the freshest observation is the authority", per window CLASS: the cache persists ONE record per class (W5 = five-hour,
+# W7 = seven-day), each carrying (resets_at, used%, auth_observed_at). Every session also remembers its last reported pair per class:
+# when that pair changes, observed_at becomes now; when it is unchanged, observed_at is carried over. A report replaces the stored
+# class record — key, value and observation time together — only when observed_at >= auth_observed_at and its window key is live.
+# This works in both directions: normal usage climbs and cap-raise drops are adopted alike. A changed resets_at re-keys the whole class
+# after a window roll. Class-isolated: 5h never adopts a W7 record and vice versa; with no live class authority the frame keeps its own
+# reported values. The authority is persisted and is not pruned when a session ends; only its live/sane window bounds its lifetime.
 #
 # Cache lines, four kinds (malformed / old-format lines — including the legacy untagged `W` schema — are simply not carried forward):
-#   S  <session_id> <first_seen>             registry of each session's first-seen epoch (used to rank freshness)
-#   W5 <resets_at>  <used> <auth_first_seen> five-hour class authority (single record; key+value+fs replaced together)
-#   W7 <resets_at>  <used> <auth_first_seen> seven-day class authority (same shape)
-#   P  <resets_at>  <timestamp> <used>       burn-projection sample: (when, adopted used%) for a window, bounded series
+#   S  <session_id> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7>  per-session last pair + observation time (`- - -` if absent)
+#   W5 <resets_at>  <used> <auth_observed_at> five-hour class authority (single record; key+value+time replaced together)
+#   W7 <resets_at>  <used> <auth_observed_at> seven-day class authority (same shape)
+#   P  <resets_at>  <timestamp> <used>        burn-projection sample: (when, adopted used%) for a window, bounded series
 # Pruning on rewrite: W5/W7/P lines with resets_at <= now (window rolled) OR resets_at >= now+691200 (8d sanity bound = the longest
 # 7d window + 1d skew margin; an absurd far-future key — the real cache once carried W 9999999999 — must never become immortal),
 # and S lines older than RL_REG_TTL (past the longest window), are dropped; P samples older than the sampling horizon, or beyond
@@ -263,14 +253,14 @@ collect_status() {
 # concurrent sessions), and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>" (adopted value + adopted effective window key per class).
 # Mutates five_h / seven_d / five_reset / seven_reset in place; build_rate renders them unchanged.
 # Degrades safely: any awk/mv failure (e.g. read-only HOME) leaves out empty → the guards below keep this frame's own values and no alarm.
-# An empty session_id contributes nothing (cannot be ranked) but still adopts an existing authority.
+# An empty session_id contributes no observation state but still adopts an existing authority.
 #
-# Burn projection (5h window only): each frame appends a P sample (now, the ADOPTED used% of the 5h class — never the frozen report)
+# Burn projection (5h window only): each frame appends a P sample (now, the ADOPTED used% of the 5h class — never a stale report)
 # under the EFFECTIVE 5h key (the adopted authority's resets_at, = this frame's r5 whenever its snapshot window is live), keeps a
 # bounded recent series, and computes a two-point slope (oldest→newest in-horizon sample) against that same key. When the
 # slope is positive AND extrapolating it would hit 100% used strictly before resets_at, it emits burn_tte = seconds-to-exhaust (= remaining
 # × Δt / Δused). Both gates are mandatory and live here (they need now/resets_at); the sensitivity ceiling + colour live in render's
-# build_burn. <2 in-horizon samples → no slope → empty. Sampling the reconciled authority (not the frozen snapshot) is what makes the
+# build_burn. <2 in-horizon samples → no slope → empty. Sampling the reconciled authority (not a stale session value) is what makes the
 # slope reflect the true cross-session climb instead of a stuck value.
 #
 # Concurrency / serialization (the read-modify-write must NOT lose updates): the whole read+awk+mv is guarded by an mkdir spin-lock at
@@ -278,7 +268,7 @@ collect_status() {
 # staleness steal (a lock dir older than RL_LOCK_STALE means a holder died mid-frame). Two safe-degradation rules, both per the spec:
 #   • lock NOT acquired (another writer holds it within our bounded attempt) → SKIP the mv (leave the on-disk cache untouched by this
 #     frame) but STILL run the awk read-only so this frame DISPLAYS the correct adopted authority it read — never a stale/empty number.
-#   • empty session_id (cannot be ranked for freshness → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line
+#   • empty session_id (cannot record an observation → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line
 #     left intact) but STILL adopt the existing authority read-only. No lock is taken on this path (we never write).
 # The awk ALWAYS writes survivors to a per-pid temp and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>"; only the mv is conditional. So the emitted
 # (adopted) values are computed identically on every path; whether we persist them is the only difference. reconcile_start launches this
@@ -346,8 +336,8 @@ _reconcile_core() {
     # writer's awk read NOTHING and its mv clobber the peer's authority (the exact lost-update the lock exists to prevent).
     src="$cache"; [ -f "$src" ] || src=/dev/null   # first run / read-only: no cache yet → read nothing, just seed/adopt from this frame
     : > "$tmpfile" 2>/dev/null || { [ "$have_lock" = 1 ] && rmdir "$lock" 2>/dev/null; printf '%s|%s|%s|%s|%s\n' '' '' '' '' ''; return 0; }
-    # writable = this frame will persist (lock held AND a rankable non-empty sid). A read-only frame (lock-contention or empty-sid) must
-    # adopt the EXISTING authority it read and NOT fold in its own (possibly frozen) report — the spec is explicit that a contention frame
+    # writable = this frame will persist (lock held AND a non-empty sid). A read-only frame (lock-contention or empty-sid) must
+    # adopt the EXISTING authority it read and NOT fold in its own (possibly stale) report — the spec is explicit that a contention frame
     # displays the value it READ (e.g. 47), never its own (e.g. 12). So `writable` gates whether the awk applies this frame's report.
     local writable=0; [ "$have_lock" = 1 ] && [ -n "$session_id" ] && writable=1
     local out
@@ -357,19 +347,43 @@ _reconcile_core() {
         # sane live window key: strictly in the future AND below the 8d bound (longest 7d window 604800 + 1d skew margin) —
         # an absurd far-future key (the real cache once carried W 9999999999) would otherwise survive pruning forever
         function sane(k){ return (isnum(k) && k+0 > now+0 && k+0 < now+0 + MAXWIN) }
-        # apply this frame report to class c (window key r, used u): newest-or-equal session wins the WHOLE record (key+value+fs)
-        # — a fresher session re-keys the class to its own window after a roll; expired/insane/non-numeric reports are ignored
-        function applycls(c, r, u) {
-            if (!sane(r) || !isnum(u)) return
-            if (!(c in Rv) || myfs+0 >= Rf[c]+0) { Rk[c]=r; Rv[c]=u+0; Rf[c]=myfs }
+        function tripleok(r, u, o) {
+            return ((r=="-" && u=="-" && o=="-") || (isnum(r) && isnum(u) && isnum(o)))
+        }
+        # Apply this frame report to class c: the freshest observation wins the WHOLE record (key+value+time).
+        # A changed reset key re-keys the class after a roll; expired/insane/non-numeric reports are ignored.
+        function applycls(c, r, u, o) {
+            if (!sane(r) || !isnum(u) || !isnum(o)) return
+            if (!(c in Rv) || o+0 >= Rf[c]+0) { Rk[c]=r; Rv[c]=u+0; Rf[c]=o }
+        }
+        # Record the latest pair for this session. First reports inherit first_seen; only a changed pair is observed now.
+        function observe(c, r, u, o) {
+            if (!isnum(r) || !isnum(u)) return
+            if (!(c in Mr) || Mr[c]=="-") o=myfs
+            else if (Mr[c]""==r"" && Mu[c]+0==u+0) o=Mo[c]
+            else o=now
+            Mr[c]=r; Mu[c]=u+0; Mo[c]=o
+            applycls(c, r, u, o)
         }
         BEGIN { MAXSAMP=5; HORIZON=10800; MAXWIN=691200 }              # ≤5 samples/window over ~3h; window keys sane below now+8d
-        $1=="S" && NF==3 {                                              # session registry line
-            if ($2==sid) myfs=$3                                        #   my own first_seen — preserved across renders
-            else if (isnum($3) && $3+0 > now+0 - regttl) Sf[$2]=$3      #   keep other not-too-old sessions
+        $1=="S" && NF==9 && isnum($3) && tripleok($4,$5,$6) && tripleok($7,$8,$9) {
+            if ($2==sid || $3+0 > now+0-regttl) {
+                Sf[$2]=$3; S5r[$2]=$4; S5u[$2]=$5; S5o[$2]=$6; S7r[$2]=$7; S7u[$2]=$8; S7o[$2]=$9
+                if ($2==sid) {
+                    myfs=$3
+                    Mr[5]=$4; Mu[5]=$5; Mo[5]=$6; Mr[7]=$7; Mu[7]=$8; Mo[7]=$9
+                }
+            }
             next
         }
-        # per-class authority (W5=five-hour, W7=seven-day): keep the newest-fs record per class. Keys stay STRINGS end-to-end
+        $1=="S" && NF==3 && isnum($3) {                                 # legacy registry row: no previous pair for either class
+            if ($2==sid || $3+0 > now+0-regttl) {
+                Sf[$2]=$3; S5r[$2]="-"; S5u[$2]="-"; S5o[$2]="-"; S7r[$2]="-"; S7u[$2]="-"; S7o[$2]="-"
+                if ($2==sid) { myfs=$3; Mr[5]="-"; Mr[7]="-" }
+            }
+            next
+        }
+        # Per-class authority (W5=five-hour, W7=seven-day): keep the freshest observation per class. Keys stay STRINGS end-to-end
         # (a numeric round-trip would CONVFMT-mangle a non-integral epoch); legacy untagged W lines fall through and are dropped
         ($1=="W5" || $1=="W7") && NF==4 && isnum($3) && isnum($4) && sane($2) {
             c = ($1=="W5") ? 5 : 7
@@ -384,17 +398,22 @@ _reconcile_core() {
         END{
             # Only a WRITABLE frame (lock held + rankable non-empty sid) folds its own report into the authority and registers itself.
             # A read-only frame (lock-contention or empty-sid) leaves the class records exactly as read from cache, so it adopts/displays
-            # the value it READ (never its own possibly-frozen report) and contributes no S/W mutation — matching the spec safe-degradation rules.
+            # the value it READ (never its own possibly-stale report) and contributes no S/W mutation — matching the spec safe-degradation rules.
             if (writable+0 == 1 && sid != "") {
                 if (myfs=="" || !isnum(myfs)) myfs=now                  # new session → first seen is now
                 Sf[sid]=myfs
-                applycls(5, r5, u5); applycls(7, r7, u7)
+                if (!(5 in Mr)) Mr[5]="-"
+                if (!(7 in Mr)) Mr[7]="-"
+                observe(5, r5, u5); observe(7, r7, u7)
+                S5r[sid]=Mr[5]; S5u[sid]=((5 in Mu) ? Mu[5] : "-"); S5o[sid]=((5 in Mo) ? Mo[5] : "-")
+                S7r[sid]=Mr[7]; S7u[sid]=((7 in Mu) ? Mu[7] : "-"); S7o[sid]=((7 in Mo) ? Mo[7] : "-")
             }
             # append this frame’s sample (now, adopted used%) under the EFFECTIVE 5h key — the adopted authority’s resets_at, which
             # equals r5 whenever this frame’s snapshot window is live. 7d is never sampled (nothing downstream reads such a series).
             # The isnum(r5) gate keeps a frame that reports no 5h data at all from sampling another session’s quota.
             if (isnum(r5) && (5 in Rv)) { np++; Pk[np]=Rk[5]; Pt[np]=now+0; Pu[np]=Rv[5] }
-            for (s in Sf) if (isnum(Sf[s]) && Sf[s]+0 > now+0 - regttl) printf "S %s %s\n", s, Sf[s] >> tmp
+            for (s in Sf) if (isnum(Sf[s]) && Sf[s]+0 > now+0-regttl)
+                printf "S %s %s %s %s %s %s %s %s\n", s, Sf[s], S5r[s], S5u[s], S5o[s], S7r[s], S7u[s], S7o[s] >> tmp
             if (5 in Rv) printf "W5 %s %s %s\n", Rk[5], Rv[5], Rf[5] >> tmp
             if (7 in Rv) printf "W7 %s %s %s\n", Rk[7], Rv[7], Rf[7] >> tmp
             # rewrite samples bounded to the newest MAXSAMP per window (chronological); track 5h oldest/newest for the slope

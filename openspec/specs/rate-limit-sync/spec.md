@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The rate-limit-sync capability defines how the true rate-limit usage percentage is shared across concurrent sessions through a lock-serialized cache, correcting Claude Code's frozen per-session start snapshot. It owns the "newest session is the authority" rule, the mkdir spin-lock with stale-steal, the empty-session-id read-only path, and the registry-retention TTL floor that keeps a still-alive session from being re-ranked as new.
+The rate-limit-sync capability defines how the true rate-limit usage percentage is shared across concurrent sessions through a lock-serialized cache, correcting the outdated last value that an idle Claude Code session continues to report between API round trips. It owns the "freshest observation is the authority" rule, the mkdir spin-lock with stale-steal, the empty-session-id read-only path, and the registry-retention TTL floor that preserves a still-alive session's observation history.
 
 ## Requirements
 

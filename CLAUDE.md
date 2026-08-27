@@ -145,25 +145,24 @@ shrink-before-drop, and core survival at pathological widths.
 
 ### Cross-session rate-limit sync (`reconcile_start` / `reconcile_read` / `_reconcile_core`)
 
-CC freezes `rate_limits` at each session's **start snapshot** (upstream limitation): an old
-session keeps showing a stale used%, only the countdown moves. Reconcile (in `lib/collect.sh`,
-gated by `RL_SYNC`) fixes this via a shared cache at `~/.claude/sl-ratelimit-cache` — an `awk`
-pass over four line types: `S <session_id> <first_seen>` (a registry of each session's first
-render time), `W5 <resets_at> <used> <auth_first_seen>` / `W7 …` (ONE authority record per
-window class — five-hour / seven-day), and `P <resets_at> <timestamp> <used>` (bounded
-burn-projection sample series; see below).
-**Rule: the newest session is the authority, per class** — a class's record (key, used% and
-first_seen replaced together) is overwritten only by a report whose session's `first_seen` is
-newer-or-equal, so a frozen old session can't override a fresher one in either direction (adopt
-a climb, honour a genuine cap-raise drop). Because the record carries its own `resets_at`, a
-session whose snapshot window has ROLLED adopts the live class authority whole — used% AND
+CC refreshes a session's `rate_limits` after each API round trip; an idle session keeps its
+last received value. Reconcile (in `lib/collect.sh`, gated by `RL_SYNC`) shares the freshest
+observation through `~/.claude/sl-ratelimit-cache` using one `awk` pass over four line types:
+`S <session_id> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7>` (per-session last pairs and
+observation times), `W5 <resets_at> <used> <auth_observed_at>` / `W7 …` (ONE authority record
+per window class), and `P <resets_at> <timestamp> <used>` (bounded burn-projection samples).
+**Rule: the freshest observation is the authority, per class** — a changed pair gets
+`observed_at = now`, an unchanged pair carries its previous time, and a class record is replaced
+whole only when `observed_at >= auth_observed_at`. Climbs, cap-raise drops, and changed reset
+keys therefore follow the same rule. Because the record carries its own `resets_at`, a session
+whose reported window has ROLLED adopts the live class authority whole — used% AND
 countdown (`reconcile_read` overwrites `five_reset`/`seven_reset` with the adopted effective
 key) — instead of staying stale on its pre-roll % with a permanent `0m` (the roll-staleness
 bug). Window keys are sane only below `now+691200` (8d = the longest 7d window + 1d skew
 margin), so an absurd far-future key can never become an immortal cache line; legacy untagged
-`W` lines are dropped on rewrite. `RL_REG_TTL`
-prunes registry records older than the longest reset window. Test section `T` covers the full
-rule matrix.
+`W` lines and malformed S rows are dropped on rewrite. `RL_REG_TTL` prunes registry records
+older than the longest reset window while preserving each live session's pair history, so an
+unchanged value is not mistaken for a first observation. Test section `T` covers the full matrix.
 
 **Backgrounded + serialized.** `reconcile_start` launches `_reconcile_core` as a background FD
 job (`exec 9< <(… </dev/null)`) overlapping the git stage; `reconcile_read` reaps the FD and
@@ -171,15 +170,15 @@ applies numeric adoption guards. The whole read+awk+mv is serialized by an **`mk
 (`<cache>.lock` — stock macOS has no `flock`; `mkdir` is the POSIX-atomic primitive) with
 bounded retry + stale-steal (`RL_LOCK_TRIES`/`RL_LOCK_WAIT`/`RL_LOCK_STALE`, defined in
 collect.sh), so concurrent renders don't lose updates. Two safe-degradation paths, both still
-**adopting the value they READ** (never their own frozen report): lock not acquired → skip the
+**adopting the value they READ** (never their own stale report): lock not acquired → skip the
 `mv`, run awk read-only; **empty `session_id`** → skip the lock and `mv` entirely (an anonymous
-frame can't be ranked, so it never does a destructive rewrite). Any awk/mv/lock failure leaves
+frame cannot record an observation, so it never does a destructive rewrite). Any awk/mv/lock failure leaves
 the emitted fields empty → `reconcile_read`'s guards keep this frame's own parse_input values
 (never `set -e`). Section `T2` covers the concurrency, lock-contention safe-skip, and empty-sid path.
 
 ### Rate-limit burn-projection alarm (`_reconcile_core` awk → `build_burn`)
 
-The 5h window samples its **adopted** used% (the reconciled authority, not the frozen
+The 5h window samples its **adopted** used% (the reconciled authority, not a stale
 snapshot) into the `P` series each frame, keeping ≤5 samples over a ~3h horizon. The awk
 computes a **two-point slope** (oldest→newest in-horizon sample) and emits `burn_tte` =
 seconds-to-exhaust only when **both mandatory gates** pass: the slope is positive (used% is

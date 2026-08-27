@@ -1,7 +1,7 @@
 <h1 align="center">claude-statusline</h1>
 
-<p align="center"><b>Claude Code freezes your quota&nbsp;% at session start. This line doesn't —
-and it warns <code>↘21m</code> before you run dry.</b></p>
+<p align="center"><b>Idle Claude Code sessions keep their last quota&nbsp;%. This line shares the freshest —
+and warns <code>↘21m</code> before you run dry.</b></p>
 
 <p align="center">One colored line for <a href="https://claude.ai/code">Claude Code</a> ·
 macOS · stock bash 3.2 · <code>jq</code> is the only dependency · ~26&nbsp;ms a frame</p>
@@ -119,8 +119,8 @@ to the `Context low` warning, which is the auto-compact-off basis.
 
 - **Burn alarm `↘23m`** — extrapolates how fast your 5h quota is burning; fires *only* when
   you're on track to run dry before the reset. Flat or falling usage shows nothing.
-- **No stale quota lies** — Claude Code freezes each session's rate-limit % at startup, so
-  older terminals show wrong numbers; this syncs the true % across all your open sessions.
+- **No stale quota lies** — Claude Code refreshes rate limits after API round trips, while
+  idle terminals retain their last value; this syncs the freshest observation across sessions.
 - **Cache-freshness delta `(3m)`** — time since your last prompt, colored by Anthropic's two
   real prompt-cache TTLs: dim = warm, yellow past ~5 min, red past ~1 h (next prompt pays a
   full cache re-write).
@@ -154,7 +154,7 @@ Five themes, picked with `STYLE` at the top of `statusline-command.sh`:
 | `NORM_THINKING` | `true` | Thinking is the norm — warn (red `no-think`) only when it's off |
 | `PATH_CLICK` | `true` | Publish this pane's directory so cmd+click on the path can open it (see below); `false` publishes nothing |
 | `RIGHT_ALIGN` | `true` | Pin the git/session half to the terminal's right edge |
-| `RL_SYNC` | `true` | Cross-session rate-limit sync; off = each session keeps its frozen startup snapshot |
+| `RL_SYNC` | `true` | Cross-session rate-limit sync; off = each session keeps its own last reported observation |
 | `BURN_SENS` | `balanced` | Burn-alarm eagerness: `conservative` / `balanced` / `sensitive` |
 | `LASTMSG_WARN` / `LASTMSG_STALE` | `300` / `3600` | Idle seconds before the `(Δ)` turns yellow / red — matched to the 5-min / 1-h cache TTLs |
 
