@@ -10,7 +10,7 @@ The rate-burn-projection capability defines the depletion alarm on the five-hour
 
 The statusline SHALL estimate the rate of change of a reset window's used-percentage by computing a smoothed positive slope (used% per hour) over the recent persisted samples of that window, and a two-point estimate using the oldest and newest in-range samples SHALL be an acceptable smoothing.
 
-The sampled quantity SHALL be the cross-session reconciled "newest-session authority" adopted used% (the value the reconciliation writes into `five_h` / `seven_d`), so the slope reflects the truest known usage rather than a frozen session's stale snapshot.
+The sampled quantity SHALL be the cross-session reconciled freshest-observation authority adopted used% (the value the reconciliation writes into `five_h` / `seven_d`), so the slope reflects the truest known usage rather than the stale value an idle session keeps reporting.
 
 Each sample SHALL be a `(timestamp, adopted_used%)` pair persisted as a bounded series piggybacked on the existing rate-limit cache (`~/.claude/sl-ratelimit-cache`), keyed by the reconciled EFFECTIVE five-hour window key — the adopted class authority's `resets_at`, which equals the frame's own `five_reset` whenever that snapshot is live — written under the same per-pid temp + atomic `mv` discipline as the existing cache so concurrent sessions do not corrupt it. Keying by the effective window key means a frame whose own snapshot window has rolled still samples (and projects) against the live window it adopted, instead of producing no samples at all. When fewer than two in-range samples exist for a window, the slope SHALL be treated as undefined and no alarm SHALL be produced for that window.
 
@@ -43,23 +43,23 @@ Each sample SHALL be a `(timestamp, adopted_used%)` pair persisted as a bounded 
 
 
 <!-- @trace
-source: fix-rate-window-roll-staleness
+source: fix-authority-freshest-observation
 updated: 2026-08-27
 code:
+  - AGENTS.md
   - .agents/skills/spectra-debug/SKILL.md
-  - .agents/skills/spectra-ingest/SKILL.md
   - reports/20260827-plan-statusline-weekly-authority.dot
-  - .agents/skills/spectra-commit/SKILL.md
+  - reports/20260827-plan-statusline-weekly-authority.svg
+  - .agents/skills/spectra-archive/SKILL.md
+  - .agents/skills/spectra-ask/SKILL.md
   - .agents/skills/spectra-propose/SKILL.md
-  - .agents/skills/spectra-discuss/SKILL.md
   - .agents/skills/spectra-audit/SKILL.md
+  - .agents/skills/spectra-commit/SKILL.md
+  - .agents/skills/spectra-discuss/SKILL.md
+  - .agents/skills/spectra-ingest/SKILL.md
+  - .agents/skills/spectra-apply/SKILL.md
   - .agents/skills/spectra-drift/SKILL.md
   - .DS_Store
-  - AGENTS.md
-  - reports/20260827-plan-statusline-weekly-authority.svg
-  - .agents/skills/spectra-apply/SKILL.md
-  - .agents/skills/spectra-ask/SKILL.md
-  - .agents/skills/spectra-archive/SKILL.md
 -->
 
 ---
