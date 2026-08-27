@@ -500,6 +500,53 @@ read_tokens() {
     done < "$TOKENS_CACHE"
 }
 
+# Foreground: the alternate-billing quota field, off unless configured.
+#
+# Some sessions do not bill the personal subscription at all -- ANTHROPIC_BASE_URL
+# can point at a company or team gateway with its own daily allowance. When that
+# happens the two rate-limit percentages above describe an account this session is
+# not spending, so showing them is worse than showing nothing.
+#
+# Three variables turn this on, and all three come from the environment so that
+# nothing about a particular gateway lives in this repository:
+#
+#   SL_QUOTA_MATCH   substring to look for in ANTHROPIC_BASE_URL; unset = off
+#   SL_QUOTA_LABEL   what to call it on screen (default QUOTA)
+#   SL_QUOTA_DIR     where the pre-rendered per-model text lives
+#
+# The percentage is NOT computed here. Whatever fetches it writes the finished
+# string per model, because a ~26ms frame has no room to parse anything, and
+# because every session must render the identical number.
+read_quota_field() {
+    quota_label=""; quota_pct=""; quota_sev=""
+    [ -n "${SL_QUOTA_MATCH:-}" ] || return 0
+    case "${ANTHROPIC_BASE_URL:-}" in
+        *"$SL_QUOTA_MATCH"*) quota_label="${SL_QUOTA_LABEL:-QUOTA}" ;;
+        *) return 0 ;;
+    esac
+
+    # display_name -> the id the provider uses. Spelled out as a case rather than
+    # lowercased, because macOS ships bash 3.2 (no ${var,,}) and because an
+    # unknown family should fall through to "label with no number" instead of
+    # silently reading some other model's file.
+    local m fam ver dir
+    m="${model%% (*}"                       # "Sonnet 5 (1M context)" -> "Sonnet 5"
+    case "$m" in
+        Sonnet*) fam=sonnet ;;
+        Opus*)   fam=opus   ;;
+        Haiku*)  fam=haiku  ;;
+        Fable*)  fam=fable  ;;
+        *) return 0 ;;
+    esac
+    ver="${m#* }"                           # "Sonnet 5" -> "5"
+    [ "$ver" != "$m" ] || return 0          # no space at all: not a versioned name
+    ver="${ver//./-}"                       # "4.5" -> "4-5"
+
+    dir="${SL_QUOTA_DIR:-$HOME/.claude/state/statusline-quota}"
+    [ -f "$dir/claude-$fam-$ver" ] || return 0
+    IFS=' ' read -r quota_pct quota_sev < "$dir/claude-$fam-$ver" 2>/dev/null
+}
+
 # Kick off the detached recompute (gated). Fire-and-forget: the frame never waits on it. </dev/null per the stdin hard rule
 # (it must not consume the stdin JSON pipe inherited by &); stdout/stderr to /dev/null so nothing interleaves with the line.
 start_tokens_job() {

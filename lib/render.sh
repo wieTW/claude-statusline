@@ -328,6 +328,24 @@ build_left() {
 
     # Rate limit: reset countdown + remaining %. The 5h segment also carries the burn-projection alarm (↘<ttl>) when the budget
     # is on track to run dry before the window resets; build_burn returns "" otherwise so the common case adds nothing.
+    if [ -n "${quota_label:-}" ]; then
+        # This session bills somewhere with its own allowance, so the personal
+        # subscription's two percentages describe an account it is not spending.
+        # The quota goes in those same two slots rather than in new ones, which
+        # is why the truncation ladder needs no change: git still goes at step 5,
+        # these at 7 and 13, path never.
+        seg_5h_full="${DM}${quota_label}${RS}"; seg_5h_compact="$seg_5h_full"
+        parts+=("$seg_5h_full")
+        seg_7d=""
+        if [ -n "${quota_pct:-}" ]; then
+            local _qc
+            case "${quota_sev:-}" in
+                red) _qc="$RD" ;; orange) _qc="$OG" ;; yellow) _qc="$YL" ;; *) _qc="$GR" ;;
+            esac
+            seg_7d="${_qc}${quota_pct}${RS}"
+            parts+=("$seg_7d")
+        fi
+    else
     build_burn
     build_rate "$five_h" "$five_reset" "$_burn"
     seg_5h_full="$_rate_full"; seg_5h_compact="$_rate_compact"   # compact (step 13) keeps the burn alarm, drops only the reset countdown
@@ -335,6 +353,7 @@ build_left() {
     build_rate "$seven_d" "$seven_reset"
     seg_7d="$_rate_full"
     [ -n "$seg_7d" ] && parts+=("$seg_7d")
+    fi
 
     # Last-message time: the per-session file written by the UserPromptSubmit hook (not the current time).
     # session_id is interpolated into a path here, so reject any slash/.. shape first (defense-in-depth: the id is

@@ -86,6 +86,7 @@ read_theme         # the theme/width jobs are long done by now (covered by the t
 read_width
 reconcile_read     # reap the reconcile job: adopt the freshest used% any session has seen for this window (numeric-guarded)
 read_tokens        # read this session's cached token totals (tiny file; the heavy sum runs only in the bg job above)
+read_quota_field   # alternate-billing quota (one tiny file; returns immediately unless SL_QUOTA_MATCH is set and matches)
 
 load_palette
 build_left

@@ -1246,6 +1246,73 @@ out=$(SL_OPEN_NOTIFY=0 HOME="$FAKE_HOME" bash "$OPENER" /dev/ttys999 2>&1); rc=$
 [ "$rc" -eq 1 ] || { echo "  ★ FAIL CLK unknown pane should fail, exit=$rc"; cbad=1; }
 [ "$cbad" -eq 0 ] && echo "  CLK publish + reap + private perms + disable + opener guards OK" || fail=1
 
+echo "── Q. alternate-billing quota field"
+# A session billing somewhere other than the personal subscription must not show
+# the personal rate limits: those percentages belong to an account it is not
+# spending, which is worse than showing nothing.
+qbad=0
+qdir="$WORK/quota"
+mkdir -p "$qdir"
+qrun() {  # $1=cols $2=json ; same as run() plus a configured gateway
+  printf '%s' "$2" | env COLUMNS="$1" HOME="$FAKE_HOME" \
+    ANTHROPIC_BASE_URL="https://gw.example.invalid/v1" \
+    SL_QUOTA_MATCH="gw.example.invalid" SL_QUOTA_LABEL="TEAM" SL_QUOTA_DIR="$qdir" \
+    bash "$SL/statusline-command.sh"
+}
+
+# mkjson reports "Opus 4.8 (1M context)", which maps to claude-opus-4-8.
+printf '3.3%% green\n' > "$qdir/claude-opus-4-8"
+out=$(qrun 200 "$J" | nocol)
+case "$out" in *"TEAM"*"3.3%"*) ;; *) echo "  ★ FAIL label+value missing: [$out]"; qbad=1 ;; esac
+# 23 and 84 used render as 77% and 16% remaining; neither may survive here.
+case "$out" in *"77%"*|*"16%"*) echo "  ★ FAIL personal rate limits leaked: [$out]"; qbad=1 ;; esac
+
+# Unconfigured sessions keep the old behaviour exactly.
+out=$(run 200 "$J" | nocol)
+case "$out" in *TEAM*) echo "  ★ FAIL quota field shown while unconfigured: [$out]"; qbad=1 ;; esac
+case "$out" in *"77%"*) ;; *) echo "  ★ FAIL personal rate limit vanished while unconfigured: [$out]"; qbad=1 ;; esac
+
+# Configured label but a base URL that does not match: still the old behaviour.
+out=$(printf '%s' "$J" | env COLUMNS=200 HOME="$FAKE_HOME" \
+      ANTHROPIC_BASE_URL="https://api.anthropic.com" \
+      SL_QUOTA_MATCH="gw.example.invalid" SL_QUOTA_LABEL="TEAM" SL_QUOTA_DIR="$qdir" \
+      bash "$SL/statusline-command.sh" | nocol)
+case "$out" in *TEAM*) echo "  ★ FAIL quota field shown for a non-matching base URL: [$out]"; qbad=1 ;; esac
+
+# A marker the writer appends (an unenforced limit, say) must reach the screen
+# untouched: without it a comfortable number looks like a line that would stop you.
+printf '1.4%%* green\n' > "$qdir/claude-opus-4-8"
+out=$(qrun 200 "$J" | nocol)
+case "$out" in *"1.4%*"*) ;; *) echo "  ★ FAIL trailing marker dropped: [$out]"; qbad=1 ;; esac
+
+# Nothing cached yet: still say which account this is, just without a number.
+rm -f "$qdir/claude-opus-4-8"
+out=$(qrun 200 "$J" | nocol)
+case "$out" in *TEAM*) ;; *) echo "  ★ FAIL label needs no cached value: [$out]"; qbad=1 ;; esac
+case "$out" in *"77%"*|*"16%"*) echo "  ★ FAIL personal limits reappeared with no cache: [$out]"; qbad=1 ;; esac
+
+# An unrecognised model family falls through to the same safe state rather than
+# reading some other model's file.
+JQ2=$(printf '%s' "$J" | jq -c '.model.display_name="Nimbus 9 (1M context)"')
+printf '99.9%% red\n' > "$qdir/claude-opus-4-8"
+out=$(qrun 200 "$JQ2" | nocol)
+case "$out" in *"99.9%"*) echo "  ★ FAIL unknown family read another model's value: [$out]"; qbad=1 ;; esac
+case "$out" in *TEAM*) ;; *) echo "  ★ FAIL label missing for unknown family: [$out]"; qbad=1 ;; esac
+rm -f "$qdir/claude-opus-4-8"
+
+# Narrowing drops the value before the label. A percentage with nothing naming
+# the account it belongs to is worse than no percentage: the label is the part
+# that answers "whose allowance is this".
+printf '42%% green\n' > "$qdir/claude-opus-4-8"
+wide=$(qrun 200 "$J" | nocol)
+case "$wide" in *"TEAM"*"42%"*) ;; *) echo "  ★ FAIL wide line lost label or value: [$wide]"; qbad=1 ;; esac
+narrow=$(qrun 70 "$J" | nocol)
+case "$narrow" in *"42%"*) echo "  ★ FAIL value survived a width that must drop it: [$narrow]"; qbad=1 ;; esac
+case "$narrow" in *TEAM*) ;; *) echo "  ★ FAIL label dropped before the value: [$narrow]"; qbad=1 ;; esac
+rm -f "$qdir/claude-opus-4-8"
+
+[ "$qbad" -eq 0 ] && echo "  quota label + value + marker + no-cache + unknown-model + off-by-default + ladder OK" || fail=1
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 
