@@ -1428,6 +1428,115 @@ else
 fi
 [ "$qbad" -ne 0 ] || echo "  QS1-QS8 freshness, strict boundary, guards, fallback, and override cases OK"
 
+# QJ: the writer joins two figures into this one slot with its own separator --
+# U+00A0 │ U+00A0. The no-break spaces are deliberate: read_quota_field splits
+# the file with IFS=' ', so only a space that is not an ASCII space keeps the
+# joined text together as field one. That │ is punctuation, not data, so it must
+# be drawn in the same neutral SP role as every other │ on the line instead of
+# pulsing orange/red/DM with the numbers it divides.
+qsep=$(printf '\302\240\342\224\202\302\240')
+# SGR immediately before the value's own │, identified by the no-break space in
+# front of it -- no other separator on the line is preceded by one.
+qsepcode() { perl -ne 'while(/\x1b\[([0-9;]*)m\xc2\xa0\xe2\x94\x82/g){$c=$1} END{print $c}'; }
+# SGR of the structural SP role, read off an ordinary " │ " join in the same frame.
+qspcode()  { perl -ne 'while(/\x1b\[([0-9;]*)m \xe2\x94\x82/g){$c=$1} END{print $c}'; }
+# SGR immediately before an arbitrary literal word.
+qjcode()   { QW="$1" perl -ne 'while(/\x1b\[([0-9;]*)m\Q$ENV{QW}\E/g){$c=$1} END{print $c}'; }
+
+qjnow=$(date +%s)
+printf '36.9M%s26%% orange %s\n' "$qsep" "$((qjnow-60))" > "$qdir/claude-opus-4-8"
+qj1=$(qrun 200 "$J")
+qj1sp=$(printf '%s' "$qj1" | qspcode)
+qj1sep=$(printf '%s' "$qj1" | qsepcode)
+qj1l=$(printf '%s' "$qj1" | qjcode '36.9M')
+qj1r=$(printf '%s' "$qj1" | qjcode '26%')
+# Preconditions: without a live SP that differs from the severity role, the
+# assertions below would pass no matter how the separator were coloured.
+if [ -z "$qj1sp" ] || [ -z "$qj1l" ] || [ "$qj1sp" = "$qj1l" ]; then
+  echo "  ★ FAIL QJ1 preconditions (SP=[$qj1sp] severity=[$qj1l]) -- assertions would be vacuous"; qbad=1
+fi
+[ "$qj1l" = "$qj1r" ] || { echo "  ★ FAIL QJ1 figures differ in colour (left=[$qj1l] right=[$qj1r])"; qbad=1; }
+[ "$qj1sep" = "$qj1sp" ] || { echo "  ★ FAIL QJ1 separator not in SP role (sep=[$qj1sep] SP=[$qj1sp])"; qbad=1; }
+[ "$qj1sep" != "$qj1l" ] || { echo "  ★ FAIL QJ1 separator took the severity colour [$qj1sep]"; qbad=1; }
+
+# QJ4: recolouring must not disturb one character of the display text.
+qj1plain=$(printf '%s' "$qj1" | nocol)
+case "$qj1plain" in *"36.9M${qsep}26%"*) ;; *) echo "  ★ FAIL QJ4 display text altered: [$qj1plain]"; qbad=1 ;; esac
+case "$qj1plain" in *"$((qjnow-60))"*) echo "  ★ FAIL QJ4 timestamp reached screen"; qbad=1 ;; esac
+
+# QJ3: staleness dims the figures; the separator stays structural in both frames.
+printf '36.9M%s26%% orange %s\n' "$qsep" "$((qjnow-901))" > "$qdir/claude-opus-4-8"
+qj3=$(qrun 200 "$J")
+qj3sp=$(printf '%s' "$qj3" | qspcode)
+qj3sep=$(printf '%s' "$qj3" | qsepcode)
+qj3l=$(printf '%s' "$qj3" | qjcode '36.9M')
+qj3r=$(printf '%s' "$qj3" | qjcode '26%')
+qj3dm=$(printf '%s' "$qj3" | qlabelcode)
+if [ -z "$qj3sp" ] || [ -z "$qj3dm" ] || [ "$qj3sp" = "$qj3dm" ]; then
+  echo "  ★ FAIL QJ3 preconditions (SP=[$qj3sp] DM=[$qj3dm]) -- assertions would be vacuous"; qbad=1
+fi
+[ "$qj3l" = "$qj3dm" ] || { echo "  ★ FAIL QJ3 stale left figure not DM (got=[$qj3l] DM=[$qj3dm])"; qbad=1; }
+[ "$qj3r" = "$qj3dm" ] || { echo "  ★ FAIL QJ3 stale right figure not DM (got=[$qj3r] DM=[$qj3dm])"; qbad=1; }
+[ "$qj3sep" = "$qj3sp" ] || { echo "  ★ FAIL QJ3 stale separator not in SP role (sep=[$qj3sep] SP=[$qj3sp])"; qbad=1; }
+[ "$qj3sep" != "$qj3dm" ] || { echo "  ★ FAIL QJ3 separator was dimmed along with the figures"; qbad=1; }
+
+# QJ2: a value carrying no separator keeps today's shape exactly -- one SGR, the
+# whole string, one reset, with none of the splitting machinery in between.
+printf 'no-cookie yellow %s\n' "$((qjnow-60))" > "$qdir/claude-opus-4-8"
+qj2=$(qrun 200 "$J")
+qj2one=$(printf '%s' "$qj2" | perl -ne 'print "y" if /\x1b\[[0-9;]*mno-cookie\x1b\[0m/')
+[ "$qj2one" = "y" ] || { echo "  ★ FAIL QJ2 separatorless value no longer one contiguous coloured run"; qbad=1; }
+[ -z "$(printf '%s' "$qj2" | qsepcode)" ] || { echo "  ★ FAIL QJ2 separator role appeared inside a value with no separator"; qbad=1; }
+
+# QJ5: the separator sitting at the value's leading or trailing EDGE — the one arrangement QJ1-QJ4 never feed, since they all
+# put text on both sides of it. build_quota_value splits the text on the separator and colours each run, so an edge separator
+# leaves one run EMPTY: the loop emits a bare "<severity SGR><reset>" pair with no character between them. That pair is
+# invisible by construction (vis_width consumes every ESC before it measures) and this case pins that claim down.
+# The control fixture "2<sep>6%" is picked to carry exactly the SAME bytes as the two edge fixtures — three ASCII characters,
+# two no-break spaces, one │ — so the renderer's width arithmetic sees an identical byte profile and the ONLY difference left
+# is where the separator sits. Equal rendered width therefore means the empty run cost zero cells; an unequal one would mean
+# it was measured. Roles are read against QJ1's own frame, so the severity and SP references come from the live palette.
+qj5frame() {  # $1=quota value text → the raw frame that value renders at COLUMNS=200
+  printf '%s orange %s\n' "$1" "$((qjnow-60))" > "$qdir/claude-opus-4-8"
+  qrun 200 "$J"
+}
+qj5vw() {  # stdin=frame → visible width of the quota value alone: the text between the TEAM label and the next structural " │ ".
+           # The value's own separator is no-break-space-delimited, so a non-greedy match cannot mistake it for that structural join.
+  nocol | python3 -c '
+import sys, re, unicodedata
+line = sys.stdin.read().rstrip("\n")
+m = re.search(u"TEAM \u2502 (.*?) \u2502 ", line)
+print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in m.group(1)) if m else -1)'
+}
+qj5ctl=$(qj5frame "2${qsep}6%")            # interior separator, same bytes as both edge fixtures
+qj5ctlw=$(printf '%s' "$qj5ctl" | vw); qj5ctlvw=$(printf '%s' "$qj5ctl" | qj5vw)
+qj5lead=$(qj5frame "${qsep}26%")
+qj5trail=$(qj5frame "26%${qsep}")
+[ "$qj5ctlvw" -gt 0 ] || { echo "  ★ FAIL QJ5 control value not locatable in the frame — the asserts below would be vacuous"; qbad=1; }
+for qj5n in lead trail; do
+  case "$qj5n" in
+    lead)  qj5v="${qsep}26%";  qj5f=$qj5lead  ;;
+    trail) qj5v="26%${qsep}";  qj5f=$qj5trail ;;
+  esac
+  qj5plain=$(printf '%s' "$qj5f" | nocol)
+  # Visible text, bounded on BOTH sides by the structural join, so a stray blank emitted for the empty run cannot hide in a
+  # trailing wildcard: the value must be the writer's string exactly, no character more.
+  case "$qj5plain" in *"TEAM │ ${qj5v} │ "*) ;; *) echo "  ★ FAIL QJ5/$qj5n visible text is not the value verbatim: [$qj5plain]"; qbad=1 ;; esac
+  # Width, two independent ways. The value's own visible width catches a character leaking out of the empty run; the whole
+  # frame's width catches the opposite error, the renderer MEASURING the empty run and under-filling the line to pay for it.
+  qj5vwn=$(printf '%s' "$qj5f" | qj5vw)
+  [ "$qj5vwn" = "$qj5ctlvw" ] || { echo "  ★ FAIL QJ5/$qj5n quota value width $qj5vwn != interior-control $qj5ctlvw — the empty colour run is not empty"; qbad=1; }
+  qj5w=$(printf '%s' "$qj5f" | vw)
+  [ "$qj5w" = "$qj5ctlw" ] || { echo "  ★ FAIL QJ5/$qj5n frame width $qj5w != interior-control $qj5ctlw — the empty colour run is being measured"; qbad=1; }
+  qj5sep=$(printf '%s' "$qj5f" | qsepcode)
+  qj5fig=$(printf '%s' "$qj5f" | qjcode '26%')
+  [ "$qj5sep" = "$qj1sp" ] || { echo "  ★ FAIL QJ5/$qj5n edge separator left the neutral SP role (sep=[$qj5sep] SP=[$qj1sp])"; qbad=1; }
+  [ "$qj5fig" = "$qj1l" ]  || { echo "  ★ FAIL QJ5/$qj5n figure lost the severity role (got=[$qj5fig] want=[$qj1l])"; qbad=1; }
+done
+rm -f "$qdir/claude-opus-4-8"
+
+[ "$qbad" -ne 0 ] || echo "  QJ1-QJ5 inline separator neutral, figures coloured, stale dims figures only, text intact, edge separator costs no width OK"
+
 # mkjson reports "Opus 4.8 (1M context)", which maps to claude-opus-4-8.
 printf '3.3%% green\n' > "$qdir/claude-opus-4-8"
 out=$(qrun 200 "$J" | nocol)

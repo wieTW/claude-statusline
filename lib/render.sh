@@ -223,6 +223,23 @@ build_burn() {   # uses globals burn_tte + config BURN_SENS → _burn ("" when h
 }
 
 
+# The alternate-billing writer joins two figures into the one slot it owns, using a separator of its own: U+00A0 │ U+00A0, spelled in
+# octal below because two of its three characters are invisible in an editor and a literal would sit one careless keystroke away from
+# silent breakage. The no-break spaces are the point of it: read_quota_field splits the file on the ASCII space alone, so only a space
+# that is not one keeps the joined text together as field one. That │ is punctuation, not data. Emitted in the value's own role it
+# pulses orange/red/DM with the numbers it divides, while every other │ on the line stays structural, so each run of text goes out in
+# the value's role and each separator in SP. Parameter expansion only: a fork here would break the one-builtin-read bound this field is
+# held to. A value carrying no separator falls straight through the loop and comes out as the single coloured run it has always been.
+build_quota_value() {   # $1=colour role for the figures $2=display text → _quota_value ("36.9M" in $1, " │ " in SP, "26%" in $1)
+    local _sep=$'\302\240\342\224\202\302\240' _rest="$2" _out=""
+    while [ "${_rest#*"$_sep"}" != "$_rest" ]; do       # a separator is still ahead
+        _out="${_out}${1}${_rest%%"$_sep"*}${RS}${SP}${_sep}${RS}"
+        _rest="${_rest#*"$_sep"}"
+    done
+    _quota_value="${_out}${1}${_rest}${RS}"
+}
+
+
 # Left: path + resource state (model / effort / thinking / ctx / quota) + last-message time
 # Besides building parts[] (the full-form left half used by the roomy / junction render paths), each segment is also captured into a
 # named global with, where a shorter rendering exists, a compact form (seg_*_compact). render_line's degrade_layout (the fixed 14-step
@@ -385,7 +402,8 @@ build_left() {
                [ "$(( 10#$now - 10#$quota_at ))" -gt "$(( 10#$_quota_stale ))" ]; then
                 _qc="$DM"
             fi
-            seg_7d="${_qc}${quota_pct}${RS}"
+            build_quota_value "$_qc" "$quota_pct"
+            seg_7d="$_quota_value"
             parts+=("$seg_7d")
         fi
     else
