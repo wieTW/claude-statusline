@@ -254,7 +254,7 @@ collect_status() {
 # concurrent sessions), and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>" (adopted value + adopted effective window key per class).
 # Mutates five_h / seven_d / five_reset / seven_reset in place; build_rate renders them unchanged.
 # Degrades safely: any awk/mv failure (e.g. read-only HOME) leaves out empty → the guards below keep this frame's own values and no alarm.
-# An empty session_id contributes no observation state but still adopts an existing authority.
+# A session_id that cannot persist (empty, or not UUID-shaped — see sid_persistable) contributes no observation state but still adopts an existing authority.
 #
 # Burn projection (5h window only): each frame appends a P sample (now, the ADOPTED used% of the 5h class — never a stale report)
 # under the EFFECTIVE 5h key (the adopted authority's resets_at, = this frame's r5 whenever its snapshot window is live), keeps a
@@ -269,8 +269,9 @@ collect_status() {
 # staleness steal (a lock dir older than RL_LOCK_STALE means a holder died mid-frame). Two safe-degradation rules, both per the spec:
 #   • lock NOT acquired (another writer holds it within our bounded attempt) → SKIP the mv (leave the on-disk cache untouched by this
 #     frame) but STILL run the awk read-only so this frame DISPLAYS the correct adopted authority it read — never a stale/empty number.
-#   • empty session_id (cannot record an observation → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line
-#     left intact) but STILL adopt the existing authority read-only. No lock is taken on this path (we never write).
+#   • non-persistable session_id — empty, or not a real (UUID-shaped) Claude Code session id per sid_persistable (cannot record an
+#     observation → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line left intact) but STILL adopt the
+#     existing authority read-only. No lock is taken on this path (we never write).
 # The awk ALWAYS writes survivors to a per-pid temp and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>"; only the mv is conditional. So the emitted
 # (adopted) values are computed identically on every path; whether we persist them is the only difference. reconcile_start launches this
 # as a background FD job overlapping the git stage (</dev/null per the stdin hard rule — reconcile reads/writes only the cache file, never
@@ -281,6 +282,22 @@ RL_LOCK_TRIES=50    # bounded acquisition attempts before giving up and degradin
 RL_LOCK_WAIT=0.01   # backoff (sec) between failed attempts: the critical section is a few-ms read+awk+mv, so a short wait lets a
                     # genuine concurrent writer take its turn (no busy-spin starving a peer) while keeping the bounded total wait small.
                     # This runs in the background reconcile job overlapping the ~20ms git stage, so the wait is hidden from the frame.
+
+# Only a REAL Claude Code session id may PERSIST an observation into the shared cross-session cache. Claude Code always supplies a
+# UUID (8-4-4-4-12, lowercase hex); a synthetic id (a test fixture, a probe, a hand-typed label) can only come from something that is
+# not a live session. This matters because the authority rule is "freshest observation wins": ONE synthetic row, being the newest, wins
+# the W5/W7 election and rewrites the number every real session displays. That happened on 2026-08-31 — a demo frame run with the id
+# `sl-sepdemo` against the real $HOME turned the 7d segment from "84% left" into a red "16% left" for every open session.
+# A rejected id takes the SAME path as an empty session_id (spec: read-only adopt, no write): no lock, no mv, cache untouched, correct
+# display, no diagnostic output. Shape-only, zero fork (`case` glob on a per-frame hot path — see the Per-Frame Cost requirement);
+# it is the last line of defence, NOT a licence to run the statusline against the real $HOME (use scripts/sandbox-run.sh for that).
+sid_persistable() {   # $1=session_id → 0 when it is UUID-shaped and may be written to the shared cache
+    local h4='[0-9a-f][0-9a-f][0-9a-f][0-9a-f]' g
+    g="$h4$h4-$h4-$h4-$h4-$h4$h4$h4"           # 8-4-4-4-12
+    case "$1" in $g) return 0 ;; esac          # unquoted on purpose: bash expands a case pattern, and the result IS the glob
+                                               # (this is bash-only; under zsh the same line would reject everything — fail-closed, so safe)
+    return 1
+}
 
 # Background FD job: kick off the cross-session reconcile so it overlaps the git stage. </dev/null is mandatory (hard rule): the job must
 # not consume the stdin JSON pipe it would otherwise inherit. The FD read in reconcile_read is the sync point (no wait / temp signalling).
@@ -315,11 +332,15 @@ reconcile_read() {
 _reconcile_core() {
     umask 077                                      # cache/tmp/lock created private (600/700): they hold session IDs + usage — no cross-user read on a shared machine. Subshell-scoped (only ever run via procsub in reconcile_start).
     local cache="$HOME/.claude/sl-ratelimit-cache" lock="$HOME/.claude/sl-ratelimit-cache.lock"
-    local src tmpfile have_lock=0 tries lmt
+    local src tmpfile have_lock=0 tries lmt persist=0
     tmpfile="$cache.$$"                            # $$ is unique per session process → no temp collision across sessions
-    # Only contend for the lock when we actually intend to write (a non-empty sid). An empty sid is read-only (skip mv), so it needs no
+    # persist = may this frame's observation reach the shared cache at all? Requires a non-empty AND UUID-shaped sid (sid_persistable
+    # rejects '' too, so it subsumes the empty-sid test). Every write decision below reads this one flag, so a rejected sid follows the
+    # empty-sid path identically: no lock, no report applied, no mv.
+    sid_persistable "$session_id" && persist=1
+    # Only contend for the lock when we actually intend to write. A non-persistable sid is read-only (skip mv), so it needs no
     # lock — taking one would only add a contention source for a frame that can never be the authority.
-    if [ -n "$session_id" ]; then
+    if [ "$persist" = 1 ]; then
         tries=0
         while [ "$tries" -lt "${RL_LOCK_TRIES:-50}" ]; do
             if mkdir "$lock" 2>/dev/null; then have_lock=1; break; fi
@@ -340,7 +361,7 @@ _reconcile_core() {
     # writable = this frame will persist (lock held AND a non-empty sid). A read-only frame (lock-contention or empty-sid) must
     # adopt the EXISTING authority it read and NOT fold in its own (possibly stale) report — the spec is explicit that a contention frame
     # displays the value it READ (e.g. 47), never its own (e.g. 12). So `writable` gates whether the awk applies this frame's report.
-    local writable=0; [ "$have_lock" = 1 ] && [ -n "$session_id" ] && writable=1
+    local writable=0; [ "$have_lock" = 1 ] && [ "$persist" = 1 ] && writable=1
     local out
     out=$(awk -v now="$now" -v sid="$session_id" -v r5="$five_reset" -v u5="$five_h" \
               -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" -v writable="$writable" '
@@ -449,7 +470,7 @@ _reconcile_core() {
     # Persist ONLY when this frame both holds the lock AND has a rankable (non-empty) sid; otherwise this is a read-only frame:
     # skip the mv (leave the on-disk cache untouched), drop the temp, but still emit the adopted value computed above. This is the
     # safe-degradation path for both lock-contention and empty-sid, and it never errors out (no set -e).
-    if [ "$have_lock" = 1 ] && [ -n "$session_id" ]; then
+    if [ "$have_lock" = 1 ] && [ "$persist" = 1 ]; then
         # Overwrite ONLY when the awk produced a non-empty temp (success). An awk failure leaves an empty/half temp; mv-ing it would
         # wipe the cross-session authority other sessions persisted. rm cleans up the skip case (mv consumes the temp on success);
         # the lock is released on BOTH paths so an awk-failure frame never leaks the lock dir.

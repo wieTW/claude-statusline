@@ -59,9 +59,13 @@ bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh
 shellcheck -x statusline-command.sh                                               # lint (follows the . sources)
 bash tests/run-tests.sh                                                           # suite → prints "ALL CHECKS PASSED"
 
-# Render one frame by hand (the fastest dev loop) — COLUMNS drives the right-align width
+# Render one frame by hand (the fastest dev loop) — ALWAYS through scripts/sandbox-run.sh, NEVER
+# `bash statusline-command.sh` directly: see "Never render against the real $HOME" below.
 printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M context)"},"context_window":{"used_percentage":6.2}}' "$PWD" \
-  | COLUMNS=140 bash statusline-command.sh
+  | bash scripts/sandbox-run.sh --columns 140
+
+# Seed a cross-session rate-limit scenario and inspect what the frame persisted (throwaway HOME kept):
+bash scripts/sandbox-run.sh --help
 
 # Regenerate the README screenshot SVGs (hero/alerts/degrade/themes): fixture JSON piped
 # through the REAL script, ANSI→SVG via assets/ansi2svg.py (python3 — dev-only dep).
@@ -82,6 +86,27 @@ fresh `mktemp` work dir + fake `$HOME`, so it survives directory renames and tmp
 
 After editing any `.sh` file, write `.claude/verify.json` before stopping (per the global
 review-loop convention) — the three commands above are the standard gate.
+
+## Never render the statusline against the real `$HOME`
+
+**Rule: never run `statusline-command.sh` (or anything that sources `lib/collect.sh`) with the real `$HOME`.
+Always go through `scripts/sandbox-run.sh`, which builds a throwaway HOME and refuses to run if that HOME
+would land inside a real user home.** `tests/run-tests.sh` is already isolated — every invocation carries a
+`HOME="$FAKE_HOME"` override, and section `T4` fails the suite if any invocation loses it.
+
+**Why.** The rate-limit segment is shared across sessions through `~/.claude/sl-ratelimit-cache`, and the
+authority rule there is *freshest observation wins*. One frame rendered by hand is therefore not a read-only
+experiment: its observation is the newest in the file, so it wins the `W5`/`W7` election and rewrites the
+number **every live session displays**. On 2026-08-31 a demo frame run with the made-up id `sl-sepdemo`
+against the real `$HOME` did exactly that — the 7d segment went from "84% left, 6D15H" to a red
+"16% left, 1D7H" in every open session, and the real authority had to be restored by hand.
+
+**The write gate is not a substitute for isolating HOME.** `sid_persistable` in `lib/collect.sh` now refuses to
+persist any `session_id` that is not a real Claude Code UUID (8-4-4-4-12 lowercase hex), so a synthetic id
+takes the read-only path and cannot seize the authority (section `T3` reproduces the incident and asserts it).
+That is the **last** line of defence, not permission to skip the sandbox: a hand-run frame carrying a *real*
+session id still writes, and the gate says nothing about the token cache, `~/.claude/sl-cwd`, or whatever
+shared state a future change adds.
 
 ## Architecture
 
@@ -171,8 +196,11 @@ applies numeric adoption guards. The whole read+awk+mv is serialized by an **`mk
 bounded retry + stale-steal (`RL_LOCK_TRIES`/`RL_LOCK_WAIT`/`RL_LOCK_STALE`, defined in
 collect.sh), so concurrent renders don't lose updates. Two safe-degradation paths, both still
 **adopting the value they READ** (never their own stale report): lock not acquired → skip the
-`mv`, run awk read-only; **empty `session_id`** → skip the lock and `mv` entirely (an anonymous
-frame cannot record an observation, so it never does a destructive rewrite). Any awk/mv/lock failure leaves
+`mv`, run awk read-only; **a `session_id` that cannot persist** → skip the lock and `mv` entirely (a frame
+that cannot record an observation never does a destructive rewrite). That covers an empty `session_id` and,
+per `sid_persistable`, any id that is not a real Claude Code UUID (8-4-4-4-12 lowercase hex) — a synthetic id
+would otherwise be the freshest observation and seize the class authority for every live session (the
+2026-08-31 `sl-sepdemo` incident; see "Never render the statusline against the real `$HOME`"). Any awk/mv/lock failure leaves
 the emitted fields empty → `reconcile_read`'s guards keep this frame's own parse_input values
 (never `set -e`). Section `T2` covers the concurrency, lock-contention safe-skip, and empty-sid path.
 
@@ -306,6 +334,9 @@ both-fields-unusable fallbacks down the three-level chain.
 
 ## Hard rules — violating these reintroduces fixed bugs
 
+- **Never render against the real `$HOME`.** `statusline-command.sh` writes cross-session state
+  (`~/.claude/sl-ratelimit-cache`, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`); a frame run by hand
+  becomes the freshest observation and rewrites what every live session shows. Use `scripts/sandbox-run.sh`.
 - **Never `set -e`, anywhere.** A `read` hitting EOF with no trailing newline returns
   rc=1 as a normal path; `-e` would kill the script mid-frame.
 - **Every background job gets `</dev/null`.** Jobs inherit the stdin JSON pipe; only
