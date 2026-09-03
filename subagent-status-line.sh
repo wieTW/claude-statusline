@@ -16,8 +16,13 @@
 #
 # Row layout — three segments joined by the same " │ " separator the single line uses:
 #
-#     <description> │ <Model>(<Window>) │ <label>
-#     實作 wrap-up 感知的 ctx guard │ Opus 5(1M) │ Extracting command-args from wrap-up envelopes
+#     <description> │ <Model>(<Window>) │ <tokens> │ <label>
+#     實作 subagent 狀態列 │ Opus 5(1M) │ 262k │ Updating sa3b expectation in run-tests.sh
+#
+# The label is dropped when it only repeats the description (Claude Code fills it that way while an agent
+# is starting), and the token segment is dropped when there is no usable non-zero count. Under a narrow
+# terminal the label is truncated first and the description second; the model and token segments are never
+# truncated, because they are the two things this row was added to show.
 #
 # What the payload can and cannot say (measured against 152 captured frames / 164 task rows, 2026-09-03):
 # each task carries id / type / status / description / label / startTime / model / contextWindowSize /
@@ -111,42 +116,75 @@ sa_window() {   # $1=raw contextWindowSize → _win (coloured, empty when unusab
     _win="${YL}(${_tok})${RS}"
 }
 
-sa_join() {   # $1=description segment $2=model segment $3=label segment ("" omits it and its separator) → _content
-    if [ -n "$3" ]; then join_parts "$1" "$2" "$3"; else join_parts "$1" "$2"; fi
+# Strip leading and trailing spaces/tabs, no fork. Used ONLY to compare the description against the
+# activity label, never to alter what is printed. bash 3.2 has no ${var//pattern} anchoring that would do
+# this in one step, and the fields are capped at 256 codepoints so the loop is bounded and cheap.
+sa_trim() {   # $1=string → _trim
+    _trim=$1
+    while :; do case "$_trim" in ' '*|"$SA_TAB"*) _trim=${_trim#?} ;; *) break ;; esac; done
+    while :; do case "$_trim" in *' '|*"$SA_TAB") _trim=${_trim%?} ;; *) break ;; esac; done
+}
+
+# Token usage for this subagent. Plain-text colour (WH), deliberately NOT the warning yellow: on this row
+# YL already means "the context window was cut down", and the single status line uses YL for its own
+# subagent-token total, so a second yellow here would make the actual warning unreadable.
+# Omitted when the count is absent, non-numeric, or zero — the same rule the single line applies to its
+# subagent-token segment. A subagent that has burned nothing has nothing to report, and a "0" on every
+# freshly started row is noise; a missing count is never rendered as 0 or as a placeholder either.
+sa_tokens() {   # $1=raw tokenCount → _tok_seg (coloured, empty when absent / non-numeric / zero)
+    local n=$1
+    _tok_seg=""
+    case "$n" in ''|*[!0-9]*) return ;; esac
+    [ "${#n}" -le 15 ] || return                  # keep the arithmetic well inside 64-bit signed
+    n=$(( 10#$n ))                                # base 10 always: bash reads a leading zero as octal
+    [ "$n" -gt 0 ] || return
+    fmt_tok "$n"                                  # borrowed from render.sh: 262414 → "262k", 1234567 → "1.2M"
+    [ -n "$_tok" ] || return
+    _tok_seg="${WH}${_tok}${RS}"
+}
+
+sa_join() {   # $@=segments in order; an empty one is skipped along with the separator that would precede it
+    local p
+    sa_parts=()
+    for p in "$@"; do [ -n "$p" ] && sa_parts[${#sa_parts[@]}]=$p; done
+    join_parts "${sa_parts[@]}"
     _content=$_line
 }
 
 # Assemble one row and bound it to the reported column count. Sacrifice order: the activity label shrinks
 # first, the description only if that was not enough. The model name and its window marker are never
 # truncated at any width — identifying the model is the entire reason this row is being taken over.
-sa_render() {   # $1=description $2=model segment (already coloured) $3=label $4=column cap → _content
-    local desc="${WH}$1${RS}" mseg=$2 lseg="" cap=$4
-    local wd wm wl room
-    [ -z "$3" ] || lseg="${DM}$3${RS}"
+sa_render() {   # $1=description $2=model segment $3=token segment $4=label $5=column cap → _content
+    local desc="${WH}$1${RS}" mseg=$2 tseg=$3 lseg="" cap=$5
+    local wd wm wt wl nsep room
+    [ -z "$4" ] || lseg="${DM}$4${RS}"
     vis_width "$desc"; wd=$_w
     vis_width "$mseg"; wm=$_w
-    wl=0
-    if [ -n "$lseg" ]; then vis_width "$lseg"; wl=$_w; fi
+    wt=0; if [ -n "$tseg" ]; then vis_width "$tseg"; wt=$_w; fi
+    wl=0; if [ -n "$lseg" ]; then vis_width "$lseg"; wl=$_w; fi
     case "$cap" in
         ''|*[!0-9]*) cap=0 ;;
         *) if [ "${#cap}" -le 9 ]; then cap=$(( 10#$cap )); else cap=0; fi ;;
     esac
+    nsep=1                                        # separators = one fewer than the segments actually present
+    [ -z "$tseg" ] || nsep=$(( nsep + 1 ))
+    [ -z "$lseg" ] || nsep=$(( nsep + 1 ))
     # No usable column count → nothing to bound against, so render the row whole (the single line takes the
     # same unbounded path when the terminal width cannot be measured).
-    if [ "$cap" -le 0 ]; then sa_join "$desc" "$mseg" "$lseg"; return; fi
+    if [ "$cap" -le 0 ]; then sa_join "$desc" "$mseg" "$tseg" "$lseg"; return; fi
+    if [ $(( wd + wm + wt + wl + nsep * SA_SEPW )) -le "$cap" ]; then sa_join "$desc" "$mseg" "$tseg" "$lseg"; return; fi
 
     if [ -n "$lseg" ]; then
-        if [ $(( wd + wm + wl + 2 * SA_SEPW )) -le "$cap" ]; then sa_join "$desc" "$mseg" "$lseg"; return; fi
-        room=$(( cap - wd - wm - 2 * SA_SEPW ))
+        room=$(( cap - wd - wm - wt - nsep * SA_SEPW ))
         if [ "$room" -ge 2 ]; then                # 2 cells is trunc_head's floor: one glyph plus the ellipsis
-            trunc_head "$lseg" "$room"; sa_join "$desc" "$mseg" "$_trunc"; return
+            trunc_head "$lseg" "$room"; sa_join "$desc" "$mseg" "$tseg" "$_trunc"; return
         fi
-        lseg=""                                   # not even room for an ellipsis → drop segment and separator
+        lseg=""; nsep=$(( nsep - 1 ))             # not even room for an ellipsis → drop segment and separator
+        if [ $(( wd + wm + wt + nsep * SA_SEPW )) -le "$cap" ]; then sa_join "$desc" "$mseg" "$tseg" ""; return; fi
     fi
-    if [ $(( wd + wm + SA_SEPW )) -le "$cap" ]; then sa_join "$desc" "$mseg" ""; return; fi
-    room=$(( cap - wm - SA_SEPW ))
-    if [ "$room" -ge 2 ]; then trunc_head "$desc" "$room"; sa_join "$_trunc" "$mseg" ""; return; fi
-    _content=$mseg                                # pathologically narrow: the model is the last thing to go
+    room=$(( cap - wm - wt - nsep * SA_SEPW ))
+    if [ "$room" -ge 2 ]; then trunc_head "$desc" "$room"; sa_join "$_trunc" "$mseg" "$tseg" ""; return; fi
+    sa_join "" "$mseg" "$tseg" ""                 # pathologically narrow: model and usage are the last to go
 }
 
 
@@ -160,7 +198,7 @@ exec 3< <(sa_resolve_theme </dev/null)
 # `//` chain, because jq ABORTS the whole program (rc 5) on a type-mismatched index — that would drop every
 # task's row, not just the offending one. Newlines become spaces, control characters are removed by
 # explode/implode codepoint math, and each field is capped at 256 codepoints. Output is positional: one
-# line for the column count, then five lines per task. Lines, not a delimiter: tab is IFS whitespace, so
+# line for the column count, then six lines per task. Lines, not a delimiter: tab is IFS whitespace, so
 # `read` would silently merge consecutive empty fields, and empty fields are the normal case here.
 # shellcheck disable=SC2016  # $k / $ARGS below are jq variables, not shell ones — single quotes are required
 SA_JQ='
@@ -174,7 +212,7 @@ def fld($k): if has($k) and (.[$k] != null) then (.[$k] | clean) else "" end;
   | (if type == "array" then . else [] end)
   | .[]
   | select(type == "object")
-  | fld("id"), fld("model"), fld("contextWindowSize"), fld("description"), fld("label") )
+  | fld("id"), fld("model"), fld("contextWindowSize"), fld("description"), fld("label"), fld("tokenCount") )
 '
 exec 4< <(jq -r "$SA_JQ" 2>/dev/null)
 sa_cols=""
@@ -188,6 +226,7 @@ _theme=""
 IFS= read -r _theme <&3
 exec 3<&-
 load_palette
+SA_TAB=$'\t'                   # named so sa_trim's case patterns stay readable
 SEP="${SP} │ ${RS}"            # same separator the single line uses, so the two read as one system
 vis_width "$SEP"; SA_SEPW=$_w  # derived, not hardcoded, so a separator change cannot desync the width math
 
@@ -197,6 +236,7 @@ while IFS= read -r sa_id <&4; do
     IFS= read -r sa_win   <&4 || break
     IFS= read -r sa_desc  <&4 || break
     IFS= read -r sa_label <&4 || break
+    IFS= read -r sa_tokc  <&4 || break
     # No id → the row cannot be addressed. No model → the reason this row exists is missing, and a row
     # without it is worse than Claude Code's default row. Either way: emit nothing, keep the default.
     [ -n "$sa_id" ] && [ -n "$sa_model" ] || continue
@@ -204,9 +244,22 @@ while IFS= read -r sa_id <&4; do
     # the third, or the same sentence appears twice on one row.
     if [ -z "$sa_desc" ]; then sa_desc=$sa_label; sa_label=""; fi
     [ -n "$sa_desc" ] || continue     # nothing names this task → unattributable row → keep the default
+    # While a subagent is starting and has no concrete action yet, Claude Code fills `label` with the
+    # description, so the same sentence would be printed twice (45 of 316 rows in the captured sample —
+    # 14%). Equal after trimming → drop the THIRD segment, keeping the description that names the task.
+    # Trimming is the ONLY normalisation: no case folding, no width folding, no squeezing of inner
+    # whitespace. Those would merge strings that genuinely differ, and if the label really is a different
+    # activity, showing it matters more than saving a segment. The printed description keeps its own
+    # spacing verbatim — the trim decides the comparison, never the output.
+    if [ -n "$sa_label" ]; then
+        sa_trim "$sa_desc"; sa_dtrim=$_trim
+        sa_trim "$sa_label"
+        [ "$sa_dtrim" != "$_trim" ] || sa_label=""
+    fi
     sa_model_name "$sa_model"
     sa_window "$sa_win"
-    sa_render "$sa_desc" "${MD}${_mname}${RS}${_win}" "$sa_label" "$sa_cols"
+    sa_tokens "$sa_tokc"
+    sa_render "$sa_desc" "${MD}${_mname}${RS}${_win}" "$_tok_seg" "$sa_label" "$sa_cols"
     sa_out[${#sa_out[@]}]=$sa_id
     sa_out[${#sa_out[@]}]=$_content
 done

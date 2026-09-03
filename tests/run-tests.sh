@@ -1735,6 +1735,12 @@ for line in sys.stdin.read().splitlines():
 sys.stdout.write(out)' "$1"
 }
 
+sasegs() {  # stdin=visible (SGR-stripped) content → how many " │ "-separated segments it has
+  python3 -c '
+import sys
+print(len(sys.stdin.read().rstrip("\n").split(" │ ")))'
+}
+
 sajsonl() {  # stdin=JSON Lines → "OK <n>" when every line is an object with exactly id+content, else the reason
   python3 -c '
 import sys, json
@@ -1759,13 +1765,14 @@ elif m.group(1) != want: print("colour %r, wanted %r" % (m.group(1), want))
 else: print("OK")' "$1" "$2"
 }
 
-samk() {  # $1=model $2=contextWindowSize $3=description $4=label $5=columns — "" omits that field entirely
-  jq -cn --arg m "$1" --arg w "$2" --arg d "$3" --arg l "$4" --arg c "$5" '
+samk() {  # $1=model $2=contextWindowSize $3=description $4=label $5=columns $6=tokenCount — "" omits the field
+  jq -cn --arg m "$1" --arg w "$2" --arg d "$3" --arg l "$4" --arg c "$5" --arg t "${6-}" '
     { tasks: [ {id:"tid"}
         + (if $m == "" then {} else {model:$m} end)
         + (if $w == "" then {} else {contextWindowSize:($w|tonumber)} end)
         + (if $d == "" then {} else {description:$d} end)
-        + (if $l == "" then {} else {label:$l} end) ] }
+        + (if $l == "" then {} else {label:$l} end)
+        + (if $t == "" then {} else {tokenCount:($t|tonumber)} end) ] }
     + (if $c == "" then {} else {columns:($c|tonumber)} end)'
 }
 
@@ -1859,6 +1866,89 @@ case "$sa2f" in *IDLESS*) echo "  ★ FAIL row with no id was emitted: [$sa2f]";
 sactl_check "$sa2f" || sa2bad=1
 [ "$sa2bad" -eq 0 ] && echo "  no-model(x2) / no-id / promoted-label / dropped-label / unattributable all fall back OK" || fail=1
 
+echo "── SA2B. SUBAGENT: An activity label that only repeats the description is dropped"
+# Claude Code fills `label` with the description while a subagent is starting and has no concrete action
+# yet, so 45 of the 316 rows in the captured sample (14%) print the same sentence twice. Equal after
+# trimming → drop the THIRD segment and the separator before it. Trimming is the ONLY normalisation:
+# no case folding, no width folding, no squeezing of inner whitespace — those would silently merge two
+# genuinely different strings, and showing the real activity matters more than saving one segment.
+sa2bbad=0
+# (a) identical → exactly two segments, and it is the LABEL that went, not the description
+sa2ba=$(sarun "$(samk claude-sonnet-5 1000000 SAMETEXT SAMETEXT 120)" | saraw tid | nocol)
+[ "$sa2ba" = "SAMETEXT │ Sonnet 5(1M)" ] || { echo "  ★ FAIL identical label not dropped: wanted [SAMETEXT │ Sonnet 5(1M)], got [$sa2ba]"; sa2bbad=1; }
+# (b) identical only after trimming → still dropped; the description keeps its own spacing verbatim
+# The exact string matters, not just the segment count: the two candidates differ ONLY in their
+# surrounding spaces, so comparing text is the one way to prove the DESCRIPTION was kept and the label
+# dropped rather than the other way round. A segment count cannot tell those two apart.
+sa2bb=$(sarun "$(samk claude-sonnet-5 1000000 '  SAMETEXT  ' SAMETEXT 120)" | saraw tid | nocol)
+sa2bbn=$(printf '%s' "$sa2bb" | sasegs)
+[ "$sa2bbn" -eq 2 ] || { echo "  ★ FAIL label differing only by surrounding spaces was kept ($sa2bbn segments): [$sa2bb]"; sa2bbad=1; }
+[ "$sa2bb" = "  SAMETEXT   │ Sonnet 5(1M)" ] || { echo "  ★ FAIL kept the label instead of the description (spacing differs): got [$sa2bb]"; sa2bbad=1; }
+# (c) CONTROL: genuinely different → all three segments survive. Guards against fixing (a) by always
+#     dropping the label.
+sa2bc=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120)" | saraw tid | nocol)
+[ "$sa2bc" = "DESCR │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL different label was not kept: wanted [DESCR │ Sonnet 5(1M) │ LABEL], got [$sa2bc]"; sa2bbad=1; }
+# (d) CONTROL: differing only in case is NOT the same string — no case folding
+sa2bd=$(sarun "$(samk claude-sonnet-5 1000000 'Run Tests' 'run tests' 120)" | saraw tid | nocol)
+sa2bdn=$(printf '%s' "$sa2bd" | sasegs)
+[ "$sa2bdn" -eq 3 ] || { echo "  ★ FAIL case-folded comparison dropped a different label ($sa2bdn segments): [$sa2bd]"; sa2bbad=1; }
+# (e) CONTROL: differing only in inner whitespace is NOT the same string — no whitespace squeezing
+sa2be=$(sarun "$(samk claude-sonnet-5 1000000 'a  b' 'a b' 120)" | saraw tid | nocol)
+sa2ben=$(printf '%s' "$sa2be" | sasegs)
+[ "$sa2ben" -eq 3 ] || { echo "  ★ FAIL inner whitespace was squeezed before comparing ($sa2ben segments): [$sa2be]"; sa2bbad=1; }
+# (f) the real captured shape this rule exists for
+sa2bf=$(sarun '{"columns":160,"tasks":[{"id":"tid","type":"local_agent","status":"running","description":"Codex: review relay guard design","label":"Codex: review relay guard design","model":"claude-sonnet-5","contextWindowSize":1000000}]}' | saraw tid | nocol)
+[ "$sa2bf" = "Codex: review relay guard design │ Sonnet 5(1M)" ] || { echo "  ★ FAIL real duplicated frame: [$sa2bf]"; sa2bbad=1; }
+[ "$sa2bbad" -eq 0 ] && echo "  identical / trim-identical dropped; different, case-differing, spacing-differing all kept OK" || fail=1
+
+echo "── SA2T. SUBAGENT: Token usage segment — position, colour, absence, and truncation immunity"
+# The user asked to see how many tokens each subagent has burned. It sits AFTER the model segment and
+# BEFORE the label: model and usage are both "this subagent's resource state" and read well together,
+# while the label is the longest field and the one that should absorb a narrow terminal first.
+# Colour is WH, deliberately NOT YL: on this line YL already means "the context window was cut down"
+# (the shrunken-window marker), and the single status line uses YL for its own subagent-token total.
+# Two different yellows on one row would make the warning unreadable, so usage takes the plain text role.
+sa2tbad=0
+# (a) position and format together — one exact string covers order, separator count and fmt_tok's shape
+sa2ta=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 262414)" | saraw tid | nocol)
+[ "$sa2ta" = "DESCR │ Sonnet 5(1M) │ 262k │ LABEL" ] || { echo "  ★ FAIL token segment position/format: wanted [DESCR │ Sonnet 5(1M) │ 262k │ LABEL], got [$sa2ta]"; sa2tbad=1; }
+# (b) colour ROLE is the plain-text one, not the warning one
+sa2tb=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 262414)" | saraw tid | sacolat '262k' "$SAWH")
+[ "$sa2tb" = OK ] || { echo "  ★ FAIL token segment colour role (must be WH, not the YL used by the window warning): $sa2tb"; sa2tbad=1; }
+# (c) absent → the segment AND the separator before it are gone; nothing else moves
+sa2tc=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120)" | saraw tid | nocol)
+[ "$sa2tc" = "DESCR │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL absent tokenCount: wanted [DESCR │ Sonnet 5(1M) │ LABEL], got [$sa2tc]"; sa2tbad=1; }
+# (d) non-numeric → same omission, no placeholder, and the rest of the payload still renders
+sa2td=$(sarun '{"columns":120,"tasks":[{"id":"tid","model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL","tokenCount":"abc"},'"$SACTL"']}')
+sa2tdc=$(printf '%s' "$sa2td" | saraw tid | nocol)
+[ "$sa2tdc" = "DESCR │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL non-numeric tokenCount: wanted [DESCR │ Sonnet 5(1M) │ LABEL], got [$sa2tdc]"; sa2tbad=1; }
+sactl_check "$sa2td" || sa2tbad=1
+# (e) zero → omitted, matching the single status line's own "subagent tokens only when >0" rule. A zero
+#     is a real number, so this is a display decision, not a parse failure: a subagent that has burned
+#     nothing yet has nothing to report, and "0" would be one more column of noise on every fresh row.
+sa2te=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 0)" | saraw tid | nocol)
+[ "$sa2te" = "DESCR │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL zero tokenCount should be omitted, got [$sa2te]"; sa2tbad=1; }
+# (f) string-typed with a leading zero: jq's tostring erases the JSON type, and bash reads a leading zero
+#     as OCTAL. Same hazard as the window size — 0262414 as octal is 91916, i.e. a confidently wrong 91k.
+sa2tf=$(sarun '{"columns":120,"tasks":[{"id":"tid","model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL","tokenCount":"0262414"}]}' | saraw tid | nocol)
+[ "$sa2tf" = "DESCR │ Sonnet 5(1M) │ 262k │ LABEL" ] || { echo "  ★ FAIL leading-zero tokenCount read as octal: wanted [… │ 262k │ LABEL], got [$sa2tf]"; sa2tbad=1; }
+# (g) narrow: the label is sacrificed first; model AND token both survive whole
+sa2tg=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that will not fit' 44 262414)" | saraw tid | nocol)
+sa2tgw=$(printf '%s' "$sa2tg" | vw)
+[ "$sa2tgw" -le 44 ] || { echo "  ★ FAIL width $sa2tgw > 44: [$sa2tg]"; sa2tbad=1; }
+case "$sa2tg" in *'Sonnet 5(1M)'*) ;; *) echo "  ★ FAIL model segment truncated: [$sa2tg]"; sa2tbad=1 ;; esac
+case "$sa2tg" in *'262k'*) ;; *) echo "  ★ FAIL token segment truncated at width 44: [$sa2tg]"; sa2tbad=1 ;; esac
+case "$sa2tg" in *DESCRIPTION*) ;; *) echo "  ★ FAIL description sacrificed before the label: [$sa2tg]"; sa2tbad=1 ;; esac
+# (h) narrower: label gone, description truncated, model and token still whole
+sa2th=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that will not fit' 30 262414)" | saraw tid | nocol)
+sa2thw=$(printf '%s' "$sa2th" | vw)
+[ "$sa2thw" -le 30 ] || { echo "  ★ FAIL width $sa2thw > 30: [$sa2th]"; sa2tbad=1; }
+case "$sa2th" in *'Sonnet 5(1M)'*'262k'*) ;; *) echo "  ★ FAIL model+token not both intact at width 30: [$sa2th]"; sa2tbad=1 ;; esac
+# (i) narrowest: everything else is gone and the two protected segments are all that is left, in order
+sa2ti=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label' 20 262414)" | saraw tid | nocol)
+[ "$sa2ti" = "Sonnet 5(1M) │ 262k" ] || { echo "  ★ FAIL narrowest tier: wanted [Sonnet 5(1M) │ 262k], got [$sa2ti]"; sa2tbad=1; }
+[ "$sa2tbad" -eq 0 ] && echo "  position/format/colour, absent+non-numeric+zero omitted, octal guard, never truncated OK" || fail=1
+
 echo "── SA3. SUBAGENT: Per-task subagent line content + Context-window marker signals a shrunken window"
 sa3bad=0
 # Real captured frames, embedded verbatim so this section stays hermetic if scratchpad is ever cleared.
@@ -1867,12 +1957,16 @@ SAREAL2='{"columns":160,"tasks":[{"id":"aa0603d3a354ff732","type":"local_agent",
 sa3j=$(sarun "$SAREAL1" | sajsonl)
 case "$sa3j" in "OK 1") ;; *) echo "  ★ FAIL real 1-task frame is not clean JSON Lines: [$sa3j]"; sa3bad=1 ;; esac
 sa3a=$(sarun "$SAREAL1" | saraw ab4c560a44129c990 | nocol)
-[ "$sa3a" = "實作 wrap-up 感知的 ctx guard │ Opus 5(1M) │ Extracting command-args from wrap-up envelopes" ] \
+# tokenCount 254074 in this captured frame renders as the 254k segment between model and label.
+[ "$sa3a" = "實作 wrap-up 感知的 ctx guard │ Opus 5(1M) │ 254k │ Extracting command-args from wrap-up envelopes" ] \
   || { echo "  ★ FAIL real frame content: [$sa3a]"; sa3bad=1; }
 sa3j2=$(sarun "$SAREAL2" | sajsonl)
 case "$sa3j2" in "OK 2") ;; *) echo "  ★ FAIL real 2-task frame did not yield 2 clean records: [$sa3j2]"; sa3bad=1 ;; esac
+# The second task of this captured frame carries label == description (the starting-up shape), so its
+# third segment is dropped by the duplicate-label rule in SA2B. Both tasks of the frame must still be
+# emitted — that is what this assertion is here for.
 sa3b=$(sarun "$SAREAL2" | saraw acee8f6f3483fcf1f | nocol)
-[ "$sa3b" = "Codex: review relay guard design │ Sonnet 5(1M) │ Codex: review relay guard design" ] \
+[ "$sa3b" = "Codex: review relay guard design │ Sonnet 5(1M)" ] \
   || { echo "  ★ FAIL second task of the real 2-task frame: [$sa3b]"; sa3bad=1; }
 # 1M window: marker present and drawn in the MODEL role (normal state)
 sa3c=$(sarun "$(samk claude-sonnet-5 1000000 d l 120)" | saraw tid | sacolat '(1M)' "$SAMD")

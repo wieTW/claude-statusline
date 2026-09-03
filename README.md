@@ -192,20 +192,28 @@ If nothing opens, check `ls ~/.claude/sl-cwd/` — it should hold one file per o
 ### Subagent rows
 
 Claude Code lists the subagents it is currently running, one row each, and by default a row shows only the
-current activity. Run three at once and you cannot tell which one is on the expensive model, or whose context
-window got cut to 200K. `subagent-status-line.sh` takes those rows over and answers both at a glance:
+current activity. Run three at once and you cannot tell which one is on the expensive model, whose context
+window got cut to 200K, or which one is burning your quota. `subagent-status-line.sh` takes those rows over:
 
 ```
-撈 shell 坑清單並觸發探針 │ Opus 5(1M)     │ Answering in present tense without tools.
-Remove library-divergence-watch │ Sonnet 5(200K) │ Reading threshold-watch.sh
-no window size reported │ Haiku 4.5      │ bracket omitted entirely
+實作 subagent 狀態列 │ Opus 5(1M) │ 262k │ Updating sa3b expectation in run-tests.sh
+Remove library-divergence-watch │ Sonnet 5(200K) │ 43k │ Reading threshold-watch.sh
+Codex: review relay guard design │ Sonnet 5(1M)
+no window size reported │ Haiku 4.5 │ 1.2M │ bracket omitted, 7-digit tokens
 ```
 
-Task description, then the model with its context window, then what it is doing. The window marker is the point:
-`(1M)` sits in the model's own colour because that is normal, while anything smaller turns warning-yellow — a
-shrunken window is the thing you want to notice. No window reported means no bracket at all; the line never
-guesses a size, and it never guesses a model name either (the display name is derived from the model id by rule,
-so a model this script has never heard of shows its real id rather than some older model's name).
+Task description, the model with its context window, the tokens it has burned, then what it is doing.
+
+The window marker is the point of the second segment: `(1M)` sits in the model's own colour because that is
+normal, while anything smaller turns warning-yellow — a shrunken window is the thing you want to notice. Token
+usage is deliberately *not* yellow: yellow already means "window cut down" here, and the main status line uses
+it for its own subagent-token total, so a second yellow would make the actual warning unreadable.
+
+Nothing is ever guessed. No window reported means no bracket at all, no token count means no token segment, and
+the model display name is derived from the model id by rule, so a model this script has never heard of shows its
+real id rather than some older model's name. The third row above shows two of those omissions at once: Claude
+Code fills `label` with the description while an agent is starting, so a row that would print the same sentence
+twice prints it once, and a subagent that has burned nothing yet reports nothing rather than `0`.
 
 It is a second entry point, wired up separately and **not** touched by `install.sh` — add it to
 `~/.claude/settings.json` yourself:
@@ -221,8 +229,10 @@ It is a second entry point, wired up separately and **not** touched by `install.
 
 That setting takes only those two fields; there is no refresh interval or padding to set. If a row is missing the
 information this line exists to show, the script simply says nothing about that row and Claude Code keeps its own
-default display for it — so the worst case is what you have today, never a wrong model name. One thing it cannot
-show: the subagent's *agent type*. It is not in the payload Claude Code sends.
+default display for it — so the worst case is what you have today, never a wrong model name. When the terminal is
+narrow the activity label is shortened first and the description second; the model and token segments are never
+truncated, because they are what the row was added to carry. One thing it cannot show: the subagent's *agent
+type*. It is not in the payload Claude Code sends.
 
 ---
 
