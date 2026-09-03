@@ -245,9 +245,16 @@ Every screenshot above is real output — `bash assets/generate.sh` re-renders t
 the actual script, so if they look wrong, something *is* wrong.
 
 ```bash
-# Render one frame by hand — the fastest dev loop (COLUMNS sets the width)
+# Render one frame by hand — the fastest dev loop (--columns sets the width).
+#
+# Always go through sandbox-run.sh; never pipe into statusline-command.sh directly.
+# Rendering a frame WRITES to the cross-session rate-limit cache
+# (~/.claude/sl-ratelimit-cache), where the authority rule is "freshest observation
+# wins". On 2026-08-31 a single demo frame run as session id `sl-sepdemo` flipped the
+# 7d segment from "84% left / 6D15H" to a red "16% left / 1D7H" in EVERY open session.
+# sandbox-run.sh points HOME at a temp directory, so a bad frame can only corrupt that.
 printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M context)"},"context_window":{"used_percentage":42}}' "$PWD" \
-  | COLUMNS=140 bash statusline-command.sh
+  | scripts/sandbox-run.sh --columns 140
 
 # Full check before committing
 bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh   # syntax
