@@ -1807,9 +1807,11 @@ else
 fi
 [ "$sa1bad" -eq 0 ] && echo "  sonnet-5 / opus-5[1m] / haiku-4-5 / opus-4-8 / unrecognised + bash 3.2 parity OK" || fail=1
 
-echo "── SA2. SUBAGENT: Absent fields fall back to Claude Code's default row (no model / no description / no label)"
+echo "── SA2. SUBAGENT: Absent fields fall back to Claude Code's default row (each guard isolated)"
 sa2bad=0
-# (a) the smoke-test row captured alongside the real frames: id + name only, no model, no window, no description
+# (a) the smoke-test row captured alongside the real frames: id + name only. NOTE it is missing model AND
+#     description AND label at once, so on its own it proves nothing about WHICH guard rejected it — (e)
+#     and (f) below isolate the two that this row cannot. Keep it anyway: it is the real captured shape.
 sa2out=$(sarun '{"tasks":[{"id":"t1","name":"demo"}],"columns":120}'); sa2rc=$?
 [ "$sa2rc" -eq 0 ] || { echo "  ★ FAIL exit $sa2rc on a row carrying no model"; sa2bad=1; }
 case "$sa2out" in *t1*) echo "  ★ FAIL a row with no model was emitted: [$sa2out]"; sa2bad=1 ;; esac
@@ -1822,7 +1824,17 @@ sa2c=$(sarun "$(samk claude-sonnet-5 1000000 DESCR '' 120)" | saraw tid | nocol)
 # (d) neither description nor label → the row cannot be attributed to any task, so it keeps its default row
 sa2d=$(sarun "$(samk claude-sonnet-5 1000000 '' '' 120)")
 case "$sa2d" in *tid*) echo "  ★ FAIL row with no description and no label was emitted: [$sa2d]"; sa2bad=1 ;; esac
-[ "$sa2bad" -eq 0 ] && echo "  no-model / promoted-label / dropped-label / unattributable all fall back OK" || fail=1
+# (e) model absent but description AND label both present — the case (a) cannot see. Without this fixture,
+#     deleting the model check leaves the whole suite green while a row renders with an EMPTY model segment,
+#     which is precisely the "never show a wrong model" rule inverted.
+sa2e=$(sarun '{"columns":120,"tasks":[{"id":"noModelRow","description":"DESCR","label":"LABEL"}]}'); sa2erc=$?
+[ "$sa2erc" -eq 0 ] || { echo "  ★ FAIL exit $sa2erc on a row with no model but a full description and label"; sa2bad=1; }
+case "$sa2e" in *noModelRow*) echo "  ★ FAIL model-less row emitted despite having description+label: [$sa2e]"; sa2bad=1 ;; esac
+# (f) id absent, everything else present. An emitted record keyed on an empty id addresses no row at all, and
+#     Claude Code would be handed {"id":"",…}. Nothing else in the suite feeds an id-less task.
+sa2f=$(sarun '{"columns":120,"tasks":[{"model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL"}]}')
+[ -z "$sa2f" ] || { echo "  ★ FAIL row with no id was emitted: [$sa2f]"; sa2bad=1; }
+[ "$sa2bad" -eq 0 ] && echo "  no-model(x2) / no-id / promoted-label / dropped-label / unattributable all fall back OK" || fail=1
 
 echo "── SA3. SUBAGENT: Per-task subagent line content + Context-window marker signals a shrunken window"
 sa3bad=0
