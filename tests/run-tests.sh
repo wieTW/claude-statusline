@@ -1710,6 +1710,191 @@ rm -f "$qdir/claude-opus-4-8"
 
 [ "$qbad" -eq 0 ] && echo "  quota label + value + marker + no-cache + unknown-model + off-by-default + ladder OK" || fail=1
 
+# ── SUBAGENT STATUS LINE (SA1-SA4) ──────────────────────────────────────────────────────────────────
+# Second entry point. subagent-status-line.sh reads the subagent status JSON on stdin and prints JSON Lines
+# ({"id":…,"content":…}), one record per task row it takes over. A task id it does NOT print keeps Claude
+# Code's own default row, and that guaranteed fallback is this script's ONLY error path — so "emitted nothing
+# for this id" is a PASS condition in several cases below, never an accident to be papered over.
+# HOME is pinned to $FAKE_HOME like every other invocation in this file: the script resolves the user's theme
+# from ~/.claude.json, and the real one would make the palette (hence the emitted SGR bytes) machine-dependent.
+SASCRIPT="$SL/subagent-status-line.sh"
+
+sarun() {   # $1=payload JSON → JSON Lines on stdout
+  printf '%s' "$1" | env HOME="$FAKE_HOME" bash "$SASCRIPT"
+}
+
+saraw() {   # stdin=JSON Lines, $1=task id → that record's content verbatim (empty when the id was not emitted)
+  # Must run via -c, NOT heredoc: a heredoc steals stdin so the data side would read nothing (harness-wide rule).
+  python3 -c '
+import sys, json
+want = sys.argv[1]; out = ""
+for line in sys.stdin.read().splitlines():
+    if not line.strip(): continue
+    o = json.loads(line)
+    if o.get("id") == want: out = o.get("content", "")
+sys.stdout.write(out)' "$1"
+}
+
+sajsonl() {  # stdin=JSON Lines → "OK <n>" when every line is an object with exactly id+content, else the reason
+  python3 -c '
+import sys, json
+n = 0
+for line in sys.stdin.read().splitlines():
+    if not line.strip(): continue
+    try: o = json.loads(line)
+    except Exception as e: print("bad JSON line: %s" % e); sys.exit(0)
+    if not isinstance(o, dict): print("line is not an object"); sys.exit(0)
+    if set(o) != {"id", "content"}: print("unexpected keys: %r" % sorted(o)); sys.exit(0)
+    n += 1
+print("OK %d" % n)'
+}
+
+sacolat() {  # stdin=raw content, $1=text to locate, $2=expected SGR prefix → "OK" or the mismatch
+  python3 -c '
+import sys, re
+s = sys.stdin.read(); needle = sys.argv[1]; want = sys.argv[2]
+m = re.search(r"(\x1b\[[0-9;]*m)" + re.escape(needle), s)
+if not m: print("not found: %r" % needle)
+elif m.group(1) != want: print("colour %r, wanted %r" % (m.group(1), want))
+else: print("OK")' "$1" "$2"
+}
+
+samk() {  # $1=model $2=contextWindowSize $3=description $4=label $5=columns — "" omits that field entirely
+  jq -cn --arg m "$1" --arg w "$2" --arg d "$3" --arg l "$4" --arg c "$5" '
+    { tasks: [ {id:"tid"}
+        + (if $m == "" then {} else {model:$m} end)
+        + (if $w == "" then {} else {contextWindowSize:($w|tonumber)} end)
+        + (if $d == "" then {} else {description:$d} end)
+        + (if $l == "" then {} else {label:$l} end) ] }
+    + (if $c == "" then {} else {columns:($c|tonumber)} end)'
+}
+
+# The palette the script itself will load: same STYLE source (statusline-command.sh's knob, pulled the way
+# EDGE_PAD/JGAP are above) and same empty-theme = dark path. Asserting against the ROLE (MD / YL) rather than
+# a hardcoded RGB keeps these checks true under any STYLE. Caveat: rose-pine defines MD and YL as the same
+# bytes, so under that style the two colour asserts stop being able to tell the roles apart (they still pass).
+SASTYLE=$(sed -n 's/^STYLE="\([^"]*\)".*/\1/p' "$SL/statusline-command.sh")
+SAMD=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$MD" )
+SAYL=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$YL" )
+
+echo "── SA1. SUBAGENT: Model display name derived by rule, never by lookup table (five derivation cases)"
+sa1bad=0
+sacase() {  # $1=model identifier $2=expected display name
+  local got
+  got=$(sarun "$(samk "$1" 1000000 d l 120)" | saraw tid | nocol)
+  if [ "$got" = "d │ $2(1M) │ l" ]; then :; else
+    echo "  ★ FAIL model [$1] → wanted [d │ $2(1M) │ l], got [$got]"; sa1bad=1
+  fi
+}
+sacase 'claude-sonnet-5'   'Sonnet 5'
+sacase 'claude-opus-5[1m]' 'Opus 5'
+sacase 'claude-haiku-4-5'  'Haiku 4.5'
+sacase 'claude-opus-4-8'   'Opus 4.8'
+sacase 'claude-mystery'    'mystery'     # no numeric segment: printed verbatim after prefix strip, never guessed
+# The harness's `bash` is whatever PATH resolves first (homebrew bash 5 on this machine), so nothing above
+# can prove the project's "target bash 3.2" rule. macOS's system bash IS 3.2.57: render the same frame
+# through it and demand byte-identical output, so a bash-4-only construct fails here and not on a user's
+# machine. A missing /bin/bash is reported as a skip, never counted as a pass.
+if [ -x /bin/bash ]; then
+  sa1p=$(samk claude-haiku-4-5 200000 DESCR LABEL 120)
+  sa1a=$(printf '%s' "$sa1p" | env HOME="$FAKE_HOME" bash "$SASCRIPT")
+  sa1b=$(printf '%s' "$sa1p" | env HOME="$FAKE_HOME" /bin/bash "$SASCRIPT")
+  if [ -n "$sa1b" ] && [ "$sa1a" = "$sa1b" ]; then :; else
+    echo "  ★ FAIL system bash 3.2 renders differently from PATH bash"; echo "    PATH bash: [$sa1a]"; echo "    bash 3.2 : [$sa1b]"; sa1bad=1
+  fi
+else
+  echo "  NOTE /bin/bash absent — the bash 3.2 cross-check did NOT run and is NOT a pass"
+fi
+[ "$sa1bad" -eq 0 ] && echo "  sonnet-5 / opus-5[1m] / haiku-4-5 / opus-4-8 / unrecognised + bash 3.2 parity OK" || fail=1
+
+echo "── SA2. SUBAGENT: Absent fields fall back to Claude Code's default row (no model / no description / no label)"
+sa2bad=0
+# (a) the smoke-test row captured alongside the real frames: id + name only, no model, no window, no description
+sa2out=$(sarun '{"tasks":[{"id":"t1","name":"demo"}],"columns":120}'); sa2rc=$?
+[ "$sa2rc" -eq 0 ] || { echo "  ★ FAIL exit $sa2rc on a row carrying no model"; sa2bad=1; }
+case "$sa2out" in *t1*) echo "  ★ FAIL a row with no model was emitted: [$sa2out]"; sa2bad=1 ;; esac
+# (b) description absent, label present → label is promoted to the first segment and NOT repeated as the third
+sa2b=$(sarun "$(samk claude-sonnet-5 1000000 '' PROMOTED 120)" | saraw tid | nocol)
+[ "$sa2b" = "PROMOTED │ Sonnet 5(1M)" ] || { echo "  ★ FAIL promoted label: wanted [PROMOTED │ Sonnet 5(1M)], got [$sa2b]"; sa2bad=1; }
+# (c) label absent → the third segment and the separator before it are both gone
+sa2c=$(sarun "$(samk claude-sonnet-5 1000000 DESCR '' 120)" | saraw tid | nocol)
+[ "$sa2c" = "DESCR │ Sonnet 5(1M)" ] || { echo "  ★ FAIL missing label: wanted [DESCR │ Sonnet 5(1M)], got [$sa2c]"; sa2bad=1; }
+# (d) neither description nor label → the row cannot be attributed to any task, so it keeps its default row
+sa2d=$(sarun "$(samk claude-sonnet-5 1000000 '' '' 120)")
+case "$sa2d" in *tid*) echo "  ★ FAIL row with no description and no label was emitted: [$sa2d]"; sa2bad=1 ;; esac
+[ "$sa2bad" -eq 0 ] && echo "  no-model / promoted-label / dropped-label / unattributable all fall back OK" || fail=1
+
+echo "── SA3. SUBAGENT: Per-task subagent line content + Context-window marker signals a shrunken window"
+sa3bad=0
+# Real captured frames, embedded verbatim so this section stays hermetic if scratchpad is ever cleared.
+SAREAL1='{"session_id":"ceffb128-b1cd-4561-b8a7-0b522a1f582c","cwd":"/Users/will/Downloads/macOS","agent_type":"commander","columns":160,"tasks":[{"id":"ab4c560a44129c990","type":"local_agent","status":"running","description":"實作 wrap-up 感知的 ctx guard","label":"Extracting command-args from wrap-up envelopes","startTime":1788426930573,"model":"claude-opus-5[1m]","contextWindowSize":1000000,"tokenCount":254074,"tokenSamples":[254074],"cwd":"/Users/will/Downloads/macOS"}]}'
+SAREAL2='{"columns":160,"tasks":[{"id":"aa0603d3a354ff732","type":"local_agent","status":"running","description":"Remove library-divergence-watch","label":"Reading threshold-watch.sh","startTime":1788427330881,"model":"claude-sonnet-5","contextWindowSize":1000000,"tokenCount":66562},{"id":"acee8f6f3483fcf1f","type":"local_agent","status":"running","description":"Codex: review relay guard design","label":"Codex: review relay guard design","startTime":1788427376910,"model":"claude-sonnet-5","contextWindowSize":1000000,"tokenCount":0}]}'
+sa3j=$(sarun "$SAREAL1" | sajsonl)
+case "$sa3j" in "OK 1") ;; *) echo "  ★ FAIL real 1-task frame is not clean JSON Lines: [$sa3j]"; sa3bad=1 ;; esac
+sa3a=$(sarun "$SAREAL1" | saraw ab4c560a44129c990 | nocol)
+[ "$sa3a" = "實作 wrap-up 感知的 ctx guard │ Opus 5(1M) │ Extracting command-args from wrap-up envelopes" ] \
+  || { echo "  ★ FAIL real frame content: [$sa3a]"; sa3bad=1; }
+sa3j2=$(sarun "$SAREAL2" | sajsonl)
+case "$sa3j2" in "OK 2") ;; *) echo "  ★ FAIL real 2-task frame did not yield 2 clean records: [$sa3j2]"; sa3bad=1 ;; esac
+sa3b=$(sarun "$SAREAL2" | saraw acee8f6f3483fcf1f | nocol)
+[ "$sa3b" = "Codex: review relay guard design │ Sonnet 5(1M) │ Codex: review relay guard design" ] \
+  || { echo "  ★ FAIL second task of the real 2-task frame: [$sa3b]"; sa3bad=1; }
+# 1M window: marker present and drawn in the MODEL role (normal state)
+sa3c=$(sarun "$(samk claude-sonnet-5 1000000 d l 120)" | saraw tid | sacolat '(1M)' "$SAMD")
+[ "$sa3c" = OK ] || { echo "  ★ FAIL (1M) marker colour: $sa3c"; sa3bad=1; }
+# shrunken window: 200K in the WARNING role — the whole point of the marker
+sa3d=$(sarun "$(samk claude-sonnet-5 200000 d l 120)" | saraw tid | nocol)
+[ "$sa3d" = "d │ Sonnet 5(200K) │ l" ] || { echo "  ★ FAIL 200K marker text: [$sa3d]"; sa3bad=1; }
+sa3e=$(sarun "$(samk claude-sonnet-5 200000 d l 120)" | saraw tid | sacolat '(200K)' "$SAYL")
+[ "$sa3e" = OK ] || { echo "  ★ FAIL (200K) marker colour: $sa3e"; sa3bad=1; }
+# window size absent → the whole bracket is omitted; no "(?)" and no guessed default
+sa3f=$(sarun "$(samk claude-sonnet-5 '' d l 120)" | saraw tid | nocol)
+[ "$sa3f" = "d │ Sonnet 5 │ l" ] || { echo "  ★ FAIL absent window size: wanted [d │ Sonnet 5 │ l], got [$sa3f]"; sa3bad=1; }
+[ "$sa3bad" -eq 0 ] && echo "  real 1-task + 2-task frames, JSON Lines shape, 1M/200K/absent markers OK" || fail=1
+
+echo "── SA4. SUBAGENT: Untrusted input is sanitised + Width is bounded by the reported column count"
+sa4bad=0
+# (a) a raw ESC in a field never reaches the terminal, and the REST of the field survives (a regex-based
+#     control-char filter would strip the lot — jq's Oniguruma does not honour \u escapes in a class)
+sa4esc=$(sarun "$(samk claude-sonnet-5 1000000 "$(printf 'A\033[1ZmB')" l 120)" | saraw tid)
+case "$sa4esc" in *$'\033''[1Z'*) echo "  ★ FAIL raw ESC survived into content"; sa4bad=1 ;; esac
+case "$(printf '%s' "$sa4esc" | nocol)" in *'A[1ZmB'*) ;; *) echo "  ★ FAIL field was gutted instead of stripped: [$(printf '%s' "$sa4esc" | nocol)]"; sa4bad=1 ;; esac
+# (b) the 8-bit C1 CSI (U+009B) is the same injection class as a raw ESC and is stripped too
+sa4c1=$(sarun '{"columns":120,"tasks":[{"id":"tid","model":"claude-sonnet-5","description":"A\u009b[1ZmB","label":"l"}]}' | saraw tid | nocol)
+case "$sa4c1" in *'A[1ZmB'*) ;; *) echo "  ★ FAIL C1 CSI case: [$sa4c1]"; sa4bad=1 ;; esac
+case "$sa4c1" in *$'\302\233'*) echo "  ★ FAIL U+009B survived into content"; sa4bad=1 ;; esac
+# (c) structural surprises yield zero records and a clean exit — one bad task must not abort every task's line
+for sa4in in '{"tasks":"not-an-array","columns":120}' '["not","an","object"]' '{"tasks":["not-an-object"],"columns":120}' '' 'not json at all'; do
+  sa4o=$(sarun "$sa4in"); sa4rc=$?
+  [ "$sa4rc" -eq 0 ] || { echo "  ★ FAIL exit $sa4rc on structurally invalid input [$sa4in]"; sa4bad=1; }
+  [ -z "$sa4o" ]     || { echo "  ★ FAIL output on structurally invalid input [$sa4in]: [$sa4o]"; sa4bad=1; }
+done
+# (d) an 8KB description is capped, so vis_width's quadratic ASCII strip cannot stall the frame
+SABIG=$(printf 'x%.0s' $(seq 1 8000))
+SECONDS=0
+sa4big=$(sarun "$(samk claude-sonnet-5 1000000 "$SABIG" l '')" | saraw tid | vw)
+# The lower bound matters as much as the upper one: without it an empty output (script gone, script broken)
+# would sail through this check as "nicely bounded". 256 capped description + " | " + model + " | " + "l" = 275.
+if [ "$SECONDS" -lt 3 ] && [ "$sa4big" -le 300 ] && [ "$sa4big" -ge 260 ]; then echo "  8KB description → width $sa4big in ${SECONDS}s OK"
+else echo "  ★ FAIL 8KB description: width $sa4big in ${SECONDS}s (want 260..300 — the 256-codepoint cap plus the other segments)"; sa4bad=1; fi
+# (e) too narrow → the activity label is sacrificed FIRST; description and model segment stay whole
+sa4n=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that cannot possibly fit' 40)" | saraw tid | nocol)
+sa4w=$(printf '%s' "$sa4n" | vw)
+[ "$sa4w" -le 40 ]      || { echo "  ★ FAIL narrow width $sa4w > 40: [$sa4n]"; sa4bad=1; }
+case "$sa4n" in *'Sonnet 5(1M)'*) ;; *) echo "  ★ FAIL model segment truncated at width 40: [$sa4n]"; sa4bad=1 ;; esac
+case "$sa4n" in *DESCRIPTION*)     ;; *) echo "  ★ FAIL description sacrificed before the label: [$sa4n]"; sa4bad=1 ;; esac
+case "$sa4n" in *…*)               ;; *) echo "  ★ FAIL label dropped instead of truncated: [$sa4n]"; sa4bad=1 ;; esac
+# (f) narrower still → label goes entirely, description is truncated, model segment SURVIVES INTACT
+sa4t=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that cannot possibly fit' 20)" | saraw tid | nocol)
+sa4tw=$(printf '%s' "$sa4t" | vw)
+[ "$sa4tw" -le 20 ]     || { echo "  ★ FAIL narrowest width $sa4tw > 20: [$sa4t]"; sa4bad=1; }
+case "$sa4t" in *'Sonnet 5(1M)'*) ;; *) echo "  ★ FAIL model segment lost at width 20: [$sa4t]"; sa4bad=1 ;; esac
+# (g) no usable column count → no bounding at all, all three segments intact
+sa4u=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that cannot possibly fit' '')" | saraw tid | nocol)
+[ "$sa4u" = "DESCRIPTION │ Sonnet 5(1M) │ a very long activity label that cannot possibly fit" ] \
+  || { echo "  ★ FAIL unbounded render: [$sa4u]"; sa4bad=1; }
+[ "$sa4bad" -eq 0 ] && echo "  ESC/C1 stripped, structural surprises inert, 256-cap, label-then-description sacrifice OK" || fail=1
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 

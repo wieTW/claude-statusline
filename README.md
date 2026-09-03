@@ -189,6 +189,41 @@ does not interfere: iTerm2 keeps cmd+click for itself.
 
 If nothing opens, check `ls ~/.claude/sl-cwd/` — it should hold one file per open pane, named by that pane's claude pid.
 
+### Subagent rows
+
+Claude Code lists the subagents it is currently running, one row each, and by default a row shows only the
+current activity. Run three at once and you cannot tell which one is on the expensive model, or whose context
+window got cut to 200K. `subagent-status-line.sh` takes those rows over and answers both at a glance:
+
+```
+撈 shell 坑清單並觸發探針 │ Opus 5(1M)     │ Answering in present tense without tools.
+Remove library-divergence-watch │ Sonnet 5(200K) │ Reading threshold-watch.sh
+no window size reported │ Haiku 4.5      │ bracket omitted entirely
+```
+
+Task description, then the model with its context window, then what it is doing. The window marker is the point:
+`(1M)` sits in the model's own colour because that is normal, while anything smaller turns warning-yellow — a
+shrunken window is the thing you want to notice. No window reported means no bracket at all; the line never
+guesses a size, and it never guesses a model name either (the display name is derived from the model id by rule,
+so a model this script has never heard of shows its real id rather than some older model's name).
+
+It is a second entry point, wired up separately and **not** touched by `install.sh` — add it to
+`~/.claude/settings.json` yourself:
+
+```json
+{
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "/path/to/claude-statusline/subagent-status-line.sh"
+  }
+}
+```
+
+That setting takes only those two fields; there is no refresh interval or padding to set. If a row is missing the
+information this line exists to show, the script simply says nothing about that row and Claude Code keeps its own
+default display for it — so the worst case is what you have today, never a wrong model name. One thing it cannot
+show: the subagent's *agent type*. It is not in the payload Claude Code sends.
+
 ---
 
 *If the `↘` ever fires with enough time left to land your commit, a ⭐ helps the next person
