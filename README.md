@@ -245,5 +245,27 @@ shellcheck -x statusline-command.sh                                             
 bash tests/run-tests.sh                                                           # suite → "ALL CHECKS PASSED"
 ```
 
+### Is a test actually testing anything?
+
+A green suite is not evidence that a rule is guarded. `scripts/mutation-check.sh` answers that
+directly: it breaks one thing on purpose, runs the suite, says whether the suite noticed, then puts
+the file back and proves the restore with `cmp`.
+
+```bash
+# Is the "no model -> keep Claude Code's default row" guard actually tested?
+scripts/mutation-check.sh subagent-status-line.sh \
+  '[ -n "$sa_id" ] && [ -n "$sa_model" ] || continue' '[ -n "$sa_id" ] || continue'
+# GUARDED — the suite went red (rc=1). Source restored.
+```
+
+`GAP` instead means nothing tests that rule. Both times it happened here the tests *looked* complete.
+One fixture was missing three fields at once, so the first guard was never reached and deleting it
+changed nothing. Another assertion was negative-only ("this id must not appear"), which a completely
+blank output satisfies just as well as a working guard.
+
+So run the three blanket mutations first — emit nothing, blank every `content`, blank every `id`.
+Any assertion they fail to turn red is a negative-only assertion, and it needs a positive control row
+beside it: a complete row that MUST be emitted, checked by its rendered text rather than by its id.
+
 Architecture, the concurrency model, and the hard rules (bash 3.2 only, never `set -e`,
 input sanitization) live in [`CLAUDE.md`](CLAUDE.md).

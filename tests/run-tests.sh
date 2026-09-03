@@ -1769,6 +1769,20 @@ samk() {  # $1=model $2=contextWindowSize $3=description $4=label $5=columns —
     + (if $c == "" then {} else {columns:($c|tonumber)} end)'
 }
 
+# A complete task row that MUST be emitted, dropped into any payload whose real assertion is negative
+# ("this id must NOT appear"). Without it such an assertion cannot tell "the guard rejected that row"
+# from "the script emitted nothing at all" — a blanket blackout satisfies every negative assertion in
+# the file. The check compares the control row's RENDERED TEXT, not just the presence of its id: one
+# failure mode keeps the id and blanks the content, and an id-only check sails straight through it.
+SACTL='{"id":"controlRow","model":"claude-sonnet-5","contextWindowSize":1000000,"description":"CTLDESC","label":"CTLLABEL"}'
+sactl_check() {  # $1=the whole JSON Lines output → rc 0 when the control row is present AND rendered right
+  local got
+  got=$(printf '%s' "$1" | saraw controlRow | nocol)
+  [ "$got" = "CTLDESC │ Sonnet 5(1M) │ CTLLABEL" ] && return 0
+  echo "  ★ FAIL control row missing or mis-rendered — cannot tell a guard hit from a blackout: [$got]"
+  return 1
+}
+
 # The palette the script itself will load: same STYLE source (statusline-command.sh's knob, pulled the way
 # EDGE_PAD/JGAP are above) and same empty-theme = dark path. Asserting against the ROLE (MD / YL) rather than
 # a hardcoded RGB keeps these checks true under any STYLE. Caveat: rose-pine defines MD and YL as the same
@@ -1776,8 +1790,11 @@ samk() {  # $1=model $2=contextWindowSize $3=description $4=label $5=columns —
 SASTYLE=$(sed -n 's/^STYLE="\([^"]*\)".*/\1/p' "$SL/statusline-command.sh")
 SAMD=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$MD" )
 SAYL=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$YL" )
+SAWH=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$WH" )
+SADM=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$DM" )
+SASP=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$SP" )
 
-echo "── SA1. SUBAGENT: Model display name derived by rule, never by lookup table (five derivation cases)"
+echo "── SA1. SUBAGENT: Model display name derived by rule, never by lookup table (seven derivation cases)"
 sa1bad=0
 sacase() {  # $1=model identifier $2=expected display name
   local got
@@ -1791,6 +1808,8 @@ sacase 'claude-opus-5[1m]' 'Opus 5'
 sacase 'claude-haiku-4-5'  'Haiku 4.5'
 sacase 'claude-opus-4-8'   'Opus 4.8'
 sacase 'claude-mystery'    'mystery'     # no numeric segment: printed verbatim after prefix strip, never guessed
+sacase 'claude-opus-4x'    'opus-4x'     # version segment is not purely numeric → whole remainder verbatim
+sacase 'claude-sonnet4-5'  'sonnet4-5'   # family is not a plain lowercase word → whole remainder verbatim
 # The harness's `bash` is whatever PATH resolves first (homebrew bash 5 on this machine), so nothing above
 # can prove the project's "target bash 3.2" rule. macOS's system bash IS 3.2.57: render the same frame
 # through it and demand byte-identical output, so a bash-4-only construct fails here and not on a user's
@@ -1805,16 +1824,17 @@ if [ -x /bin/bash ]; then
 else
   echo "  NOTE /bin/bash absent — the bash 3.2 cross-check did NOT run and is NOT a pass"
 fi
-[ "$sa1bad" -eq 0 ] && echo "  sonnet-5 / opus-5[1m] / haiku-4-5 / opus-4-8 / unrecognised + bash 3.2 parity OK" || fail=1
+[ "$sa1bad" -eq 0 ] && echo "  sonnet-5 / opus-5[1m] / haiku-4-5 / opus-4-8 / 3 verbatim-fallback shapes + bash 3.2 parity OK" || fail=1
 
 echo "── SA2. SUBAGENT: Absent fields fall back to Claude Code's default row (each guard isolated)"
 sa2bad=0
 # (a) the smoke-test row captured alongside the real frames: id + name only. NOTE it is missing model AND
 #     description AND label at once, so on its own it proves nothing about WHICH guard rejected it — (e)
 #     and (f) below isolate the two that this row cannot. Keep it anyway: it is the real captured shape.
-sa2out=$(sarun '{"tasks":[{"id":"t1","name":"demo"}],"columns":120}'); sa2rc=$?
+sa2out=$(sarun '{"columns":120,"tasks":[{"id":"t1","name":"demo"},'"$SACTL"']}'); sa2rc=$?
 [ "$sa2rc" -eq 0 ] || { echo "  ★ FAIL exit $sa2rc on a row carrying no model"; sa2bad=1; }
 case "$sa2out" in *t1*) echo "  ★ FAIL a row with no model was emitted: [$sa2out]"; sa2bad=1 ;; esac
+sactl_check "$sa2out" || sa2bad=1
 # (b) description absent, label present → label is promoted to the first segment and NOT repeated as the third
 sa2b=$(sarun "$(samk claude-sonnet-5 1000000 '' PROMOTED 120)" | saraw tid | nocol)
 [ "$sa2b" = "PROMOTED │ Sonnet 5(1M)" ] || { echo "  ★ FAIL promoted label: wanted [PROMOTED │ Sonnet 5(1M)], got [$sa2b]"; sa2bad=1; }
@@ -1822,18 +1842,21 @@ sa2b=$(sarun "$(samk claude-sonnet-5 1000000 '' PROMOTED 120)" | saraw tid | noc
 sa2c=$(sarun "$(samk claude-sonnet-5 1000000 DESCR '' 120)" | saraw tid | nocol)
 [ "$sa2c" = "DESCR │ Sonnet 5(1M)" ] || { echo "  ★ FAIL missing label: wanted [DESCR │ Sonnet 5(1M)], got [$sa2c]"; sa2bad=1; }
 # (d) neither description nor label → the row cannot be attributed to any task, so it keeps its default row
-sa2d=$(sarun "$(samk claude-sonnet-5 1000000 '' '' 120)")
-case "$sa2d" in *tid*) echo "  ★ FAIL row with no description and no label was emitted: [$sa2d]"; sa2bad=1 ;; esac
+sa2d=$(sarun '{"columns":120,"tasks":[{"id":"noTextRow","model":"claude-sonnet-5","contextWindowSize":1000000},'"$SACTL"']}')
+case "$sa2d" in *noTextRow*) echo "  ★ FAIL row with no description and no label was emitted: [$sa2d]"; sa2bad=1 ;; esac
+sactl_check "$sa2d" || sa2bad=1
 # (e) model absent but description AND label both present — the case (a) cannot see. Without this fixture,
 #     deleting the model check leaves the whole suite green while a row renders with an EMPTY model segment,
 #     which is precisely the "never show a wrong model" rule inverted.
-sa2e=$(sarun '{"columns":120,"tasks":[{"id":"noModelRow","description":"DESCR","label":"LABEL"}]}'); sa2erc=$?
+sa2e=$(sarun '{"columns":120,"tasks":[{"id":"noModelRow","description":"DESCR","label":"LABEL"},'"$SACTL"']}'); sa2erc=$?
 [ "$sa2erc" -eq 0 ] || { echo "  ★ FAIL exit $sa2erc on a row with no model but a full description and label"; sa2bad=1; }
 case "$sa2e" in *noModelRow*) echo "  ★ FAIL model-less row emitted despite having description+label: [$sa2e]"; sa2bad=1 ;; esac
+sactl_check "$sa2e" || sa2bad=1
 # (f) id absent, everything else present. An emitted record keyed on an empty id addresses no row at all, and
 #     Claude Code would be handed {"id":"",…}. Nothing else in the suite feeds an id-less task.
-sa2f=$(sarun '{"columns":120,"tasks":[{"model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL"}]}')
-[ -z "$sa2f" ] || { echo "  ★ FAIL row with no id was emitted: [$sa2f]"; sa2bad=1; }
+sa2f=$(sarun '{"columns":120,"tasks":[{"model":"claude-sonnet-5","contextWindowSize":1000000,"description":"IDLESS","label":"IDLESS"},'"$SACTL"']}')
+case "$sa2f" in *IDLESS*) echo "  ★ FAIL row with no id was emitted: [$sa2f]"; sa2bad=1 ;; esac
+sactl_check "$sa2f" || sa2bad=1
 [ "$sa2bad" -eq 0 ] && echo "  no-model(x2) / no-id / promoted-label / dropped-label / unattributable all fall back OK" || fail=1
 
 echo "── SA3. SUBAGENT: Per-task subagent line content + Context-window marker signals a shrunken window"
@@ -1859,10 +1882,23 @@ sa3d=$(sarun "$(samk claude-sonnet-5 200000 d l 120)" | saraw tid | nocol)
 [ "$sa3d" = "d │ Sonnet 5(200K) │ l" ] || { echo "  ★ FAIL 200K marker text: [$sa3d]"; sa3bad=1; }
 sa3e=$(sarun "$(samk claude-sonnet-5 200000 d l 120)" | saraw tid | sacolat '(200K)' "$SAYL")
 [ "$sa3e" = OK ] || { echo "  ★ FAIL (200K) marker colour: $sa3e"; sa3bad=1; }
+# a STRING-typed window size with a leading zero. jq's tostring erases the JSON type, so the value reaches
+# the shell verbatim, and bash reads a leading zero as OCTAL: without the 10# prefix "0200000" evaluates to
+# 65536 and the row would confidently report a 65K window. Same hazard lib/render.sh guards in ctx_aligned_pct.
+sa3oct=$(sarun '{"columns":120,"tasks":[{"id":"tid","model":"claude-sonnet-5","contextWindowSize":"0200000","description":"d","label":"l"}]}' | saraw tid | nocol)
+[ "$sa3oct" = "d │ Sonnet 5(200K) │ l" ] || { echo "  ★ FAIL leading-zero window read as octal: wanted [d │ Sonnet 5(200K) │ l], got [$sa3oct]"; sa3bad=1; }
 # window size absent → the whole bracket is omitted; no "(?)" and no guessed default
 sa3f=$(sarun "$(samk claude-sonnet-5 '' d l 120)" | saraw tid | nocol)
 [ "$sa3f" = "d │ Sonnet 5 │ l" ] || { echo "  ★ FAIL absent window size: wanted [d │ Sonnet 5 │ l], got [$sa3f]"; sa3bad=1; }
-[ "$sa3bad" -eq 0 ] && echo "  real 1-task + 2-task frames, JSON Lines shape, 1M/200K/absent markers OK" || fail=1
+# Every colour role on one row. The window markers are covered above; these are the other four, and each
+# was unguarded until a mutation run showed that swapping the role changed the output with the suite green.
+sa3g=$(sarun "$(samk claude-sonnet-5 1000000 DTEXT LTEXT 120)" | saraw tid)
+for sa3pair in "DTEXT:$SAWH:description" "Sonnet 5:$SAMD:model name" "LTEXT:$SADM:label" " │ :$SASP:separator"; do
+  sa3needle=${sa3pair%%:*}; sa3rest=${sa3pair#*:}; sa3want=${sa3rest%:*}; sa3role=${sa3rest##*:}
+  sa3r=$(printf '%s' "$sa3g" | sacolat "$sa3needle" "$sa3want")
+  [ "$sa3r" = OK ] || { echo "  ★ FAIL $sa3role colour role: $sa3r"; sa3bad=1; }
+done
+[ "$sa3bad" -eq 0 ] && echo "  real 1-task + 2-task frames, JSON Lines shape, 1M/200K/absent markers, 4 colour roles OK" || fail=1
 
 echo "── SA4. SUBAGENT: Untrusted input is sanitised + Width is bounded by the reported column count"
 sa4bad=0
@@ -1875,7 +1911,14 @@ case "$(printf '%s' "$sa4esc" | nocol)" in *'A[1ZmB'*) ;; *) echo "  ★ FAIL fi
 sa4c1=$(sarun '{"columns":120,"tasks":[{"id":"tid","model":"claude-sonnet-5","description":"A\u009b[1ZmB","label":"l"}]}' | saraw tid | nocol)
 case "$sa4c1" in *'A[1ZmB'*) ;; *) echo "  ★ FAIL C1 CSI case: [$sa4c1]"; sa4bad=1 ;; esac
 case "$sa4c1" in *$'\302\233'*) echo "  ★ FAIL U+009B survived into content"; sa4bad=1 ;; esac
-# (c) structural surprises yield zero records and a clean exit — one bad task must not abort every task's line
+# (c1) a non-object task sitting next to a good one: jq aborts the WHOLE program (rc 5) on a type-mismatched
+#      index, which would drop every row rather than the offending one. The control row is the assertion.
+sa4mix=$(sarun '{"columns":120,"tasks":["not-an-object",'"$SACTL"',12345]}')
+sactl_check "$sa4mix" || sa4bad=1
+case "$sa4mix" in *not-an-object*) echo "  ★ FAIL a non-object task produced a record: [$sa4mix]"; sa4bad=1 ;; esac
+# (c2) whole-document surprises yield zero records and a clean exit. These assertions are necessarily
+#      negative-only — a document with no usable tasks has no room for a control row — so they lean on
+#      the positive assertions elsewhere in SA1-SA4 to catch a blanket blackout.
 for sa4in in '{"tasks":"not-an-array","columns":120}' '["not","an","object"]' '{"tasks":["not-an-object"],"columns":120}' '' 'not json at all'; do
   sa4o=$(sarun "$sa4in"); sa4rc=$?
   [ "$sa4rc" -eq 0 ] || { echo "  ★ FAIL exit $sa4rc on structurally invalid input [$sa4in]"; sa4bad=1; }
@@ -1901,6 +1944,11 @@ sa4t=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity l
 sa4tw=$(printf '%s' "$sa4t" | vw)
 [ "$sa4tw" -le 20 ]     || { echo "  ★ FAIL narrowest width $sa4tw > 20: [$sa4t]"; sa4bad=1; }
 case "$sa4t" in *'Sonnet 5(1M)'*) ;; *) echo "  ★ FAIL model segment lost at width 20: [$sa4t]"; sa4bad=1 ;; esac
+# (f2) narrower than description+model together: both the label AND the description are gone and the model
+#      segment is all that is left. It must still be there — dropping it too is the one outcome the whole
+#      feature exists to prevent, and nothing tested this tier before.
+sa4core=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label' 14)" | saraw tid | nocol)
+[ "$sa4core" = "Sonnet 5(1M)" ] || { echo "  ★ FAIL narrowest tier lost the model segment: wanted [Sonnet 5(1M)], got [$sa4core]"; sa4bad=1; }
 # (g) no usable column count → no bounding at all, all three segments intact
 sa4u=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that cannot possibly fit' '')" | saraw tid | nocol)
 [ "$sa4u" = "DESCRIPTION │ Sonnet 5(1M) │ a very long activity label that cannot possibly fit" ] \
