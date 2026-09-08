@@ -2049,6 +2049,322 @@ sa4u=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity l
   || { echo "  ★ FAIL unbounded render: [$sa4u]"; sa4bad=1; }
 [ "$sa4bad" -eq 0 ] && echo "  ESC/C1 stripped, structural surprises inert, 256-cap, label-then-description sacrifice OK" || fail=1
 
+# PEER (change statusline-session-peer-id) The six-hex reference Claude Code's own agent listing shows in brackets after a session.
+# It is derived from the per-session registry record ~/.claude/sessions/<claude pid>.json — a file written by ANOTHER program, so it
+# is treated as hostile input: one field, string type only, and the only thing that can reach the line is a digest matching
+# ^[0-9a-f]{6}$. Every frame here goes through peerwrap.sh because the statusline's $PPID must be a KNOWN pid: a piped child's
+# parent IS the wrapper shell (probed), but wrapping that pipeline in $( ) inserts one more shell and shifts the pid by one — so the
+# wrapper plants the record under its own $$ and redirects each frame to a file instead of capturing it.
+echo "── PEER. SESSION-PEER-ID: [7921c3] ahead of the session name, derived from the session registry, silent on every failure"
+pbad=0
+PEERSESS="$FAKE_HOME/.claude/sessions"
+PEERCACHE="$FAKE_HOME/.claude/sl-peer-ref"
+PEERREF=7921c3
+# Fixed derivation vector: sha256("session:/tmp/cc-socks/88429.sock") starts with 7921c3 — the anchor every assert below leans on.
+# Recomputed here so the suite says so out loud if this machine's shasum ever disagrees with the constant.
+pvec=$(printf 'session:/tmp/cc-socks/88429.sock' | shasum -a 256 | cut -c1-6)
+[ "$pvec" = "$PEERREF" ] || { echo "  ★ FAIL PEER fixed vector: shasum gives [$pvec], want [$PEERREF]"; pbad=1; }
+
+cat > "$WORK/peerwrap.sh" <<'PW'
+#!/bin/bash
+# Render frames whose claude pid is THIS script's $$, so the test controls which registry record the statusline will look for.
+# $1=SL root $2=fake HOME $3=registry payload file ("-" plants no record) $4=space-separated COLUMNS list $5=statusline JSON
+# $6=warm (1 = render one cold frame first and wait for the cache to catch up with the record, 0 = go straight to the sweep)
+# $7=output prefix $8=optional second payload: swap it in with a strictly newer mtime, then render two more frames
+# $9=symlink fixture ("-" none / "entry" = the cache ENTRY is a symlink / "dir" = the whole cache DIRECTORY is a symlink)
+# ${10}=what that symlink points at
+sl=$1; home=$2; payload=$3; colslist=$4; json=$5; warm=$6; out=$7; payload2=${8:-}; sym=${9:--}; symbase=${10:-}
+reg="$home/.claude/sessions/$$.json"
+cache="$home/.claude/sl-peer-ref/$$"
+rm -rf "$home/.claude/sessions" "$home/.claude/sl-peer-ref"
+mkdir -p "$home/.claude/sessions"
+[ "$payload" = "-" ] || cp "$payload" "$reg"
+case "$sym" in
+    entry)     mkdir -p "$home/.claude/sl-peer-ref"; printf 'deadbe\n' > "$symbase"; ln -s "$symbase" "$cache" ;;
+    dir)       mkdir -p "$symbase"; printf 'deadbe\n' > "$symbase/$$"; ln -s "$symbase" "$home/.claude/sl-peer-ref" ;;
+    plainfile) printf 'not-a-directory\n' > "$home/.claude/sl-peer-ref" ;;
+    entrydir)  mkdir -p "$cache"; printf 'sentinel\n' > "$cache/keep" ;;
+esac
+peersnap() {   # every path the cache lives on, with inode/mtime/size/mode: one cmp then answers "did ANY frame touch it"
+    if [ -n "$symbase" ]; then find "$home/.claude/sl-peer-ref" "$symbase" 2>/dev/null
+    else                        find "$home/.claude/sl-peer-ref" 2>/dev/null; fi \
+    | sort | while IFS= read -r f; do stat -f '%N %i %m %z %p' "$f" 2>/dev/null; done
+}
+printf '%s\n' "$$" > "$out.pid"
+frame() {   # $1=COLUMNS $2=output file
+    printf '%s' "$json" | env COLUMNS="$1" HOME="$home" bash "$sl/statusline-command.sh" > "$2" 2> "$2.err"
+    printf '%s\n' "$?" > "$2.rc"
+}
+settle() {  # wait out the detached job: the entry must exist AND no longer be older than the record it comes from. Waiting only
+            # for existence would let the re-derivation case read the PREVIOUS value and pass for the wrong reason.
+    local n=0
+    while [ "$n" -lt 20 ]; do
+        [ -s "$cache" ] && [ ! "$reg" -nt "$cache" ] && return 0
+        sleep 0.1; n=$((n+1))
+    done
+}
+set -- $colslist
+if [ "$warm" != 0 ]; then frame "$1" "$out.f1"; settle; fi
+stat -f '%i' "$cache" > "$out.ino1" 2>/dev/null
+peersnap > "$out.snap1"
+for c in $colslist; do frame "$c" "$out.c$c"; done
+sleep 0.3                          # a job wrongly forked by the sweep would land in this window and show up below
+stat -f '%i' "$cache" > "$out.ino2" 2>/dev/null
+peersnap > "$out.snap2"
+ls -A "$home/.claude/sl-peer-ref" > "$out.entries" 2>/dev/null
+if [ -n "$payload2" ]; then
+    sleep 1.1                      # the entry is judged stale by mtime, and bash's -nt on this platform compares whole seconds
+    cp "$payload2" "$reg"
+    frame 200 "$out.r1"            # the frame that notices the record is newer than the entry: no reference, derivation restarted
+    settle
+    frame 200 "$out.r2"            # the next frame: the re-derived reference
+fi
+PW
+
+peerrun() {  # $1=payload|"-" $2=COLUMNS list $3=json $4=warm $5=second payload|"" $6=symlink mode|"-" $7=symlink target|""
+  bash "$WORK/peerwrap.sh" "$SL" "$FAKE_HOME" "$1" "$2" "$3" "$4" "$WORK/peer" "${5:-}" "${6:--}" "${7:-}"
+  PEERPID=$(cat "$WORK/peer.pid" 2>/dev/null)
+}
+peerplain() { nocol < "$WORK/peer.c$1"; }   # $1=COLUMNS → that frame's line with SGR stripped
+
+# Registry payloads. good/good2 are well-formed records; the rest are the failure modes the degradation requirement enumerates.
+mkdir -p "$WORK/peerreg" "$WORK/peerfake"
+printf '%s\n' '{"sessionId":"5e6f","pid":4242,"cwd":"/x","name":"macos-54","messagingSocketPath":"/tmp/cc-socks/88429.sock","status":"idle"}' > "$WORK/peerreg/good.json"
+printf '%s\n' '{"messagingSocketPath":"/tmp/cc-socks/99999.sock"}' > "$WORK/peerreg/good2.json"
+printf '%s\n' '{ this is not json at all' > "$WORK/peerreg/badjson.json"
+printf '%s\n' '{"messagingSocketPath":88429}' > "$WORK/peerreg/number.json"
+printf '%s\n' '{"sessionId":"5e6f","name":"macos-54"}' > "$WORK/peerreg/nofield.json"
+printf '%s\n' '{"messagingSocketPath":""}' > "$WORK/peerreg/emptystr.json"
+# Hostile socket paths, both carrying a raw ESC and a raw U+009B (8-bit CSI) — the exact bytes the SGR invariant exists to keep out.
+# One is short enough to be used whole, so the WHITELIST (not the length cap) is what keeps the line clean; the other is 4 KB, past
+# the 256-character cap every external string gets, with its control bytes deliberately beyond the cap so the expected digest below
+# can be computed with plain byte slicing.
+phost='/tmp/cc-socks/'$'\033''[1mAAAAAAAA'$'\302\233''AAAAAAAA.sock'
+jq -cn --arg p "$phost" '{messagingSocketPath:$p}' > "$WORK/peerreg/hostile.json"
+phost4k="/tmp/cc-socks/$(awk 'BEGIN{s="";while(length(s)<4000)s=s "A";print substr(s,1,4000)}')"$'\033'"[1m"$'\302\233'".sock"
+jq -cn --arg p "$phost4k" '{messagingSocketPath:$p}' > "$WORK/peerreg/hostile4k.json"
+phostref=$(printf '%s' "session:$phost" | shasum -a 256 | cut -c1-6)
+phost4kref=$(printf '%s' "session:$(printf '%s' "$phost4k" | head -c 256)" | shasum -a 256 | cut -c1-6)
+# Counting shim for the ONE jq call this capability makes: the derivation job's read of the registry record. parse_input's jq runs
+# on every frame and would drown the signal, so only a program mentioning the field name is counted. This is how "the frame did not
+# start a job" is asserted for shapes that leave no trace on disk when the job fails.
+JQREAL=$(command -v jq)
+mkdir -p "$WORK/countbin"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in *messagingSocketPath*) printf x >> "%s" ;; esac\n' "$WORK/jqcount"
+  printf 'exec %s "$@"\n' "$JQREAL"
+} > "$WORK/countbin/jq"
+chmod +x "$WORK/countbin/jq"
+jqcount() { [ -f "$WORK/jqcount" ] && wc -c < "$WORK/jqcount" | tr -d ' ' || printf 0; }
+
+# No SHA-256 tool reachable from the frame (its own dir, so test M's failing perl stub does not ride along and change truncation).
+mkdir -p "$WORK/nosha"
+printf '#!/bin/sh\nexit 127\n' > "$WORK/nosha/shasum";  chmod +x "$WORK/nosha/shasum"
+printf '#!/bin/sh\nexit 127\n' > "$WORK/nosha/openssl"; chmod +x "$WORK/nosha/openssl"
+
+# Time-invariant fixtures: no rate_limits, no transcript, no last-msg record for this session id, so the whole line is a pure
+# function of the width and the registry — which is what makes the byte-identical comparisons below meaningful rather than flaky.
+JPEER=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" '
+  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:6}, session_id:"peer-selftest", session_name:"my-session" }')
+JPEERNONAME=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" '
+  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:6}, session_id:"peer-selftest", session_name:"" }')
+JPEERLONG=$(jq -cn --arg cwd "$GREPO" --arg proj "$GREPO" '
+  { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus 4.8 (1M context)"},
+    context_window:{used_percentage:6}, session_id:"peer-selftest",
+    session_name:"a very very very very very very long session name that forces right truncation" }')
+
+# PEER-1 harness self-check: the record must land on the path the statusline actually looks at. Asserting the file exists is not
+# enough — that only proves the WRAPPER wrote it. The cache entry keyed by the same pid is written by the statusline's own detached
+# job, so its presence is what proves both sides agree on the pid; without it this section could go green for the wrong reason.
+peerrun "$WORK/peerreg/good.json" "200" "$JPEER" 1
+if [ -z "${PEERPID:-}" ] || [ ! -f "$PEERSESS/$PEERPID.json" ]; then
+  echo "  ★ FAIL PEER-1 registry record was not planted at \$HOME/.claude/sessions/<pid>.json"; pbad=1
+fi
+[ -f "$PEERCACHE/$PEERPID" ] || { echo "  ★ FAIL PEER-1 statusline never resolved pid $PEERPID (no cache entry) — pid plumbing, not display"; pbad=1; }
+
+# PEER-2 the fixed vector on the line, ahead of the name and still the rightmost segment; and the session's FIRST frame does not
+# carry it, because derivation is detached — that cold frame renders exactly like a build without the capability.
+p2=$(peerplain 200)
+case "$p2" in *"[$PEERREF] my-session") ;; *) echo "  ★ FAIL PEER-2 line does not end with [$PEERREF] my-session: [$p2]"; pbad=1 ;; esac
+case "$p2" in *" │ [$PEERREF] my-session") ;; *) echo "  ★ FAIL PEER-2 reference is not at the head of the rightmost segment: [$p2]"; pbad=1 ;; esac
+pf1=$(nocol < "$WORK/peer.f1")
+case "$pf1" in *"[$PEERREF]"*) echo "  ★ FAIL PEER-2 the first frame of a session already showed a reference: [$pf1]"; pbad=1 ;; esac
+case "$pf1" in *"my-session") ;; *) echo "  ★ FAIL PEER-2 the first frame lost the session name: [$pf1]"; pbad=1 ;; esac
+
+# PEER-3 an empty session name now renders the bracketed reference alone, where the same input previously produced no segment at all.
+peerrun "$WORK/peerreg/good.json" "200" "$JPEERNONAME" 1
+p3=$(peerplain 200)
+case "$p3" in *" │ [$PEERREF]") ;; *) echo "  ★ FAIL PEER-3 empty name did not render [$PEERREF] as its own segment: [$p3]"; pbad=1 ;; esac
+case "$p3" in *"my-session"*) echo "  ★ FAIL PEER-3 a name appeared in the empty-name frame: [$p3]"; pbad=1 ;; esac
+
+# PEER-4 every failure mode degrades to TODAY's line, byte for byte, with a clean stderr and exit 0. The no-registry frame is the
+# reference: a build without this capability can only produce that line, so byte-equality with it IS the degradation requirement.
+peerrun "-" "200" "$JPEER" 0
+cp "$WORK/peer.c200" "$WORK/peer.baseline"
+[ -d "$PEERCACHE" ] && { echo "  ★ FAIL PEER-4 no registry record, yet a cache directory was created"; pbad=1; }
+for pcase in badjson number nofield emptystr; do
+  peerrun "$WORK/peerreg/$pcase.json" "200" "$JPEER" 1
+  cmp -s "$WORK/peer.baseline" "$WORK/peer.c200" \
+    || { echo "  ★ FAIL PEER-4 [$pcase] frame differs from the no-registry frame: [$(peerplain 200)]"; pbad=1; }
+  [ -s "$WORK/peer.c200.err" ] && { echo "  ★ FAIL PEER-4 [$pcase] wrote to stderr: [$(cat "$WORK/peer.c200.err")]"; pbad=1; }
+  [ "$(cat "$WORK/peer.c200.rc")" = 0 ] || { echo "  ★ FAIL PEER-4 [$pcase] exit code $(cat "$WORK/peer.c200.rc")"; pbad=1; }
+done
+( PATH="$WORK/nosha:$PATH"; peerrun "$WORK/peerreg/good.json" "200" "$JPEER" 1 )   # subshell: the shim must not outlive this case
+cmp -s "$WORK/peer.baseline" "$WORK/peer.c200" \
+  || { echo "  ★ FAIL PEER-4 [no sha256 tool] frame differs from the no-registry frame: [$(peerplain 200)]"; pbad=1; }
+[ -s "$WORK/peer.c200.err" ] && { echo "  ★ FAIL PEER-4 [no sha256 tool] wrote to stderr"; pbad=1; }
+[ "$(cat "$WORK/peer.c200.rc")" = 0 ] || { echo "  ★ FAIL PEER-4 [no sha256 tool] exit code $(cat "$WORK/peer.c200.rc")"; pbad=1; }
+
+# PEER-5 the fourth external source satisfies the only-our-SGR invariant by construction, not by filtering: whatever the record
+# holds, the sole contribution it can make to the line is a six-hex digest OF it. Not one byte of the value itself may appear.
+for pcase in "hostile $phostref" "hostile4k $phost4kref"; do
+  set -- $pcase
+  peerrun "$WORK/peerreg/$1.json" "200" "$JPEER" 1
+  p5=$(peerplain 200)
+  case "$p5" in *"[$2] my-session") ;; *) echo "  ★ FAIL PEER-5 [$1] did not yield its digest [$2]: [$p5]"; pbad=1 ;; esac
+  case "$p5" in *AAAA*) echo "  ★ FAIL PEER-5 [$1] registry text reached the line: [$p5]"; pbad=1 ;; esac
+  grep -q $'\302\233' "$WORK/peer.c200" && { echo "  ★ FAIL PEER-5 [$1] the record's U+009B reached the terminal"; pbad=1; }
+  [ "$(grep -c '' "$WORK/peer.c200")" -eq 1 ] || { echo "  ★ FAIL PEER-5 [$1] broke the single-line invariant"; pbad=1; }
+  p5w=$(vw < "$WORK/peer.c200"); [ "$p5w" -le $((200-EDGE_PAD)) ] || { echo "  ★ FAIL PEER-5 [$1] width $p5w exceeds drawable"; pbad=1; }
+done
+
+# PEER-6 truncation is all-or-nothing for the reference. A half-rendered "[7921" reads as a DIFFERENT session, so at every width the
+# reference is either complete or wholly absent — and there is a width band where it survives while the NAME is what gets cut.
+# The band where the reference stops fitting is only a few columns wide, so it is swept one column at a time: a coarse sweep
+# steps over the exact widths where a cut would land inside the token and the case goes green having tested nothing.
+pcols="160 150 140 130 125 120 115 110 105 100 95 90 85 80 75 70 65 60 55 50 48 46 44 42 40 38 36 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20 19 18"
+peerrun "$WORK/peerreg/good.json" "$pcols" "$JPEERLONG" 1
+ptrunc=0
+for c in $pcols; do
+  pl=$(peerplain "$c")
+  case "$pl" in
+    *"[$PEERREF]"*)
+      case "$pl" in *"…"*) case "$pl" in *"forces right truncation") ;; *) ptrunc=1 ;; esac ;; esac ;;
+    *"["*) echo "  ★ FAIL PEER-6 partial reference at C=$c: [$pl]"; pbad=1 ;;
+  esac
+  [ "$(grep -c '' "$WORK/peer.c$c")" -eq 1 ] || { echo "  ★ FAIL PEER-6 C=$c not a single line"; pbad=1; }
+  pw=$(vw < "$WORK/peer.c$c"); [ "$pw" -le $((c-EDGE_PAD)) ] || { echo "  ★ FAIL PEER-6 C=$c width $pw exceeds drawable"; pbad=1; }
+done
+[ "$ptrunc" -eq 1 ] || { echo "  ★ FAIL PEER-6 no width kept the whole reference while truncating the name (shrink before drop)"; pbad=1; }
+
+# PEER-7 the cache is derived data and it enumerates which sessions are open on this machine: owner-only, one six-hex line, and
+# never authoritative over a registry record newer than it — a recycled pid must not inherit the previous session's reference.
+peerrun "$WORK/peerreg/good.json" "200" "$JPEER" 1 "$WORK/peerreg/good2.json"
+pref2=$(printf '%s' "session:/tmp/cc-socks/99999.sock" | shasum -a 256 | cut -c1-6)
+pperm=$(stat -f '%Lp' "$PEERCACHE" 2>/dev/null); [ "$pperm" = 700 ] || { echo "  ★ FAIL PEER-7 cache dir mode $pperm != 700"; pbad=1; }
+pperm=$(stat -f '%Lp' "$PEERCACHE/$PEERPID" 2>/dev/null); [ "$pperm" = 600 ] || { echo "  ★ FAIL PEER-7 cache entry mode $pperm != 600"; pbad=1; }
+[ "$(grep -c '' "$PEERCACHE/$PEERPID" 2>/dev/null)" = 1 ] || { echo "  ★ FAIL PEER-7 cache entry is not exactly one line"; pbad=1; }
+case "$(cat "$PEERCACHE/$PEERPID" 2>/dev/null)" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) echo "  ★ FAIL PEER-7 cache entry is not a bare six-hex value: [$(cat "$PEERCACHE/$PEERPID" 2>/dev/null)]"; pbad=1 ;; esac
+pr1=$(nocol < "$WORK/peer.r1"); pr2=$(nocol < "$WORK/peer.r2")
+case "$pr1" in *"[$PEERREF]"*) echo "  ★ FAIL PEER-7 stale reference displayed after the record changed: [$pr1]"; pbad=1 ;; esac
+case "$pr2" in *"[$pref2] my-session") ;; *) echo "  ★ FAIL PEER-7 reference not re-derived from the newer record (want [$pref2]): [$pr2]"; pbad=1 ;; esac
+
+# PEER-8 the pid guard. The registry path is built from $PPID, so a value that is not a plain decimal number must stop the whole
+# path dead — before any file test, any directory creation, any job. Called directly (the frame can only ever supply a real pid),
+# with a record planted under the bogus pid so that a missing guard would visibly start a job and create the cache directory.
+rm -rf "$PEERSESS" "$PEERCACHE"; mkdir -p "$PEERSESS"
+cp "$WORK/peerreg/good.json" "$PEERSESS/12x34.json"
+pguard=$(env HOME="$FAKE_HOME" bash -c '
+  . "$1/lib/collect.sh"
+  now=1700000000
+  for p in "12x34" "" "-1" "9 9" "042 " ; do read_peer_ref "$p"; printf "[%s]" "$peer_ref"; done' _ "$SL")
+sleep 0.4
+[ "$pguard" = "[][][][][]" ] || { echo "  ★ FAIL PEER-8 a non-decimal pid produced a reference: [$pguard]"; pbad=1; }
+[ -d "$PEERCACHE" ] && { echo "  ★ FAIL PEER-8 a non-decimal pid still started a derivation job (cache directory created)"; pbad=1; }
+rm -rf "$PEERSESS"
+
+# PEER-9 negative caching. A record that can never yield a reference (unparseable, wrong type, field absent) must be resolved ONCE:
+# without a cached "no reference" marker every single frame re-forks a detached jq+shasum job that is guaranteed to fail, which both
+# never converges and, on a large unparseable record, steals enough CPU to push the FOREGROUND past its 2 ms budget.
+peerrun "$WORK/peerreg/badjson.json" "200 199 198" "$JPEER" 1
+pn=$(grep -c '' "$WORK/peer.entries" 2>/dev/null)
+[ "$pn" = 1 ] || { echo "  ★ FAIL PEER-9 cache holds $pn entries after four frames, want exactly 1 (leftover temp files or re-derivation)"; pbad=1; }
+[ "$(cat "$PEERCACHE/$PEERPID" 2>/dev/null)" = "-" ] || { echo "  ★ FAIL PEER-9 no-reference marker not written: [$(cat "$PEERCACHE/$PEERPID" 2>/dev/null)]"; pbad=1; }
+cmp -s "$WORK/peer.ino1" "$WORK/peer.ino2" \
+  || { echo "  ★ FAIL PEER-9 the entry was rewritten by a later frame (inode changed) — the failed derivation is not cached"; pbad=1; }
+cmp -s "$WORK/peer.baseline" "$WORK/peer.c200" \
+  || { echo "  ★ FAIL PEER-9 the marker changed the rendered line: [$(peerplain 200)]"; pbad=1; }
+pk=0; while [ "$pk" -lt 20 ] && pgrep -f "$SL/statusline-command.sh" >/dev/null 2>&1; do sleep 0.1; pk=$((pk+1)); done
+pgrep -f "$SL/statusline-command.sh" >/dev/null 2>&1 && { echo "  ★ FAIL PEER-9 a derivation job outlived its frames by more than 2s"; pbad=1; }
+
+# PEER-10 the cache is ours; a symlink in it is not. Following one hands whoever planted it the value that names this session to
+# other software (verified: a link pointing at a file holding "deadbe" put [deadbe] on the line). Defense in depth — planting it
+# needs write access to ~/.claude, which also buys the registry record itself — so both the entry and the directory refuse links.
+for pcase in "entry $WORK/peerfake/entry" "dir $WORK/peerfake/dir"; do
+  set -- $pcase
+  rm -rf "$WORK/peerfake"; mkdir -p "$WORK/peerfake"; rm -f "$WORK/jqcount"
+  ( PATH="$WORK/countbin:$PATH"; peerrun "$WORK/peerreg/good.json" "200 199 198" "$JPEER" 0 "" "$1" "$2" )
+  cmp -s "$WORK/peer.baseline" "$WORK/peer.c200" \
+    || { echo "  ★ FAIL PEER-10 [$1 symlink] followed into the link: [$(peerplain 200)]"; pbad=1; }
+  case "$(peerplain 200)" in *deadbe*) echo "  ★ FAIL PEER-10 [$1 symlink] planted value reached the line"; pbad=1 ;; esac
+  cmp -s "$WORK/peer.snap1" "$WORK/peer.snap2" \
+    || { echo "  ★ FAIL PEER-10 [$1 symlink] the cache path was modified by a frame"; pbad=1; }
+  [ "$(jqcount)" = 0 ] || { echo "  ★ FAIL PEER-10 [$1 symlink] started $(jqcount) derivation job(s) instead of none"; pbad=1; }
+done
+
+# PEER-11 the cache path may also be the WRONG KIND of thing, which is not an attack, just a mess someone left behind — and the
+# two shapes fail in opposite directions. A regular file where the directory belongs makes every mkdir -p fail, so the marker can
+# never land and every frame re-forks a job that cannot possibly finish. A directory where the ENTRY belongs makes [ -f ] false
+# forever, which re-forks the same way AND lets "mv -f $tmp $dest" bury one temp file inside that directory per frame. Both must be
+# treated exactly like a symlink: read nothing, start nothing, write nothing.
+for pcase in plainfile entrydir; do
+  rm -rf "$WORK/peerfake"; mkdir -p "$WORK/peerfake"; rm -f "$WORK/jqcount"
+  ( PATH="$WORK/countbin:$PATH"; peerrun "$WORK/peerreg/good.json" "200 199 198" "$JPEER" 0 "" "$pcase" "" )
+  cmp -s "$WORK/peer.baseline" "$WORK/peer.c200" \
+    || { echo "  ★ FAIL PEER-11 [$pcase] frame differs from the no-registry frame: [$(peerplain 200)]"; pbad=1; }
+  cmp -s "$WORK/peer.snap1" "$WORK/peer.snap2" \
+    || { echo "  ★ FAIL PEER-11 [$pcase] a frame modified the cache path (temp file left behind, or the target rewritten)"; pbad=1; }
+  [ "$(jqcount)" = 0 ] || { echo "  ★ FAIL PEER-11 [$pcase] three frames started $(jqcount) doomed derivation job(s), one per frame"; pbad=1; }
+done
+[ "$(cat "$PEERCACHE" 2>/dev/null)" = "not-a-directory" ] || [ ! -f "$PEERCACHE" ] \
+  || { echo "  ★ FAIL PEER-11 the plain file standing in for the cache directory was rewritten"; pbad=1; }
+# The writer's own destination guard, exercised directly. The foreground now refuses these shapes before any job starts, so a frame
+# can no longer reach the writer with a bad destination — except by racing it, since the shape can change after the frame looked.
+# Called directly so the guard is pinned on its own rather than riding on the foreground's.
+rm -rf "$PEERSESS" "$PEERCACHE"; mkdir -p "$PEERSESS" "$PEERCACHE/4242"
+cp "$WORK/peerreg/good.json" "$PEERSESS/4242.json"
+printf 'sentinel\n' > "$PEERCACHE/4242/keep"
+env HOME="$FAKE_HOME" bash -c '. "$1/lib/collect.sh"; peer_ref_update 4242 1700000000' _ "$SL" >/dev/null 2>&1
+[ "$(ls -A "$PEERCACHE/4242" | tr '\n' ' ')" = "keep " ] \
+  || { echo "  ★ FAIL PEER-11 the writer moved its temp file into a directory standing where the entry belongs: [$(ls -A "$PEERCACHE/4242" | tr '\n' ' ')]"; pbad=1; }
+# ...and a symlink standing there. `-e` and `-f` both FOLLOW links, so a shape test built only from those two accepts a link to a
+# regular file and rejects only a dangling one; "mv -f" then replaces the LINK, which is still replacing something we did not
+# create. The target's bytes are never written through, so this is tidiness of ownership rather than a leak — but the writer says
+# it does not replace what it did not create, so it must not.
+printf 'deadbe\n' > "$WORK/peerfake/wtarget"
+ln -s "$WORK/peerfake/wtarget"  "$PEERCACHE/4243"     # link to a regular file: passes -e and -f
+ln -s "$WORK/peerfake/nothing"  "$PEERCACHE/4244"     # dangling link: fails -e and -f, but is still not ours to replace
+cp "$WORK/peerreg/good.json" "$PEERSESS/4243.json"; cp "$WORK/peerreg/good.json" "$PEERSESS/4244.json"
+pw43=$(stat -f '%i %p' "$PEERCACHE/4243"); pw44=$(stat -f '%i %p' "$PEERCACHE/4244")
+env HOME="$FAKE_HOME" bash -c '. "$1/lib/collect.sh"; peer_ref_update 4243 1700000000; peer_ref_update 4244 1700000000' _ "$SL" >/dev/null 2>&1
+for pl in 4243 4244; do
+  [ -L "$PEERCACHE/$pl" ] || { echo "  ★ FAIL PEER-11 the writer replaced the symlink at entry $pl with a file of its own"; pbad=1; }
+done
+[ "$(stat -f '%i %p' "$PEERCACHE/4243" 2>/dev/null)" = "$pw43" ] || { echo "  ★ FAIL PEER-11 entry 4243 (link to a regular file) was rewritten"; pbad=1; }
+[ "$(stat -f '%i %p' "$PEERCACHE/4244" 2>/dev/null)" = "$pw44" ] || { echo "  ★ FAIL PEER-11 entry 4244 (dangling link) was rewritten"; pbad=1; }
+[ "$(cat "$WORK/peerfake/wtarget")" = deadbe ] || { echo "  ★ FAIL PEER-11 the writer wrote through the symlink into its target"; pbad=1; }
+[ "$(ls -A "$PEERCACHE" | sort | tr '\n' ' ')" = "4242 4243 4244 " ] \
+  || { echo "  ★ FAIL PEER-11 the writer left something behind: [$(ls -A "$PEERCACHE" | sort | tr '\n' ' ')]"; pbad=1; }
+# The writer's exit status is its own, not whatever the pruning walk's last comparison happened to leave behind.
+rm -rf "$PEERCACHE"; mkdir -p "$PEERCACHE"
+cp "$WORK/peerreg/good.json" "$PEERSESS/4245.json"
+env HOME="$FAKE_HOME" bash -c '. "$1/lib/collect.sh"; peer_ref_update 4245 1700000000' _ "$SL" >/dev/null 2>&1
+pwrc=$?
+[ "$pwrc" = 0 ] || { echo "  ★ FAIL PEER-11 the writer returned $pwrc after a successful derivation"; pbad=1; }
+[ "$(cat "$PEERCACHE/4245" 2>/dev/null)" = "$PEERREF" ] || { echo "  ★ FAIL PEER-11 the direct writer call did not publish [$PEERREF]"; pbad=1; }
+rm -rf "$PEERSESS" "$PEERCACHE"
+
+# the counting shim must itself be able to see a job, or the two zeros above would be meaningless
+rm -f "$WORK/jqcount"
+( PATH="$WORK/countbin:$PATH"; peerrun "$WORK/peerreg/badjson.json" "200" "$JPEER" 1 )
+[ "$(jqcount)" -ge 1 ] || { echo "  ★ FAIL PEER-11 the jq counting shim never fired — the two zero-job asserts above prove nothing"; pbad=1; }
+
+rm -rf "$PEERSESS" "$PEERCACHE" "$WORK/peerfake"   # leave no record behind: a later frame's $PPID could collide with a pid used here
+[ "$pbad" -eq 0 ] && echo "  PEER fixed vector, cold first frame, empty name, six silent failure modes, hostile records, all-or-nothing truncation, private cache + re-derivation, pid guard, negative caching, symlink and wrong-shape refusal OK" || fail=1
+
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
 

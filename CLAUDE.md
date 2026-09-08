@@ -42,10 +42,14 @@ It is not auto-installed — wire it up by pointing the `statusLine.command` set
 The line has two halves: a **left** part (path · model · effort · thinking · ctx bar +
 200k cliff marker · token usage · rate-limit countdowns + burn-projection alarm ·
 API thinking-time — session-duration → clock fallbacks — + last-message cache-age delta)
-and a **right** part (git · worktree · session name),
+and a **right** part (git · worktree · peer reference + session name),
 right-aligned to the terminal edge with a `│` junction that appears only when the two halves
 nearly touch. When the terminal is too narrow, the line degrades through a fixed 14-step
 sacrifice order (shrink before drop; path + ctx% never dropped) so it never wraps.
+The session segment leads with a six-hex **peer reference** (`[7921c3] my-session`) — the same value Claude Code's own
+agent listing prints in brackets, so a user reading it aloud names the pane an orchestrating session sees. It is derived
+from CC's per-session registry record and degrades to today's line whenever that is unavailable. See "Session peer
+reference" below.
 The path segment is cmd+clickable **without changing what it displays** (`PATH_CLICK`). It is not a hyperlink:
 CC re-renders the statusline through its own style model and drops OSC 8, so the line cannot carry one. Instead the
 statusline publishes this pane's directory to `~/.claude/sl-cwd/<claude pid>`, and an iTerm2 Smart Selection rule
@@ -117,6 +121,7 @@ modules. The flow is ordered to overlap I/O:
 start_theme_job → start_width_job   # background jobs kicked off first (don't touch stdin)
 parse_input                         # main shell blocks parsing the stdin JSON (the ONLY stdin reader)
 start_tokens_job                    # fire-and-forget detached token re-sum for the NEXT frame (never blocks this one)
+read_peer_ref                       # zero-fork read of this session's cached peer ref; fires a detached derivation job when cold/stale
 reconcile_start                     # cross-session rate-limit sync as a background FD job — overlaps the git stage below (see RL_SYNC)
 collect_status                      # git×3 + effort scan, concurrent, blocks on the slowest
 read_theme / read_width             # jobs already done → zero wait
@@ -237,6 +242,68 @@ logs). The rewrite is single-flighted by an `mkdir` lock (stale-stolen after 30s
 `T`-lines whose `main_mtime` is older than `RL_REG_TTL` so the file can't grow unbounded.
 Test sections `W` (display) / `X` (dedup) / `X2` (prune) cover it.
 
+### Session peer reference (`read_peer_ref` / `peer_ref_update`)
+
+The six hex characters at the head of the session segment (`[7921c3] my-session`) are the SAME value Claude Code's own
+agent listing prints in brackets after a session's name. Nothing else on the line is shared with that listing, so this
+is the one thing that lets a user read a token aloud and have an orchestrating session point at the exact pane.
+
+Provenance, and this is a dependency on Claude Code **internals**, not on a public interface: CC 2.1.263 writes a
+per-session registry record at `~/.claude/sessions/<claude pid>.json` (fields seen: `sessionId`, `pid`, `cwd`, `name`,
+`nameSource`, `messagingSocketPath`, `status`, `updatedAt`), and the listing's reference is
+`sha256("session:" + .messagingSocketPath)` truncated to the first 6 lowercase hex — no separator, no trailing newline,
+no normalisation of the path. Fixed vector, pinned by the tests: `session:/tmp/cc-socks/88429.sock` → `7921c3`.
+**If the six characters vanish after a CC upgrade, the first thing to check is that registry field name** (then the
+directory, then the formula). The statusline cannot detect a *divergence* on its own — it never sees the listing's
+output — so a reference that is present but no longer matches can only be caught by a human comparing the two.
+
+The record's own `name` field (`macos-54`) is deliberately NOT displayed: its two-hex suffix is random per process start,
+so two sessions in one directory can collide and it is not an identifier; its prefix repeats the working directory the
+leftmost segment already shows; and at ~18 cells it would push the ctx bar down the sacrifice order.
+
+Cost and caching mirror the token-usage split. Deriving costs `jq` 3.6ms + `shasum` 10.5ms against a ~26ms frame, and
+the value is constant for the life of the claude process, so a **detached** job (`peer_ref_update`) derives it once into
+`~/.claude/sl-peer-ref/<claude pid>` and the foreground (`read_peer_ref`) only reads that: two file tests, one `read`
+builtin, one `case` glob, **zero forks** (measured steady-state cost +0.14 ms/frame). One file per pid means no lock and
+no read-modify-write, the same reasoning as the PATH_CLICK map. `$PPID` is read in the **main shell** for the same
+reason as the cwd map — a subshell's own `$PPID` is not claude. The cache is derived data, never authority: when the
+registry record is **newer** than the cache entry the pid has been recycled into a different session, so the entry is
+re-derived instead of shown; that self-correction is why this cache needs no `ps` liveness sweep (the cwd map has no
+other source to fix it and therefore does). Entries are 600 inside a 700 directory (`umask 077`), landed
+write-then-rename so a concurrent frame cannot read a partial value, and pruned at `RL_REG_TTL` (7d).
+
+A derivation that **cannot** succeed is cached too, as a single `-` entry. Without that marker a record which can never yield a
+reference (unparseable, wrong type, field missing, empty value) re-forks a doomed `jq`+`shasum` on **every** frame: it never
+converges, and with a large record the background jq steals enough CPU to push the **foreground** past its 2 ms budget — measured
++3.7 ms/frame against a 10 MB unparseable record, versus −0.2 ms with the marker in place. `-` can never be displayed because only
+six hex passes the whitelist, and the retry trigger stays the record's own mtime, so a CC build that starts writing a usable record
+is picked up on the frame after it does. The cache path is required to be **exactly what we create there**, and both halves check
+it: `read_peer_ref` refuses a linked entry, a linked cache directory, a plain file standing where the directory belongs and a
+directory standing where the entry belongs; the job re-checks the directory after `mkdir -p` (which succeeds on a link) and again
+before the prune loop, which deletes, and checks the destination before `mv`. The symlink half is defense in depth rather than a
+boundary — planting such a link needs write access to `~/.claude`, which also buys writing the registry record itself, and a
+six-hex target is cheap to brute-force. The wrong-shape half is not an attack at all but it costs the same: a plain file makes
+every `mkdir -p` fail so the marker can never land, a directory makes `[ -f ]` false forever, and either way every frame re-forks
+a doomed job while `mv -f` buries one temp file per frame inside that directory. Nothing on that path is repaired or deleted: it
+is not ours to remove.
+
+**Trust boundary.** The record is written by another program in a format that is not public, so it is untrusted input —
+and unlike every other external source it is **not** made safe by filtering. It is made safe by the **output
+whitelist**: exactly one field is read, only when its JSON type is string, bounded to the same 256 cap, and the only
+value that can reach the line is a digest matching `^[0-9a-f]{6}$`. No byte of that file can be displayed even if the
+file is entirely ESC sequences. Its `jq` call is deliberately kept OUT of `parse_input`'s single pass — folding it in
+(say with `--slurpfile`) would let one half-written record empty all 23 stdin fields, amplifying a decorative field's
+failure into a broken line.
+
+Every failure is silent and byte-identical to the pre-capability line: no record, unparseable record, an absent,
+non-string or empty field, a `$PPID` that is not decimal, no SHA-256 tool on `PATH`, or a cache not yet written — a session's
+FIRST frame never shows the reference, which is the price of the zero-fork steady state. Truncation is all-or-nothing:
+a cut that would land inside `[7921c3]` drops the whole session segment (step 12) instead, because a half-rendered
+reference does not read as damaged, it reads as a DIFFERENT session. Section `PEER` covers the fixed vector, the
+empty-name segment, the five silent failure modes byte-for-byte, hostile records, a 44-width all-or-nothing truncation
+sweep, the pid guard, the negative-cache marker, and the private cache with its re-derivation; the `PEER-10` and `PEER-11`
+cases within it cover the symlink and wrong-shape refusals, on the reading side and on the writing side separately.
+
 ### Context meter (`build_left`, ctx segment)
 
 The ctx% turns red only near the session's context limit, on a **budget-aware** threshold —
@@ -335,7 +402,7 @@ both-fields-unusable fallbacks down the three-level chain.
 ## Hard rules — violating these reintroduces fixed bugs
 
 - **Never render against the real `$HOME`.** `statusline-command.sh` writes cross-session state
-  (`~/.claude/sl-ratelimit-cache`, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`); a frame run by hand
+  (`~/.claude/sl-ratelimit-cache`, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`, `~/.claude/sl-peer-ref`); a frame run by hand
   becomes the freshest observation and rewrites what every live session shows. Use `scripts/sandbox-run.sh`.
 - **Never `set -e`, anywhere.** A `read` hitting EOF with no trailing newline returns
   rc=1 as a normal path; `-e` would kill the script mid-frame.
@@ -346,9 +413,11 @@ both-fields-unusable fallbacks down the three-level chain.
 - **`parse_input` is the only sanitization entry for external strings.** It escapes
   `\n`/`\r`, strips C0 + DEL **and the C1 block U+0080–U+009F** (`select(. >= 32 and (. <
   127 or . > 159))`), and caps every field to 256 codepoints. Downstream code may then
-  assume "only our own SGR codes reach the terminal." The **one exception** is the
-  last-message file (read in `build_left`), which bypasses jq and so **re-strips the same
-  control set** via glob — keep these two filters in sync.
+  assume "only our own SGR codes reach the terminal." Two sources bypass it, each satisfying
+  the invariant its own way: the last-message file (read in `build_left`) **re-strips the same
+  control set** via glob — keep those two filters in sync — and the session registry record
+  (`peer_ref_update`) is never filtered at all, because nothing read from it is ever rendered;
+  only a derived digest matching `^[0-9a-f]{6}$` can reach the line.
 - **The 256-cap is load-bearing, not cosmetic.** `vis_width`'s ASCII strip is O(n²) under
   macOS's bash 3.2; an uncapped multi-KB field stalls every frame (20KB ≈ 33s). Test `O`
   guards this.
@@ -360,12 +429,14 @@ both-fields-unusable fallbacks down the three-level chain.
 
 ## Security model
 
-Defense-in-depth, all regression-tested (cases `H`, `L`, `N`, `P`, `Q`, `R`, `S`):
+Defense-in-depth, all regression-tested (cases `H`, `L`, `N`, `P`, `Q`, `R`, `S`, and `PEER`):
 ANSI/escape **injection** is neutralized by the control-char strip above (a raw ESC would
 both inject into the terminal and desync `vis_width` into a line wrap); `session_id` is
 **path-traversal-checked** (`''|*/*|*..*` → skip) before being interpolated into the
 last-msg file path; width bounding guarantees **no overflow/wrap** even on 1–2 column
-terminals or with perl absent; rate-limit "remaining" is clamped to ≥0%.
+terminals or with perl absent; rate-limit "remaining" is clamped to ≥0%. The fourth external source, CC's
+per-session **registry record**, satisfies the same invariant by construction rather than by filtering — see
+"Session peer reference" — so a hostile record can contribute a six-hex digest to the line and nothing else.
 
 ### Clickable path (`PATH_CLICK` + `scripts/open-pane-dir.sh`)
 

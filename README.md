@@ -72,7 +72,8 @@ Optional tools, each degrading gracefully if missing: **`git`** (no git segment)
 
 ## Reading the line
 
-A healthy frame — every example in the table below is taken from it, character for character:
+A healthy frame — every example in the table below is taken from it, character for character. The one exception is the
+peer reference: it is different in every session, so no capture can show yours.
 
 ![A healthy session: project path, model, context bar, token count, both rate-limit countdowns, compute time, and git — one colored line](assets/hero.svg)
 
@@ -87,7 +88,8 @@ A healthy frame — every example in the table below is taken from it, character
 | **7d quota** | `5D6H 72%` | The same, for the weekly limit |
 | **Time** | `45m25s (3m)` | Time Claude spent producing responses (idle and local tool runs excluded); `(3m)` = time since your last prompt — its color says whether the prompt cache is still warm (see below) |
 | **Git** | `main* +68/-14` | Branch, `*` if dirty, diffstat — pinned to the right edge |
-| **Name** | `auth-refactor` | Worktree / session name, when set (sessions: `/rename`) |
+| **Peer ref** | `[7921c3]` | The same six characters Claude Code's own agent list shows in brackets for this session. Read them out and whoever is driving another session can point at this exact pane — nothing else on the line is shared with that list. It sits at the front of the name segment and is never cut in half: on a narrow terminal the name is shortened first, and if even the six characters will not fit the whole segment goes rather than half a reference. On a Claude Code build that keeps no session registry, and on a session's very first frame, there is no reference to show and the segment is the name alone, exactly as before |
+| **Name** | `auth-refactor` | Worktree / session name, when set (sessions: `/rename`), after the peer reference in the same segment |
 
 ### How the context % is computed
 

@@ -4,7 +4,7 @@
 #
 # READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD JGAP BURN_SENS LASTMSG_WARN LASTMSG_STALE) + every global written by collect.sh
 # WRITES: stdout (single colored status line). The palette (WH MD GR…TRK) must be global so it's reachable across functions;
-#         the assembly working variables (parts parts2 _pct _ttl _dur _tok _rate_full _rate_compact _line bar display_dir git_seg…)
+#         the assembly working variables (parts parts2 _pct _ttl _dur _tok _rate_full _rate_compact _line _rmin bar display_dir git_seg…)
 #         and the per-segment handles built by build_left/build_right for degrade_layout (seg_path seg_model_full/compact seg_effort
 #         seg_thinking seg_ctx_full/compact seg_tok seg_5h_full/compact seg_7d seg_lastmsg seg_git_full/nodiff seg_worktree seg_session)
 #         are deliberately not local (this module is the terminal stage, nobody reads them afterward); external code should not depend on them
@@ -530,7 +530,17 @@ build_right() {
         parts2+=("$seg_git_full")
     fi
     [ -n "$worktree_name" ] && { seg_worktree="${DM}[wt:${worktree_name}]${RS}"; parts2+=("$seg_worktree"); }
-    [ -n "$session_name" ] && { seg_session="${DM}${session_name}${RS}"; parts2+=("$seg_session"); }
+    # Session segment = "[<peer ref>] <session name>". Either half alone is enough to produce it: with a reference but no name the
+    # segment is the bracketed reference on its own (input that used to render nothing at all), and with no reference it is the
+    # bare name, byte-identical to what this line has always printed. Same DM role for both halves — no new segment kind, no new
+    # palette role, still the rightmost and least prominent segment of the right half.
+    if [ -n "$peer_ref" ]; then
+        if [ -n "$session_name" ]; then seg_session="${DM}[${peer_ref}] ${session_name}${RS}"
+        else                            seg_session="${DM}[${peer_ref}]${RS}"; fi
+        parts2+=("$seg_session")
+    elif [ -n "$session_name" ]; then
+        seg_session="${DM}${session_name}${RS}"; parts2+=("$seg_session")
+    fi
 }
 
 
@@ -649,6 +659,25 @@ trunc_head() {   # $1=string with color codes $2=visible-width cap (>=2) → _tr
     _trunc="${best}"$'\033[0m'"…"
 }
 
+# Smallest right-half budget at which a head-truncated right half may still be emitted. Without a peer reference that is 2, the
+# minimum trunc_head can render (one visible cell plus the …). With one it is higher, because the reference identifies this session
+# to software outside the line: a cut landing inside "[7921c3]" would print "[7921" or "[79", which does not read as a damaged token
+# but as a DIFFERENT session — strictly worse than showing none. trunc_head keeps the greedy prefix that fits in cap-1 cells, so a
+# cap of (cells up to and including the token) + 1 guarantees the whole token survives; below that the caller must drop the session
+# segment outright (sacrifice step 12) instead of cutting it (spec "Shrink and truncate preferred over drop"). Cutting BEFORE the
+# token would also be legal by that invariant, but it cannot arise: the reference sits at the head of the last segment, so any cut
+# short of it has already removed the whole segment. The token is located in the string that is actually about to be truncated
+# rather than assumed present, because the right half loses that segment at step 12 and keeps being truncated afterwards.
+_right_trunc_floor() {   # $1=the right half as it would be truncated → _rmin
+    _rmin=2
+    [ -n "$peer_ref" ] || return 0
+    local tok="[$peer_ref]" pre
+    pre=${1%"$tok"*}                       # text before the LAST occurrence; unchanged when the token is not in the string
+    [ "$pre" = "$1" ] && return 0
+    vis_width "$pre"
+    _rmin=$(( _w + ${#tok} + 1 ))
+}
+
 # Print one part bounded to $2 visible columns: print whole if it fits, else head-truncate with … . Single source for the
 # left-only / right-empty width-bounding tiers in render_line (previously two byte-identical blocks → fix-one-forget-the-other risk).
 emit_bounded() {   # $1=string with color codes $2=visible-width cap
@@ -723,7 +752,9 @@ render_line() {
                 # rbudget mirrors the fall-through tier's budget; >=2 means a … -truncated right still fits, so stop here and let it render.
                 if [ "$_step" -eq 11 ] && [ -n "$right" ]; then
                     _rb=$(( _avail - _lw - JSEP_W - 1 ))
-                    [ "$_rb" -ge 2 ] && break
+                    _right_trunc_floor "$right"            # 2, or wide enough to keep a whole "[ref]": under that, fall through
+                                                           # to step 12 and drop the segment rather than cut inside the token
+                    [ "$_rb" -ge "$_rmin" ] && break
                 fi
                 _step=$(( _step + 1 ))
             done
@@ -757,7 +788,13 @@ render_line() {
         fi
         # Doesn't fit: keep the left part, truncate the right to rbudget (keep git, cut the name tail), still keep the junction │, right-aligned
         local rbudget=$(( avail - lw - JSEP_W - 1 ))   # -1 reserves the minimum one-cell gap
-        if [ "$rbudget" -ge 2 ]; then
+        # The twin of the step-11 test above, and the tier that actually calls trunc_head, so it carries its own floor rather than
+        # trusting its caller's. The two are not independent today: git and the worktree are already gone by steps 5 and 3, so at
+        # step 11 the right half IS the session segment alone and both tests see the same budget and the same string — mutating
+        # either one alone still keeps the token whole (measured); it takes reverting BOTH to emit "[7921…". They differ only in the
+        # fallback they pick (step 12 drops the segment and keeps degrading; this tier drops the whole right half).
+        _right_trunc_floor "$right"
+        if [ "$rbudget" -ge "$_rmin" ]; then
             trunc_head "$right" "$rbudget"    # _tw = exact post-truncation visible width (perl-computed, always <=rbudget)
             printf -v pad '%*s' "$(( avail - lw - JSEP_W - _tw ))" ''   # pad>=1, line width is exactly avail
             printf '%s%s%s%s\n' "$left" "$pad" "$JSEP" "$_trunc"

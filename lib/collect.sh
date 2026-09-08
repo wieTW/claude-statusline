@@ -2,13 +2,14 @@
 # shellcheck disable=SC2034  # globals written here are consumed by the sibling render.sh (see WRITES header); lint via: shellcheck -x statusline-command.sh
 # collect.sh — input collection: stdin JSON parsing + theme / width / git / effort collected concurrently in the background
 #
-# READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript
+# READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript,
+#         $HOME/.claude/sessions/<claude pid>.json (Claude Code's own per-session registry record — untrusted input)
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
 #         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now act_epoch
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
 #         ctx_in_tok ctx_cc_tok ctx_cr_tok ctx_out_tok ctx_win_size
 #         session_tokens subagent_tokens burn_tte
-#         quota_label quota_pct quota_sev quota_at
+#         quota_label quota_pct quota_sev quota_at peer_ref
 #
 # Sync model: background jobs run via process substitution opening an FD; a read blocks until that job hits EOF, which is the
 # sync point — no wait / temp file needed. Jobs are independent and run in parallel, so wall-clock = the slowest one, not the sum.
@@ -650,4 +651,118 @@ tokens_update() {   # $1=transcript_path $2=sid $3=now — detached worker: gate
       printf 'T %s %s %s %s %s %s %s\n' "$sid" "$stok" "$satok" "$mz" "$mt" "$sz" "$st"
     } > "$tmp" 2>/dev/null && mv -f "$tmp" "$cache" 2>/dev/null
     rmdir "$lock" 2>/dev/null
+}
+
+# The six-hex peer reference Claude Code's own agent listing shows in brackets after a session ("macos-54 [7921c3]"). Showing it on
+# the line is what lets a user read one token aloud and have an orchestrating session name the same pane; nothing else on the line
+# is shared with that listing. It is derived from the per-session registry record Claude Code writes at startup
+# (~/.claude/sessions/<claude pid>.json) as sha256("session:" + .messagingSocketPath) truncated to 6 lowercase hex — verified
+# against every live session on this machine, fixed vector session:/tmp/cc-socks/88429.sock -> 7921c3.
+# Two properties shape the code below.
+#  * COST. Deriving it costs jq 3.6ms + shasum 10.5ms on a 26ms frame, and the value is constant for the life of the claude
+#    process, so derivation happens once in a detached job and the frame only reads a per-pid cache with shell builtins (the
+#    start_tokens_job posture). One file per pid, like the PATH_CLICK map: no read-modify-write, so concurrent panes need no lock.
+#  * TRUST. The record is written by another program in a format that is not public, so it is untrusted input — and unlike the
+#    other three external sources this one is not made safe by FILTERING. It is made safe by the output whitelist: the only value
+#    this path can put on the line is a digest matching ^[0-9a-f]{6}$, so no byte of that file can be displayed even if the file
+#    is hostile. Every failure is silent and indistinguishable: no reference, today's line, nothing on stderr, exit code unchanged.
+#    A failed derivation is cached too, as a single "-" entry, so a record that can never yield a reference is resolved once
+#    instead of re-forking a doomed job every frame; only six-hex values are ever displayed, so that marker cannot reach the line.
+PEER_REG_DIR="$HOME/.claude/sessions"
+PEER_REF_DIR="$HOME/.claude/sl-peer-ref"
+peer_ref=""      # "" = no reference available; any other value has passed the ^[0-9a-f]{6}$ whitelist
+
+# Foreground: the whole per-frame cost of this feature. Steady state = two file tests, one builtin read and one glob, zero forks.
+# A Claude Code build that writes no registry costs exactly one file test and starts no job (spec "no registry, no background job").
+# The cache is derived data, never authority: a registry record NEWER than the cache entry means this pid has been recycled into a
+# different session, so the entry is ignored and re-derived rather than displayed — showing the previous session's reference would
+# be a confidently wrong answer, which is the one outcome worse than showing none.
+read_peer_ref() {   # $1=claude pid (the caller passes $PPID from the main shell — a subshell's $PPID is not it)
+    peer_ref=""
+    case "$1" in ''|*[!0-9]*) return 0 ;; esac              # shape gate, zero fork (same posture as sid_persistable)
+    local reg="$PEER_REG_DIR/$1.json" cache="$PEER_REF_DIR/$1" v
+    [ -f "$reg" ] || return 0
+    # The cache path must be exactly what we put there: a real directory holding real files. Two different problems share this
+    # gate. A SYMLINK was not put there by us, and following one hands whoever planted it the value that names this session to
+    # other software (a link pointing at a file holding "deadbe" puts [deadbe] on the line — measured); that is defense in depth
+    # rather than the trust boundary, since planting the link needs write access to ~/.claude, which also buys writing the
+    # registry record itself. The WRONG KIND of thing is not an attack at all, just a mess left behind, and it fails in the
+    # opposite direction: a regular file where the directory belongs makes every mkdir -p fail so the marker can never land, and
+    # a directory where the entry belongs keeps [ -f ] false forever — either way every frame re-forks a job that cannot finish,
+    # and in the second case "mv -f" buries one temp file inside that directory per frame. Both shapes: read nothing, start
+    # nothing. There is nothing to repair here, and repairing it would mean deleting something we did not create.
+    [ ! -L "$PEER_REF_DIR" ] || return 0
+    [ ! -e "$PEER_REF_DIR" ] || [ -d "$PEER_REF_DIR" ] || return 0
+    [ ! -L "$cache" ] || return 0
+    [ ! -e "$cache" ] || [ -f "$cache" ] || return 0
+    # -nt compares whole seconds here, so a pid recycled into a new session INSIDE the same second as its cache entry was written
+    # keeps showing the previous session's reference for exactly one frame; the next frame sees the newer record and re-derives.
+    if [ -f "$cache" ] && [ ! "$reg" -nt "$cache" ]; then
+        IFS= read -r -n 7 v < "$cache" 2>/dev/null          # -n 7 bounds the read: a longer entry can only fail the glob below
+        case "$v" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) peer_ref="$v" ;;
+        esac
+        # Any entry that is not six hex — the "-" marker a failed derivation leaves behind, or a torn write — means no reference
+        # AND no job. Without that, a record which can never yield one (unparseable, wrong type, field missing) re-forks a doomed
+        # jq+shasum on EVERY frame: it never converges, and on a large record the background jq steals enough CPU to push the
+        # foreground past its 2 ms budget (measured +2.2..2.8 ms with a 10 MB unparseable record). The retry trigger stays the
+        # record's own mtime, so a Claude Code build that starts writing a usable record is picked up on the next frame after it does.
+        return 0
+    fi
+    peer_ref_update "$1" "$now" >/dev/null 2>&1 </dev/null &   # cold or stale → derive for the NEXT frame, never for this one.
+    return 0                                                #   </dev/null per the stdin hard rule; both streams discarded so a
+}                                                           #   failing jq/shasum can never interleave with the rendered line.
+
+# Detached worker: derive this session's reference and publish it for the next frame. Exactly one field is read from the record and
+# only when its JSON type is string; the value is capped at 256 characters like every other external string; the result is published
+# only when it matches ^[0-9a-f]{6}$. jq runs here and NOT inside parse_input's single pass on purpose — folding the record into
+# that jq (say with --slurpfile) would let a record written half-way turn one decorative field into 23 empty stdin fields.
+peer_ref_update() {   # $1=claude pid $2=now (Unix seconds, for the age prune) — detached worker
+    umask 077                                            # cache dir 700 / entry 600: it enumerates which sessions are open on this
+                                                         # machine. Subshell-scoped (only ever run as a detached background job).
+    # ref stays "-" unless a digest passes the whitelist, and that marker is the POINT of every failure path here: publishing
+    # "this record yields no reference" is what stops the next frame re-forking this same doomed job. "-" can never be displayed
+    # — read_peer_ref accepts six hex and nothing else — so the marker is invisible to the line by construction.
+    local pid=$1 nowsec=$2 sock dg ref='-' tmp dest f p mt cut
+    sock=$(jq -r 'if (.messagingSocketPath | type) == "string" then .messagingSocketPath else empty end' \
+              "$PEER_REG_DIR/$pid.json" 2>/dev/null)
+    if [ -n "$sock" ]; then                              # an unparseable file, an absent field, a non-string value and an EMPTY
+        sock=${sock:0:256}                               #   string all fall through to the marker: they are one outcome by design
+        dg=$(printf '%s' "session:$sock" | shasum -a 256 2>/dev/null); dg=${dg%% *}   # "<hex>  -" → the hex
+        case "$dg" in
+            [0-9a-f]*) ;;
+            *) dg=$(printf '%s' "session:$sock" | openssl dgst -sha256 2>/dev/null); dg=${dg##*= } ;;   # "…(stdin)= <hex>" → the hex
+        esac
+        case "${dg:0:6}" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ref=${dg:0:6} ;;   # else: no SHA-256 tool, or output we do not know
+        esac
+    fi
+    mkdir -p "$PEER_REF_DIR" 2>/dev/null || return 0
+    [ -d "$PEER_REF_DIR" ] && [ ! -L "$PEER_REF_DIR" ] || return 0   # mkdir -p succeeds on a symlink to a directory; never write through one
+    # The destination must be absent or a plain file. Checked BEFORE the temp file exists, because the shape this guards against is
+    # a DIRECTORY sitting where the entry belongs: "mv -f" would then move the temp file INTO it, once per frame, forever.
+    dest="$PEER_REF_DIR/$pid"
+    [ ! -L "$dest" ] || return 0                         # -e and -f below both FOLLOW links, so the link test has to come first:
+                                                         #   without it a link to a regular file passes -f, and a dangling one
+                                                         #   passes -e, and "mv -f" then replaces the LINK. Nothing is written
+                                                         #   through to the target either way, but replacing it is still replacing
+                                                         #   something we did not create. Mirrors the read side's own -L test.
+    [ ! -e "$dest" ] || [ -f "$dest" ] || return 0
+    tmp="$PEER_REF_DIR/.$pid.$$"                         # write-then-rename: a concurrent frame can never read a partial value
+    printf '%s\n' "$ref" > "$tmp" 2>/dev/null && mv -f "$tmp" "$dest" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+    # Disk hygiene by age, not by liveness: unlike the PATH_CLICK map this record can correct itself from the registry, so there is
+    # nothing for a ps sweep to fix — only stale files to remove. The window is RL_REG_TTL (7d), the longest retention the script
+    # already uses; deleting an entry a live session still needs is harmless, its next frame re-derives it.
+    case "$nowsec" in ''|*[!0-9]*) return 0 ;; esac
+    [ -d "$PEER_REF_DIR" ] && [ ! -L "$PEER_REF_DIR" ] || return 0   # re-checked: this loop DELETES, so it must never walk a link
+    cut=$(( nowsec - ${RL_REG_TTL:-604800} ))
+    for f in "$PEER_REF_DIR"/*; do
+        p=${f##*/}
+        case $p in ''|*[!0-9]*) continue ;; esac          # skip the literal glob when the dir is empty, and any stray file
+        mt=$(stat -f '%m' "$f" 2>/dev/null)
+        case $mt in ''|*[!0-9]*) continue ;; esac
+        [ "$mt" -lt "$cut" ] && rm -f "$f" 2>/dev/null
+    done
+    return 0                                             # the walk's last comparison is not this function's answer
 }

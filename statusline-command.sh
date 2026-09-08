@@ -80,6 +80,10 @@ start_tokens_job   # fire-and-forget: detached, gated token re-sum updates the c
 $PATH_CLICK && start_cwdmap_job "$PPID"   # fire-and-forget: publish claude-pid → cwd for the terminal-side folder opener.
                    # $PPID must be read HERE, in the main shell: it is the claude process that owns this pane's tty, and a
                    # subshell's own $PPID is not it. CC's children have no controlling terminal, so the tty cannot be read on this side.
+read_peer_ref "$PPID"   # this session's six-hex peer reference (the value Claude Code's own agent listing shows in brackets).
+                   # Same $PPID, read in the main shell, for the same reason as the line above. Steady state is two file tests and a
+                   # builtin read; when the cache is cold or the registry record is newer than it, this fires a detached derivation
+                   # job for the NEXT frame and this frame renders without a reference (see read_peer_ref in lib/collect.sh).
 reconcile_start    # cross-session rate-limit sync as a background FD job — its serialized cache read+awk+mv overlaps the git stage below
 collect_status     # git×3 + effort scan collected concurrently, blocking until the slowest job finishes
 read_theme         # the theme/width jobs are long done by now (covered by the two steps above), zero wait
