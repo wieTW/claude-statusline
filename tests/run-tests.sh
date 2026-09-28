@@ -799,6 +799,41 @@ run 200 "$(rsjc - - 72 "$RT7" 41000 sA21d)" >/dev/null             # consumes it
 rm -f "$SEEN".* 2>/dev/null
 [ "$t21dbad" -eq 0 ] && echo "  T21d orphaned sightings older than RL_REG_TTL are swept only by a frame that wrote or removed one OK" || fail=1
 
+# T21e a foreign object at this frame's sighting temp path (<cache>.seen.<sid>.<pid>) must not cost the contended frame its display,
+# must never be moved into place or written through, and must print nothing. The reconcile core is sourced in a subshell with
+# HOME=$FAKE_HOME so the pid in that path is known: $$ is this harness in the subshell as in the core.
+t21ebad=0; tn=$(date +%s); t21es=$(sidof sA21e); t21et="$SEEN.$t21es.$$"; rm -f "$SEEN".* 2>/dev/null
+printf "S %s %s - - - %s 71 %s\nW7 %s 72 %s\n" "$t21es" $((tn-5000)) "$RT7" $((tn-3000)) "$RT7" $((tn-100)) > "$SLC"
+run 200 "$(rsjc - - 71 "$RT7" 40000 sA21e)" >/dev/null             # baseline 40000
+t21ecore() {  # the core's five-field output for sA21e reporting 72 with counter 41000 while another writer holds the lock
+  ( HOME="$FAKE_HOME"; export HOME; LC_ALL=C; export LC_ALL; RL_REG_TTL=604800
+    . "$SL/lib/collect.sh"; RL_LOCK_TRIES=3
+    session_id=$t21es now=$(date +%s) api_ms=41000 five_h="" five_reset="" seven_d=72 seven_reset=$RT7
+    _reconcile_core ) 2>"$WORK/t21e.err"
+}
+mkdir "$T19LOCK" 2>/dev/null
+for t21ek in dir link none; do
+  case "$t21ek" in
+    dir)  mkdir "$t21et" ;;
+    link) printf 'keep\n' > "$WORK/t21e.target"; ln -s "$WORK/t21e.target" "$t21et" ;;
+  esac
+  t21eo=$(t21ecore)
+  [ "$t21eo" = "||72|$RT7|" ] || { echo "  ★ FAIL T21e [$t21ek] the contended frame lost its display (want [||72|$RT7|]): [$t21eo]"; t21ebad=1; }
+  [ -s "$WORK/t21e.err" ] && { echo "  ★ FAIL T21e [$t21ek] printed on stderr: [$(cat "$WORK/t21e.err")]"; t21ebad=1; }
+  case "$t21ek" in
+    dir)  [ -d "$t21et" ] || { echo "  ★ FAIL T21e [dir] the foreign directory at the temp path was moved or removed"; t21ebad=1; }
+          [ -e "$SEEN.$t21es" ] && { echo "  ★ FAIL T21e [dir] a sighting appeared from a foreign temp object"; t21ebad=1; } ;;
+    link) [ -L "$t21et" ] && [ "$(cat "$WORK/t21e.target")" = keep ] || { echo "  ★ FAIL T21e [link] the sighting was written through or over a link at the temp path"; t21ebad=1; }
+          [ -e "$SEEN.$t21es" ] && { echo "  ★ FAIL T21e [link] a sighting appeared from a foreign temp object"; t21ebad=1; } ;;
+    none) t21esc=""; [ -f "$SEEN.$t21es" ] && read -r t21esc t21ess < "$SEEN.$t21es"
+          [ "$t21esc" = 41000 ] || { echo "  ★ FAIL T21e positive control: with a free temp path the sighting was not written: [$(cat "$SEEN.$t21es" 2>/dev/null)]"; t21ebad=1; }
+          [ -e "$t21et" ] && { echo "  ★ FAIL T21e the sighting temp file was left behind"; t21ebad=1; } ;;
+  esac
+  rm -rf "$t21et" "$SEEN.$t21es"
+done
+rmdir "$T19LOCK" 2>/dev/null; rm -f "$SEEN".* 2>/dev/null
+[ "$t21ebad" -eq 0 ] && echo "  T21e a foreign object at the sighting temp path costs no display, is never moved or written through OK" || fail=1
+
 # T22 the eleven-field row, its upgrades, and retention measured from the session's last write.
 t22bad=0; tn=$(date +%s); rm -f "$SLC"
 run 200 "$(rsjc 20 "$RT" - - 5000 sFmt22)" >/dev/null
