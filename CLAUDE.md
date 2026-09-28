@@ -184,7 +184,12 @@ per window class), and `P <resets_at> <timestamp> <used>` (bounded burn-projecti
 **Rule: the freshest observation is the authority, per class** — a changed pair gets
 `observed_at = now`, an unchanged pair carries its previous time, and a class record is replaced
 whole only when `observed_at >= auth_observed_at`. Climbs, cap-raise drops, and changed reset
-keys therefore follow the same rule. Because the record carries its own `resets_at`, a session
+keys therefore follow the same rule. **The pair test compares used% rounded to one decimal place, on both
+sides**, and the rounded value is what the `S` row, the class record and the `P` sample store: older CC builds
+send the unrounded product `utilization*100` (`56.00000000000001`), which the cache writes back as `56`, so a
+raw comparison saw a change on every frame and an idle session re-took the authority once a minute
+(2026-09-28; newer builds already round to one decimal). A row written before the rule is compared on its
+rounded form, so upgrading re-stamps nothing. Cases `T18`-`T18e` cover both classes and both CC formulas. Because the record carries its own `resets_at`, a session
 whose reported window has ROLLED adopts the live class authority whole — used% AND
 countdown (`reconcile_read` overwrites `five_reset`/`seven_reset` with the adopted effective
 key) — instead of staying stale on its pre-roll % with a permanent `0m` (the roll-staleness

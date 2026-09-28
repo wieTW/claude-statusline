@@ -380,12 +380,20 @@ _reconcile_core() {
             if (!(c in Rv) || o+0 >= Rf[c]+0) { Rk[c]=r; Rv[c]=u+0; Rf[c]=o }
         }
         # Record the latest pair for this session. First reports inherit first_seen; only a changed pair is observed now.
+        # The pair test compares used% rounded to one decimal place, on BOTH sides. Older Claude Code builds send the unrounded
+        # product utilization*100 (56.00000000000001) while the cache stores it through the six-digit number conversion as 56,
+        # so a raw comparison saw a change on every frame and an idle session re-took the class authority once a minute
+        # (2026-09-28). One decimal is the grid newer builds already round to. The rounded value is what the S row, the class
+        # record and the burn sample store, and a row written before this rule (56.1234) is compared on its rounded form, so an
+        # upgrade re-stamps nothing.
+        function q1(x){ return sprintf("%.1f", x) + 0 }
         function observe(c, r, u, o) {
             if (!isnum(r) || !isnum(u)) return
+            u=q1(u)
             if (!(c in Mr) || Mr[c]=="-") o=myfs
-            else if (Mr[c]""==r"" && Mu[c]+0==u+0) o=Mo[c]
+            else if (Mr[c]""==r"" && q1(Mu[c])==u) o=Mo[c]
             else o=now
-            Mr[c]=r; Mu[c]=u+0; Mo[c]=o
+            Mr[c]=r; Mu[c]=u; Mo[c]=o
             applycls(c, r, u, o)
         }
         BEGIN { MAXSAMP=5; HORIZON=10800; MAXWIN=691200 }              # ≤5 samples/window over ~3h; window keys sane below now+8d
