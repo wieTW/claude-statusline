@@ -6,7 +6,11 @@
 set -u
 SL=$(cd "$(dirname "$0")/.." && pwd)
 SLDIR=$(basename "$SL")   # project-dir basename, shown as the path segment; derived (not hardcoded) so the order check survives a repo rename
-SLBR=$(git -C "$SL" branch --show-current 2>/dev/null); SLBR=${SLBR:-main}  # current worktree branch; the order check must not assume main
+# The git label the statusline shows for this checkout, derived by the rule lib/collect.sh documents: the branch name, or the
+# short sha when HEAD is detached. `branch --show-current` prints nothing on a detached HEAD, and the old `:-main` fallback then
+# made A2 expect "main" while the line showed the sha, so every temporary worktree of a historical commit read red.
+# Empty (not a git checkout) is left empty on purpose: A2 then fails with its own message instead of matching any text.
+SLBR=$(git -C "$SL" symbolic-ref --short -q HEAD 2>/dev/null || git -C "$SL" rev-parse --short HEAD 2>/dev/null)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/sl-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 # Wall-clock second this run began. Only T4(b) uses it: that block audits the user's REAL shared cache, and it must be able to
@@ -98,10 +102,14 @@ chk check exact $((W+20-EDGE_PAD)) < <(run $((W+20)) "$J")
 
 echo "── A2. content order dir→model→ultra→ctx→quota→time→git→session"
 plain=$(run $((W+20)) "$J" | python3 -c 'import sys,re;sys.stdout.write(re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read()))')
+# An empty SLBR would turn the git slot of the pattern below into a match-anything glob, so it is a failure, not a pass.
+if [ -z "$SLBR" ]; then echo "  ★ FAIL A2 could not derive this checkout's git label (is [$SL] a git checkout?)"; fail=1
+else
 case "$plain" in
   "$SLDIR"*"Opus 4.8(1M)"*ultra*"6%"*"77%"*"16%"*"06-07 19:38"*"$SLBR"*"Consolidate statusline from two rows to one") echo "  order OK" ;;
   *) echo "  ★ FAIL order mismatch: [$plain]"; fail=1 ;;
 esac
+fi
 
 echo "── B. CJK session name: aligned width exactly $((140-EDGE_PAD)) (CJK=2 cells folds correctly)"
 chk check exact $((140-EDGE_PAD)) < <(run 140 "$JCJK")
