@@ -12,7 +12,8 @@ SLDIR=$(basename "$SL")   # project-dir basename, shown as the path segment; der
 # Empty (not a git checkout) is left empty on purpose: A2 then fails with its own message instead of matching any text.
 SLBR=$(git -C "$SL" symbolic-ref --short -q HEAD 2>/dev/null || git -C "$SL" rev-parse --short HEAD 2>/dev/null)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/sl-test.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+T4UDIR=""   # T4(c)'s probe directory under /Users/Shared, outside $WORK; set only while it exists
+trap 'rm -rf "$WORK"; [ -z "$T4UDIR" ] || rm -rf "$T4UDIR"' EXIT
 # Wall-clock second this run began. Only T4(b) uses it: that block audits the user's REAL shared cache, and it must be able to
 # tell a row THIS run could have stamped (timestamp >= HARNESS_T0) from one that was already on disk when the run started.
 # Taken here, before the first frame renders, so no write by any section of this harness can predate it.
@@ -746,11 +747,21 @@ else
   [ -z "$t4old" ] || echo "  NOTE T4(b) pre-existing synthetic rows predate this run; the gate leaves them alone by design (spec: refused ids are never deleted or rewritten), so this is not a failure:$t4old"
   [ -n "$t4new$t4old" ] || echo "  T4(b) real shared cache [$t4cache]: every S row is a real session id"
 fi
-# (c) scripts/sandbox-run.sh must FAIL CLOSED when the sandbox HOME would land inside a real user home ($SL is under /Users).
-t4sb=$(printf '{}' | env TMPDIR="$SL/tests" bash "$SL/scripts/sandbox-run.sh" --columns 80 2>&1); t4sbrc=$?
-rm -rf "$SL"/tests/sl-sandbox.* 2>/dev/null
-[ "$t4sbrc" = 2 ] || { echo "  ★ FAIL T4 sandbox-run.sh did not refuse a /Users sandbox HOME (rc=$t4sbrc): [$t4sb]"; t4bad=1; }
-case "$t4sb" in *"refusing to run"*) ;; *) echo "  ★ FAIL T4 sandbox-run.sh guard message missing: [$t4sb]"; t4bad=1 ;; esac
+# (c) scripts/sandbox-run.sh must FAIL CLOSED when the sandbox HOME would land under /Users. The probe TMPDIR is a fresh
+#     directory under /Users/Shared (the world-writable sticky directory every macOS install ships), not "$SL/tests": that
+#     only reached the guard while the checkout itself sat under /Users, so a verifier's worktree under /private/tmp handed
+#     sandbox-run.sh a harmless TMPDIR, it rendered normally, and this case read red. /Users/Shared is also outside any real
+#     $HOME, so only the /Users/* branch of the guard can refuse it; under "$SL/tests" the $REAL_HOME branch refused as well
+#     and would have hidden a guard that lost its /Users/* branch. No probe directory means FAIL, never a skip.
+T4UDIR=$(mktemp -d /Users/Shared/sl-t4probe.XXXXXX 2>/dev/null) || T4UDIR=""
+if [ -z "$T4UDIR" ]; then
+  echo "  ★ FAIL T4 could not create a probe directory under /Users/Shared, so the /Users guard of sandbox-run.sh went untested"; t4bad=1
+else
+  t4sb=$(printf '{}' | env TMPDIR="$T4UDIR" bash "$SL/scripts/sandbox-run.sh" --columns 80 2>&1); t4sbrc=$?
+  rm -rf "$T4UDIR"; T4UDIR=""
+  [ "$t4sbrc" = 2 ] || { echo "  ★ FAIL T4 sandbox-run.sh did not refuse a /Users sandbox HOME (rc=$t4sbrc): [$t4sb]"; t4bad=1; }
+  case "$t4sb" in *"refusing to run"*) ;; *) echo "  ★ FAIL T4 sandbox-run.sh guard message missing: [$t4sb]"; t4bad=1 ;; esac
+fi
 # (d) …and must still render a normal frame from its own throwaway HOME.
 t4line=$(printf '%s' "$(rsj 20 "$RT" sSandbox)" | bash "$SL/scripts/sandbox-run.sh" --columns 120); t4nl=$(printf '%s' "$t4line" | grep -c '')
 [ "$t4nl" -eq 1 ] || { echo "  ★ FAIL T4 sandbox-run.sh did not emit a single line ($t4nl): [$t4line]"; t4bad=1; }
