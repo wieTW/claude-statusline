@@ -407,7 +407,7 @@ _reconcile_core() {
     local writable=0; [ "$have_lock" = 1 ] && [ "$persist" = 1 ] && writable=1
     # API-activity counter: usable only when it is decimal digits (parse_input already sanitized and capped it); anything else is
     # absent and the pair-change rule decides. No other value reaches the awk, the row or the sighting file.
-    local apic="" seen="" sctr="" sat="" srest="" hasseen=0 sighttmp="" wrote=0
+    local apic="" seen="" sctr="" sat="" srest="" hasseen=0 sighttmp="" sightok=0 sightline="" wrote=0 nl=$'\n'
     case "$api_ms" in ''|*[!0-9]*) ;; *) apic=$api_ms ;; esac
     # Lock-contention sighting, one file per persistable session (the sid is UUID-shaped, so it is safe in a path). Reading it costs
     # builtins only: [ -f ] and, when it exists, read. A link or a non-regular file is never read, written or removed (not ours).
@@ -419,13 +419,16 @@ _reconcile_core() {
             case "$sctr" in ''|*[!0-9]*) sctr="" ;; esac
             case "$sat" in ''|*[!0-9]*) sat="" ;; esac
         fi
-        # a contention frame may write one (the awk decides whether its counter advanced), only when the path is free or a regular file
-        if [ "$writable" = 0 ] && [ ! -L "$seen" ] && { [ ! -e "$seen" ] || [ -f "$seen" ]; }; then sighttmp="$seen.$$"; fi
+        # a contention frame may write one (the awk decides whether its counter advanced), only when the sighting path is free or a
+        # regular file and nothing at all sits at its temp path: anything already there is not ours, so it is never written, moved or removed
+        sighttmp="$seen.$$"
+        if [ "$writable" = 0 ] && [ ! -L "$seen" ] && { [ ! -e "$seen" ] || [ -f "$seen" ]; } \
+           && [ ! -e "$sighttmp" ] && [ ! -L "$sighttmp" ]; then sightok=1; fi
     fi
     local out
     out=$(awk -v now="$now" -v sid="$session_id" -v r5="$five_reset" -v u5="$five_h" \
               -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" -v writable="$writable" \
-              -v api="$apic" -v sctr="$sctr" -v sat="$sat" -v sight="$sighttmp" '
+              -v api="$apic" -v sctr="$sctr" -v sat="$sat" -v sightok="$sightok" '
         function isnum(x){ return (x ~ /^[0-9]+(\.[0-9]+)?$/) }
         # sane live window key: strictly in the future AND below the 8d bound (longest 7d window 604800 + 1d skew margin) —
         # an absurd far-future key (the real cache once carried W 9999999999) would otherwise survive pruning forever
@@ -523,11 +526,6 @@ _reconcile_core() {
                 S7r[sid]=Mr[7]; S7u[sid]=((7 in Mu) ? Mu[7] : "-"); S7o[sid]=((7 in Mo) ? Mo[7] : "-")
                 Sa[sid]=((api != "") ? api : "-"); Sl[sid]=now          # the counter baseline for the next frame, and its last write
             }
-            # A read-only frame of a persistable id (lock contention) whose counter advanced records when it first saw that count; a
-            # sighting that already holds this count is kept (sight is empty unless the shell allowed a write), so the earliest second wins.
-            if (writable+0 != 1 && sight != "" && advanced() && !(sctr != "" && sctr+0 == api+0)) {
-                printf "%s %s\n", api, now > sight; close(sight)
-            }
             # append this frame’s sample (now, adopted used%) under the EFFECTIVE 5h key — the adopted authority’s resets_at, which
             # equals r5 whenever this frame’s snapshot window is live. 7d is never sampled (nothing downstream reads such a series).
             # The ev5 gate keeps a frame with no five-hour evidence at all from sampling another session’s quota.
@@ -563,8 +561,13 @@ _reconcile_core() {
             printf "%s|%s|%s|%s|%s\n", \
                 ((ev5 && (5 in Rv)) ? Rv[5]"" : ""), ((ev5 && (5 in Rv)) ? Rk[5] : ""), \
                 ((ev7 && (7 in Rv)) ? Rv[7]"" : ""), ((ev7 && (7 in Rv)) ? Rk[7] : ""), tte
+            # A read-only frame of a persistable id (lock contention) whose counter advanced reports when it first saw that count, as a
+            # second line after the five fields; the shell writes it. A sighting that already holds this count is kept, so the earliest
+            # second wins. The awk opens no sighting file itself, so no sighting problem can cost this frame its five fields.
+            if (writable+0 != 1 && sightok+0 == 1 && advanced() && !(sctr != "" && sctr+0 == api+0)) printf "%s %s\n", api, now
         }
     ' "$src" 2>/dev/null)
+    case "$out" in *"$nl"*) sightline=${out#*"$nl"}; out=${out%%"$nl"*} ;; esac   # line 2, when present, is the sighting to record
     # Persist ONLY when this frame both holds the lock AND has a rankable (non-empty) sid; otherwise this is a read-only frame:
     # skip the mv (leave the on-disk cache untouched), drop the temp, but still emit the adopted value computed above. This is the
     # safe-degradation path for both lock-contention and empty-sid, and it never errors out (no set -e).
@@ -579,10 +582,17 @@ _reconcile_core() {
         if [ "$hasseen" = 1 ] && [ "$wrote" = 1 ]; then rm -f "$seen" 2>/dev/null; _sighting_sweep; fi
     else
         rm -f "$tmpfile" 2>/dev/null
-        # Lock contention with an advanced counter: land the sighting by rename, so a reader never sees a partial line.
-        if [ -n "$sighttmp" ] && [ -s "$sighttmp" ]; then
-            mv -f "$sighttmp" "$seen" 2>/dev/null || rm -f "$sighttmp" 2>/dev/null
-            _sighting_sweep
+        # Lock contention with an advanced counter: write the sighting to this pid's temp (builtin printf, no fork) and land it by
+        # rename, so a reader never sees a partial line. Both ends are re-checked right before the mv: the temp must be the regular
+        # file just written, the destination free or a regular file (mv onto a directory would move the temp INTO it). A failure
+        # leaves display and cache as they are and sweeps nothing; only a temp this frame wrote is ever removed.
+        if [ "$sightok" = 1 ] && [ -n "$sightline" ] && { printf '%s\n' "$sightline" > "$sighttmp"; } 2>/dev/null; then
+            if [ -f "$sighttmp" ] && [ ! -L "$sighttmp" ] && [ ! -L "$seen" ] && { [ ! -e "$seen" ] || [ -f "$seen" ]; } \
+               && mv -f "$sighttmp" "$seen" 2>/dev/null; then
+                _sighting_sweep
+            elif [ -f "$sighttmp" ] && [ ! -L "$sighttmp" ]; then
+                rm -f "$sighttmp" 2>/dev/null
+            fi
         fi
     fi
     printf '%s\n' "$out"

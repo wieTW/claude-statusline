@@ -256,7 +256,9 @@ an open session writes every minute, and a frame never drops its own row), so a 
 week keeps its pair history and counter instead of re-registering as new (case `T22`).
 **A lock-contention frame records when it first saw a new count.** When its counter advanced past
 its own row, it writes `<counter> <second>` to `~/.claude/sl-ratelimit-cache.seen.<session_id>`
-(one writer per file, so no lock; mode 600, temp file plus rename, never through a symbolic link).
+(one writer per file, so no lock; mode 600, written by the shell to a per-pid temp file and renamed,
+never through a symbolic link, and never when anything already sits at the temp path, so a failed
+sighting write costs the frame nothing).
 The session's next writable frame with that same counter stamps the earlier second instead of
 `now`, so a change seen while another writer held the lock cannot later overwrite a newer
 observation, and it removes the file after its cache write. Orphans older than `RL_REG_TTL` are
