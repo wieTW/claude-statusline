@@ -979,6 +979,29 @@ w3=$(run 200 "$J" | nocol)
 case "$w3" in *"950"*) echo "  W3 sub-1000 raw count OK" ;; *) echo "  ★ FAIL W3 expected raw 950: [$w3]"; fail=1 ;; esac
 rm -f "$TKC"                                                              # W4: no cache → token segment omitted, frame still one line
 chk check max $((200-1)) < <(run 200 "$J")
+# W5: input-sanitization "A traversal transcript_path disables dependent reads", the token half (EFF-32 is the effort half).
+# A transcript_path holding ".." is blanked, so the detached re-sum never reads it and no cache line appears for that sid.
+# W5a is the control: the same file under its clean path IS summed within the same wait, so a missing W5 line means
+# "never read", not "not written yet". The wait is the PEER-9 idiom: a detached job is a fork of the frame's own bash.
+WTD="$WORK/wtok"; mkdir -p "$WTD/sub"   # sub/ must exist for sub/../s.jsonl to resolve to a real file
+printf '{"message":{"id":"m1","usage":{"input_tokens":700,"output_tokens":34}}}\n' > "$WTD/s.jsonl"
+wtoksettle() { local n=0; while [ "$n" -lt 20 ] && pgrep -f "$SL/statusline-command.sh" >/dev/null 2>&1; do sleep 0.1; n=$((n+1)); done; }
+wtokframe() {  # $1=session_id $2=transcript_path → one frame; returns once any token job it started has finished (<=2s)
+  run 200 "$(printf '%s' "$J" | jq -c --arg s "$1" --arg t "$2" '.session_id=$s | .transcript_path=$t')" >/dev/null
+  wtoksettle
+}
+wtokline() { awk -v s="$1" '$1=="T" && $2==s' "$TKC" 2>/dev/null; }   # $1=sid → its cache line, empty when none
+wtoksettle   # W4's frame started a job on the same cache lock; a job still holding it would make W5a's job skip
+wtokframe sl-tokok "$WTD/s.jsonl"
+case "$(wtokline sl-tokok)" in
+  "T sl-tokok 734 "*) echo "  W5a clean transcript_path summed → 734 OK" ;;
+  *) echo "  ★ FAIL W5a control: the clean path was not summed: [$(wtokline sl-tokok)]"; fail=1 ;;
+esac
+wtokframe sl-toktrav "$WTD/sub/../s.jsonl"
+case "$(wtokline sl-toktrav)" in
+  "") echo "  W5 traversal transcript_path never read for tokens OK" ;;
+  *) echo "  ★ FAIL W5 a traversal transcript_path was summed: [$(wtokline sl-toktrav)]"; fail=1 ;;
+esac
 rm -f "$TKC" "$TKC".* 2>/dev/null; rm -rf "$TKC".lock 2>/dev/null
 
 echo "── V. parse_input positional contract: each field lands in its own global (sentinel)"
@@ -2638,6 +2661,7 @@ effcase EFF-24 ultra "$EFDM" xhigh "$EFFD/t-farset.jsonl"
 effcase EFF-25 ultra "$EFDM" xhigh "$EFFD/absent.jsonl" --dangerously-skip-permissions --settings "$ON"
 effcase EFF-26 ultra "$EFDM" xhigh "$EFFD/t-none.jsonl" --settings '{"ultracode": true}'
 effcase EFF-27 ultra "$EFDM" xhigh "$EFFD/absent.jsonl" --effort ultracode
+effcase EFF-27b ultra "$EFDM" xhigh "$EFFD/absent.jsonl" --effort=ultracode   # the one-argument spelling of EFF-27
 effcase EFF-28 xhigh "$EFDM" xhigh "$EFFD/absent.jsonl" --settings '{"ultracode":false}'
 effcase EFF-29 xhigh "$EFDM" xhigh "$EFFD/absent.jsonl" --dangerously-skip-permissions
 effcase EFF-30 high "$EFDM" high "$EFFD/absent.jsonl" --settings "$ON"
