@@ -209,14 +209,34 @@ shrink-before-drop, and core survival at pathological widths.
 CC refreshes a session's `rate_limits` after each API round trip; an idle session keeps its
 last received value. Reconcile (in `lib/collect.sh`, gated by `RL_SYNC`) shares the freshest
 observation through `~/.claude/sl-ratelimit-cache` using one `awk` pass over four line types:
-`S <session_id> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7>` (per-session last pairs and
-observation times), `W5 <resets_at> <used> <auth_observed_at>` / `W7 …` (ONE authority record
+`S <session_id> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7> <api_ms> <last_seen>` (per-session last
+pairs and observation times, the API-activity counter of the session's latest writable frame or `-`,
+and that frame's second), `W5 <resets_at> <used> <auth_observed_at>` / `W7 …` (ONE authority record
 per window class), and `P <resets_at> <timestamp> <used>` (bounded burn-projection samples).
-**Rule: the freshest observation is the authority, per class** — a changed pair gets
-`observed_at = now`, an unchanged pair carries its previous time, and a class record is replaced
-whole only when `observed_at >= auth_observed_at`. Climbs, cap-raise drops, and changed reset
-keys therefore follow the same rule. **The pair test compares used% rounded to one decimal place, on both
-sides**, and the rounded value is what the `S` row, the class record and the `P` sample store: older CC builds
+Nine-field and three-field `S` rows from older code are read and rewritten in the eleven-field form
+(`api_ms` `-`, `last_seen` = `first_seen`); code from before the counter drops eleven-field rows, so a
+rollback makes every live session re-register once.
+**Rule: the freshest observation is the authority, per class**, and a class record is replaced whole
+only when `observed_at >= auth_observed_at`. Climbs, cap-raise drops, and changed reset keys
+therefore follow the same rule. **Freshness comes from Claude Code's API-activity counter,
+`cost.total_api_duration_ms`, whenever it is usable (decimal digits only)**: a frame whose counter
+advanced past the one recorded in its own row is stamped `now`, even when the number is unchanged; a
+frame whose counter did not advance carries its recorded time over, even when the number changed (a
+startup quota probe or a 429 moves `rate_limits` without a response); a report with no recorded
+counter (a new session id, as after `/clear` in an idle process; a pruned row; a row written before
+the counter) gets its recorded time or `0`, freshness unknown, which fills an empty class but never
+replaces a live record. That closes the cases where "the number changed" and "new data arrived"
+disagree: a new id carrying an hours-old reading, a week-old session re-registering, and a session
+whose first reply came after its start. Cases `T19`-`T19g` cover the rule.
+**If rate sync misbehaves after a Claude Code upgrade, check the counter first.** The rule relies on
+three facts read from the 2.1.272 and 2.1.283 binaries, not on a documented contract: the counter
+advances only when a model response completes on the main query path, after that response's
+rate-limit headers were applied; `/clear` resets it to 0 while the process-wide reading survives; and
+resume restores the saved value (a smaller counter simply becomes the new baseline). A frame without
+a usable counter falls back to the **pair-change rule**: a changed pair gets `observed_at = now`, an
+unchanged pair carries its previous time, a first report gets `first_seen`.
+**The pair test compares used% rounded to one decimal place, on both
+sides**, and the rounded value is what the `S` row, the class record and the `P` sample store in both modes: older CC builds
 send the unrounded product `utilization*100` (`56.00000000000001`), which the cache writes back as `56`, so a
 raw comparison saw a change on every frame and an idle session re-took the authority once a minute
 (2026-09-28; newer builds already round to one decimal). A row written before the rule is compared on its
@@ -224,11 +244,24 @@ rounded form, so upgrading re-stamps nothing. Cases `T18`-`T18e` cover both clas
 whose reported window has ROLLED adopts the live class authority whole — used% AND
 countdown (`reconcile_read` overwrites `five_reset`/`seven_reset` with the adopted effective
 key) — instead of staying stale on its pre-roll % with a permanent `0m` (the roll-staleness
-bug). Window keys are sane only below `now+691200` (8d = the longest 7d window + 1d skew
+bug). Claude Code leaves an expired window out of the JSON altogether, so an idle session past a
+roll usually reports no object for that class: when its own row shows it reported that class
+before, it still adopts the live class authority (value and countdown) and, for the 5h class, keeps
+appending burn samples; a session that never reported the class stays silent (case `T20`).
+Window keys are sane only below `now+691200` (8d = the longest 7d window + 1d skew
 margin), so an absurd far-future key can never become an immortal cache line; legacy untagged
-`W` lines and malformed S rows are dropped on rewrite. `RL_REG_TTL` prunes registry records
-older than the longest reset window while preserving each live session's pair history, so an
-unchanged value is not mistaken for a first observation. Test section `T` covers the full matrix.
+`W` lines and malformed S rows are dropped on rewrite. `RL_REG_TTL` prunes a registry row whose
+`last_seen` is that old (retention is measured from the session's last write, never from its start;
+an open session writes every minute, and a frame never drops its own row), so a session open for a
+week keeps its pair history and counter instead of re-registering as new (case `T22`).
+**A lock-contention frame records when it first saw a new count.** When its counter advanced past
+its own row, it writes `<counter> <second>` to `~/.claude/sl-ratelimit-cache.seen.<session_id>`
+(one writer per file, so no lock; mode 600, temp file plus rename, never through a symbolic link).
+The session's next writable frame with that same counter stamps the earlier second instead of
+`now`, so a change seen while another writer held the lock cannot later overwrite a newer
+observation, and it removes the file after its cache write. Orphans older than `RL_REG_TTL` are
+swept by `find`, only on a frame that wrote or removed a sighting (cases `T21`-`T21d`); every other
+frame pays one builtin `[ -f ]`. Test section `T` covers the full matrix.
 
 **Backgrounded + serialized.** `reconcile_start` launches `_reconcile_core` as a background FD
 job (`exec 9< <(… </dev/null)`) overlapping the git stage; `reconcile_read` reaps the FD and
@@ -237,7 +270,7 @@ applies numeric adoption guards. The whole read+awk+mv is serialized by an **`mk
 bounded retry + stale-steal (`RL_LOCK_TRIES`/`RL_LOCK_WAIT`/`RL_LOCK_STALE`, defined in
 collect.sh), so concurrent renders don't lose updates. Two safe-degradation paths, both still
 **adopting the value they READ** (never their own stale report): lock not acquired → skip the
-`mv`, run awk read-only; **a `session_id` that cannot persist** → skip the lock and `mv` entirely (a frame
+`mv`, run awk read-only, write nothing shared except its own sighting; **a `session_id` that cannot persist** → skip the lock and `mv` entirely (a frame
 that cannot record an observation never does a destructive rewrite). That covers an empty `session_id` and,
 per `sid_persistable`, any id that is not a real Claude Code UUID (8-4-4-4-12 lowercase hex) — a synthetic id
 would otherwise be the freshest observation and seize the class authority for every live session (the
@@ -438,7 +471,7 @@ both-fields-unusable fallbacks down the three-level chain.
 ## Hard rules — violating these reintroduces fixed bugs
 
 - **Never render against the real `$HOME`.** `statusline-command.sh` writes cross-session state
-  (`~/.claude/sl-ratelimit-cache`, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`, `~/.claude/sl-peer-ref`); a frame run by hand
+  (`~/.claude/sl-ratelimit-cache` and its `.seen.<session_id>` sightings, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`, `~/.claude/sl-peer-ref`); a frame run by hand
   becomes the freshest observation and rewrites what every live session shows. Use `scripts/sandbox-run.sh`.
 - **Never `set -e`, anywhere.** A `read` hitting EOF with no trailing newline returns
   rc=1 as a normal path; `-e` would kill the script mid-frame.
@@ -510,7 +543,7 @@ directory to `~/.claude/sl-cwd/<claude pid>` for the terminal-side opener; false
 palette), `RIGHT_ALIGN`, `EDGE_PAD` (drawable-width correction; bump if a CC build
 truncates the right edge again), `JGAP` (min gap before a `│` junction is inserted),
 `RL_SYNC` (cross-session rate-limit sync on/off; see above), `RL_REG_TTL` (session-registry
-retention in sec, default 7d), `BURN_SENS` (rate-limit burn-projection alarm sensitivity —
+retention in sec from each session's last activity, default 7d), `BURN_SENS` (rate-limit burn-projection alarm sensitivity —
 `conservative` alarms only ≤30m to exhaust / `balanced` default ~90m+ / `sensitive` alarms
 whenever exhaust is projected before reset; needs `RL_SYNC=true` since it samples the
 reconciled authority; all levels still require a positive slope AND projected exhaust before

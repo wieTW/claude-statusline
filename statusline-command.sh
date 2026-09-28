@@ -36,15 +36,16 @@ EDGE_PAD=4         # CC's statusline drawable area is N cols narrower than the w
                    # With EDGE_PAD=3 the emitted line is 1 col too wide and CC eats the tail. Tune here if a future CC build changes its drawable area.
 JGAP=2             # minimum whitespace gap for the two parts to count as "separated": gap>=JGAP → plain whitespace, no junction │; <JGAP → the parts are too tight,
                    # so insert a │ separator (truncating the name to make room if needed). Larger → fewer │; set 1 → a │ appears as soon as they nearly touch
-RL_SYNC=true       # cross-session rate-limit sync. CC freezes rate_limits at a session's START snapshot (upstream limitation): an old
-                   # session keeps showing its stale used%, only the countdown moves. When true, each window CLASS's (5h / 7d)
-                   # authority in ~/.claude/sl-ratelimit-cache is the (used%, resets_at) reported by the NEWEST session (latest
-                   # first-seen) — an older session can never override it, a newer one can in either direction. So a frozen session
-                   # adopts a fresher session's value, a genuine drop (Anthropic raised the cap → % recomputed down) is honoured, and
-                   # after a window ROLLS a frozen session adopts the live window's value AND countdown (no more stale % + 0m).
-                   # false → trust only this session's (possibly frozen) value. See _reconcile_core in lib/collect.sh for the full rule.
-RL_REG_TTL=604800  # session-registry retention (sec): drop a session's first-seen record once it is older than the longest reset window
-                   # (7d) — it can no longer be the authority for any live window. Authority VALUES persist independently of this.
+RL_SYNC=true       # cross-session rate-limit sync. CC refreshes a session's rate_limits only after that session's own API responses, so an
+                   # idle session keeps showing its last reading. When true, each window CLASS's (5h / 7d) authority in
+                   # ~/.claude/sl-ratelimit-cache is the (used%, resets_at) of the FRESHEST observation: the session whose API-activity
+                   # counter (cost.total_api_duration_ms) most recently advanced, whatever its start time and in either direction. So an
+                   # idle session adopts a busier session's value, a genuine drop (Anthropic raised the cap → % recomputed down) is
+                   # honoured, and after a window ROLLS an idle session adopts the live window's value AND countdown (no stale % + 0m).
+                   # false → trust only this session's (possibly stale) value. See _reconcile_core in lib/collect.sh for the full rule.
+RL_REG_TTL=604800  # session-registry retention (sec), measured from each session's last activity (its latest writable frame): drop a
+                   # session's row once it has not written for this long. An open session writes every minute, so it keeps its row
+                   # however long it stays open. Authority VALUES persist independently of this.
 BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SYNC=true — it samples the reconciled authority
                    # used%, so with sync off there is no series to project). Three levels: conservative (alarm only when ≤30m to
                    # exhaust) / balanced (default, alarm when projected exhaust is ≤~90m+ away) / sensitive (alarm whenever exhaust
@@ -64,9 +65,10 @@ BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SY
 LASTMSG_WARN=300   # Δ ≥ this (sec) → yellow: default 5-min prompt cache has gone idle-cold (5 min)
 LASTMSG_STALE=3600 # Δ ≥ this (sec) → red: even the 1-hour extended cache is gone; continuing pays a full cache write (1 h)
 
-# RL_REG_TTL floor: registry retention MUST never be shorter than the longest reset window (604800s / 7d). A smaller value prunes a
-# still-alive session's S registry line, so next frame it re-ranks as NEW and seizes authority with its frozen used% (under-reporting —
-# the one direction the meter must never get wrong). Floor only (a larger value is kept); non-numeric/empty → 604800. One builtin test, no fork.
+# RL_REG_TTL floor: registry retention MUST never be shorter than the longest reset window (604800s / 7d). Retention runs from last
+# activity, and the floor keeps the row of a session whose frames pause (the machine slept) for at least the longest window; a pruned
+# session loses its pair history and counter and has to earn freshness again. Floor only (a larger value is kept); non-numeric/empty →
+# 604800. One builtin test, no fork.
 case "$RL_REG_TTL" in ''|*[!0-9]*) RL_REG_TTL=604800 ;; *) [ "$RL_REG_TTL" -ge 604800 ] || RL_REG_TTL=604800 ;; esac
 
 case $0 in */*) SL_DIR=${0%/*} ;; *) SL_DIR=. ;; esac   # pure-bash dirname, saves a fork
