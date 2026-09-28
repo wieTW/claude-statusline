@@ -782,6 +782,23 @@ srow sC21c | awk -v t="$t21ct" '$9>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL
 rm -f "$SEEN.$t21cs"
 [ "$t21cbad" -eq 0 ] && echo "  T21c no sighting from uncontended, non-advanced, unusable, refused or empty ids; links are never written or used OK" || fail=1
 
+# T21d the age sweep: a sighting orphaned by a session that ended is removed once it is older than RL_REG_TTL, and only by a frame
+# that wrote or removed a sighting; a young sighting of another session survives.
+t21dbad=0; tn=$(date +%s); t21ds=$(sidof sA21d); rm -f "$SEEN".* 2>/dev/null
+printf "S %s %s - - - %s 71 %s\nW7 %s 72 %s\n" "$t21ds" $((tn-5000)) "$RT7" $((tn-3000)) "$RT7" $((tn-100)) > "$SLC"
+run 200 "$(rsjc - - 71 "$RT7" 40000 sA21d)" >/dev/null             # baseline 40000
+t21dold="$SEEN.$(sidof sGone21d)"; t21dyoung="$SEEN.$(sidof sYoung21d)"
+printf '5000 %s\n' $((tn-8*86400)) > "$t21dold"; touch -t "$(date -r $((tn-8*86400)) +%Y%m%d%H%M.%S)" "$t21dold"
+printf '5000 %s\n' $((tn-60)) > "$t21dyoung"
+run 200 "$(rsjc - - 71 "$RT7" 40000 sA21d)" >/dev/null             # neither writes nor removes a sighting: no sweep
+[ -f "$t21dold" ] || { echo "  ★ FAIL T21d a frame that neither wrote nor removed a sighting ran the sweep"; t21dbad=1; }
+printf '41000 %s\n' $((tn-30)) > "$SEEN.$t21ds"
+run 200 "$(rsjc - - 72 "$RT7" 41000 sA21d)" >/dev/null             # consumes its own sighting, then sweeps
+[ -e "$t21dold" ] && { echo "  ★ FAIL T21d an orphaned sighting older than RL_REG_TTL survived the sweep"; t21dbad=1; }
+[ -f "$t21dyoung" ] || { echo "  ★ FAIL T21d the sweep removed a young sighting of another session"; t21dbad=1; }
+rm -f "$SEEN".* 2>/dev/null
+[ "$t21dbad" -eq 0 ] && echo "  T21d orphaned sightings older than RL_REG_TTL are swept only by a frame that wrote or removed one OK" || fail=1
+
 # T22 the eleven-field row, its upgrades, and retention measured from the session's last write.
 t22bad=0; tn=$(date +%s); rm -f "$SLC"
 run 200 "$(rsjc 20 "$RT" - - 5000 sFmt22)" >/dev/null
