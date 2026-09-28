@@ -438,6 +438,103 @@ awk -v r="$RTNEW" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==3&&$4>min{n++} E
 awk -v r="$RTNEW" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==3&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T16 active S row did not record the rolled pair"; t16bad=1; }
 grep -q "^W5 $RTOLD " "$SLC" && { echo "  ★ FAIL T16 old W5 key survived window re-key"; t16bad=1; }
 [ "$t16bad" -eq 0 ] && echo "  T16 window roll adopts new key and drops old class record OK" || fail=1
+
+# T18 family (2026-09-28 incident): an idle session on an older Claude Code build re-sends its last reading as the unrounded
+# product utilization*100 (e.g. 56.00000000000001). The cache stores it through awk's six-digit conversion as 56, so a pair test
+# on the raw numbers saw a change on every frame and handed the idle session the class authority once a minute. Every other case
+# in this section uses integer literals, which is why T17 passed while the field failed.
+# ccpct() prints what each known build sends, computed in IEEE-754 doubles by jq (byte-identical to Node for these formulas):
+# old = utilization*100 unrounded, new = Math.round(utilization*1000)/10. Session ids go through sidof: a non-UUID id takes the
+# read-only path of the writer gate and every case below would pass vacuously on the unfixed tree.
+ccpct() {  # $1=utilization $2=old|new → the used_percentage literal that build sends
+  case "$2" in
+    old) jq -n --argjson u "$1" '$u*100' ;;
+    new) jq -n --argjson u "$1" '($u*1000|round)/10' ;;
+  esac
+}
+rsj7() {  # $1=used7% literal $2=resets_at $3=session label → seven_day-only json (sid via sidof)
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --arg sid "$(sidof "$3")" --argjson u "$1" --argjson r "$2" '
+  { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
+    rate_limits:{seven_day:{used_percentage:$u, resets_at:$r}}, session_id:$sid, transcript_path:$tp }'; }
+# Helper self-check: the literal table of the spec requirement "Pair-change test compares used% rounded to one decimal place".
+t18hbad=0
+while read -r hu hold hnew; do
+  [ "$(ccpct "$hu" old)" = "$hold" ] || { echo "  ★ FAIL T18 helper: $hu old gave [$(ccpct "$hu" old)], want [$hold]"; t18hbad=1; }
+  [ "$(ccpct "$hu" new)" = "$hnew" ] || { echo "  ★ FAIL T18 helper: $hu new gave [$(ccpct "$hu" new)], want [$hnew]"; t18hbad=1; }
+done <<'CCPCT'
+0.07 7.000000000000001 7
+0.29 28.999999999999996 29
+0.56 56.00000000000001 56
+0.58 57.99999999999999 58
+0.5612345 56.12345 56.1
+0.5831 58.309999999999995 58.3
+CCPCT
+[ "$t18hbad" -eq 0 ] && echo "  T18 fixture helper reproduces both Claude Code formulas (spec table) OK" || fail=1
+T18FS=$((NOW - 2000)); T18O=$((NOW - 1500))   # idle session: first seen long ago, last observed before the newer W record
+
+# T18 the incident: a newer session holds W7 at 73; the idle session whose row records 56 renders twice with the 0.56 old literal.
+t18lit=$(ccpct 0.56 old); t18bad=0; t18sid=$(sidof sIdle18)
+printf "S %s %s - - - %s 73 %s\nS %s %s - - - %s 56 %s\nW7 %s 73 %s\n" \
+  "$(sidof sNewer18)" "$RECENT" "$RT7" "$RECENT" "$t18sid" "$T18FS" "$RT7" "$T18O" "$RT7" "$RECENT" > "$SLC"
+t18w=$(grep '^W7 ' "$SLC"); t18j=$(rsj7 "$t18lit" "$RT7" sIdle18)
+case "$t18j" in *"\"used_percentage\":$t18lit,"*) ;; *) echo "  ★ FAIL T18 fixture lost the unrounded literal [$t18lit]: [$t18j]"; t18bad=1 ;; esac
+for t18n in 1 2; do
+  t18=$(run 200 "$t18j" | nocol)
+  case "$t18" in *" 27%"*) ;; *) echo "  ★ FAIL T18 frame $t18n: idle session repeating $t18lit took the 7d authority (expected 27% left): [$t18]"; t18bad=1 ;; esac
+  [ "$(grep '^W7 ' "$SLC")" = "$t18w" ] || { echo "  ★ FAIL T18 frame $t18n: W7 changed: before=[$t18w] after=[$(grep '^W7 ' "$SLC")]"; t18bad=1; }
+  awk -v sid="$t18sid" -v r="$RT7" -v o="$T18O" '$1=="S"&&NF==9&&$2==sid&&$7==r&&$8==56&&$9==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18 frame $t18n: idle row o7 moved: [$(grep "^S $t18sid " "$SLC")]"; t18bad=1; }
+done
+[ "$t18bad" -eq 0 ] && echo "  T18 idle session repeating an unrounded 7d literal ($t18lit) cannot re-take the authority OK" || fail=1
+
+# T18b the five-hour twin: a newer session holds W5 at 20; the idle session whose row records 7 renders with the 0.07 old literal.
+t18blit=$(ccpct 0.07 old); t18bbad=0; t18bsid=$(sidof sIdle18b)
+printf "S %s %s %s 20 %s - - -\nS %s %s %s 7 %s - - -\nW5 %s 20 %s\n" \
+  "$(sidof sNewer18b)" "$RECENT" "$RT" "$RECENT" "$t18bsid" "$T18FS" "$RT" "$T18O" "$RT" "$RECENT" > "$SLC"
+t18bw=$(grep '^W5 ' "$SLC")
+t18b=$(run 200 "$(rsj "$t18blit" "$RT" sIdle18b)" | nocol)
+case "$t18b" in *" 80%"*) ;; *) echo "  ★ FAIL T18b idle session repeating $t18blit took the 5h authority (expected 80% left): [$t18b]"; t18bbad=1 ;; esac
+[ "$(grep '^W5 ' "$SLC")" = "$t18bw" ] || { echo "  ★ FAIL T18b W5 changed: before=[$t18bw] after=[$(grep '^W5 ' "$SLC")]"; t18bbad=1; }
+awk -v sid="$t18bsid" -v r="$RT" -v o="$T18O" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==7&&$6==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18b idle row o5 moved: [$(grep "^S $t18bsid " "$SLC")]"; t18bbad=1; }
+[ "$t18bbad" -eq 0 ] && echo "  T18b idle session repeating an unrounded 5h literal ($t18blit) cannot re-take the authority OK" || fail=1
+
+# T18c formula sweep: p = 0..100, utilization p/100, both formulas, both classes in one frame. The idle row starts with no
+# recorded pair; the first frame records it, and the repeat must move neither the observation times nor either class record.
+# No value is pre-selected, so the sweep encodes no assumption about which literals carry float noise.
+t18cbad=0; t18cn=0; t18csid=$(sidof sSweep18)
+t18csnap() { awk -v sid="$t18csid" '$1=="S"&&$2==sid{s=s $4" "$6" "$7" "$9} $1=="W5"||$1=="W7"{s=s" | "$0} END{print s}' "$SLC"; }   # one line: "r5 o5 r7 o7 | W5 ... | W7 ..."
+for t18cp in $(seq 0 100); do
+  t18cu=$(jq -n --argjson p "$t18cp" '$p/100')
+  for t18cf in old new; do
+    t18clit=$(ccpct "$t18cu" "$t18cf"); t18cn=$((t18cn + 1))
+    printf "S %s %s - - - - - -\nW5 %s 50 %s\nW7 %s 50 %s\n" "$t18csid" "$OLD" "$RT" "$RECENT" "$RT7" "$RECENT" > "$SLC"
+    t18cj=$(rsj2 "$t18clit" "$RT" "$t18clit" "$RT7" sSweep18)
+    run 200 "$t18cj" >/dev/null; t18c1=$(t18csnap)
+    run 200 "$t18cj" >/dev/null; t18c2=$(t18csnap)
+    case "$t18c1" in "$RT $OLD $RT7 $OLD |"*) ;; *) echo "  ★ FAIL T18c p=$t18cp $t18cf literal=$t18clit: first frame did not record the pair: [$t18c1]"; t18cbad=1; continue ;; esac
+    [ "$t18c1" = "$t18c2" ] || { echo "  ★ FAIL T18c p=$t18cp $t18cf literal=$t18clit: repeat moved an observation time or class record: [$t18c1] -> [$t18c2]"; t18cbad=1; }
+  done
+done
+[ "$t18cbad" -eq 0 ] && echo "  T18c formula sweep: $t18cn cases (p=0..100 x old/new, both classes), no repeat re-stamps a session OK" || fail=1
+
+# T18d a row written before rounding existed (56.1234) re-reported as 56.12345: the same tenth, so the observation is carried over
+# and the row is rewritten as 56.1. Rounding only the incoming value would compare 56.1 with 56.1234 and re-stamp it once at upgrade.
+t18dbad=0; t18dsid=$(sidof sB18d)
+printf "S %s %s - - - %s 56.1234 %s\nW7 %s 73 %s\n" "$t18dsid" "$T18FS" "$RT7" "$T18O" "$RT7" "$RECENT" > "$SLC"
+t18dw=$(grep '^W7 ' "$SLC")
+run 200 "$(rsj7 56.12345 "$RT7" sB18d)" >/dev/null
+[ "$(grep '^W7 ' "$SLC")" = "$t18dw" ] || { echo "  ★ FAIL T18d W7 changed: before=[$t18dw] after=[$(grep '^W7 ' "$SLC")]"; t18dbad=1; }
+grep -q "^S $t18dsid $T18FS - - - $RT7 56\\.1 $T18O\$" "$SLC" || { echo "  ★ FAIL T18d pre-rounding row was not carried over as 56.1: [$(grep "^S $t18dsid " "$SLC")]"; t18dbad=1; }
+[ "$t18dbad" -eq 0 ] && echo "  T18d pre-rounding row (56.1234) re-reported as 56.12345 keeps its o7 and is rewritten as 56.1 OK" || fail=1
+
+# T18e positive control: a genuine change of one tenth (56 -> 56.1) is a fresh observation, stamped now and adopted.
+# It holds before and after the fix; rounding coarser than one decimal would hide the change and turn it red.
+t18ebad=0; t18esid=$(sidof sA18e)
+printf "S %s %s - - - %s 56 %s\nW7 %s 56 %s\n" "$t18esid" "$T18FS" "$RT7" "$T18O" "$RT7" "$T18O" > "$SLC"
+t18et=$(date +%s)
+run 200 "$(rsj7 56.1 "$RT7" sA18e)" >/dev/null
+awk -v sid="$t18esid" -v r="$RT7" -v t="$t18et" '$1=="S"&&NF==9&&$2==sid&&$7==r&&$8=="56.1"&&$9>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18e a 0.1 change was not stamped now: [$(grep "^S $t18esid " "$SLC")]"; t18ebad=1; }
+awk -v r="$RT7" -v t="$t18et" '$1=="W7"&&NF==4&&$2==r&&$3=="56.1"&&$4>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18e W7 did not adopt 56.1 at now: [$(grep '^W7 ' "$SLC")]"; t18ebad=1; }
+[ "$t18ebad" -eq 0 ] && echo "  T18e a 0.1 change (56 -> 56.1) is stamped now and adopted as W7 56.1 OK" || fail=1
 rm -f "$SLC"
 
 echo "── T2. RATE-SYNC CONCURRENCY: mkdir-lock serialises read+awk+mv (no lost-update), lock-contention safe-skip, empty-sid read-only, torn-cache survives"
