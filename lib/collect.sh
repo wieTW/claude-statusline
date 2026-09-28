@@ -267,21 +267,29 @@ collect_status() {
 # reporting the last value it received. This shares the freshest observation across sessions so an idle frame adopts current usage.
 #
 # Rule — "the freshest observation is the authority", per window CLASS: the cache persists ONE record per class (W5 = five-hour,
-# W7 = seven-day), each carrying (resets_at, used%, auth_observed_at). Every session also remembers its last reported pair per class:
-# when that pair changes, observed_at becomes now; when it is unchanged, observed_at is carried over. A report replaces the stored
-# class record — key, value and observation time together — only when observed_at >= auth_observed_at and its window key is live.
+# W7 = seven-day), each carrying (resets_at, used%, auth_observed_at). Every session also remembers its last reported pair per class
+# and its API-activity counter (cost.total_api_duration_ms, which Claude Code advances only after a model response's rate-limit headers
+# were applied). With a usable counter (decimal digits) the counter alone decides freshness: an advance past the recorded counter
+# stamps the report now (or the second a lock-contention frame first saw that count, below); no advance carries the recorded
+# observed_at over even when the number changed; no recorded counter (a new id, a pruned or pre-counter row) carries the recorded
+# observed_at or gives 0, freshness unknown, which can fill an empty class but never replace a live record. Without a usable counter
+# the pair-change rule decides: a changed pair (used% rounded to one decimal) is now, an unchanged one is carried over, a first
+# report gets first_seen. A report replaces the stored class record — key, value and observation time together — only when
+# observed_at >= auth_observed_at and its window key is live.
 # This works in both directions: normal usage climbs and cap-raise drops are adopted alike. A changed resets_at re-keys the whole class
 # after a window roll. Class-isolated: 5h never adopts a W7 record and vice versa; with no live class authority the frame keeps its own
 # reported values. The authority is persisted and is not pruned when a session ends; only its live/sane window bounds its lifetime.
 #
 # Cache lines, four kinds (malformed / old-format lines — including the legacy untagged `W` schema — are simply not carried forward):
-#   S  <session_id> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7>  per-session last pair + observation time (`- - -` if absent)
+#   S  <session_id> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7> <api_ms> <last_seen>  per-session last pair + observation time
+#      (`- - -` if absent), the counter of its latest writable frame (`-` if unusable) and that frame's second. Nine-field and
+#      three-field rows from older code are read and rewritten in this form with api_ms `-` and last_seen = first_seen.
 #   W5 <resets_at>  <used> <auth_observed_at> five-hour class authority (single record; key+value+time replaced together)
 #   W7 <resets_at>  <used> <auth_observed_at> seven-day class authority (same shape)
 #   P  <resets_at>  <timestamp> <used>        burn-projection sample: (when, adopted used%) for a window, bounded series
 # Pruning on rewrite: W5/W7/P lines with resets_at <= now (window rolled) OR resets_at >= now+691200 (8d sanity bound = the longest
 # 7d window + 1d skew margin; an absurd far-future key — the real cache once carried W 9999999999 — must never become immortal),
-# and S lines older than RL_REG_TTL (past the longest window), are dropped; P samples older than the sampling horizon, or beyond
+# and S lines whose last_seen is RL_REG_TTL or more ago (a session still open writes every minute; its own row is never dropped), are dropped; P samples older than the sampling horizon, or beyond
 # the per-window retention bound, are also dropped (keep the newest few).
 # One awk pass reads all four kinds, applies this frame's report per the rule, rewrites survivors to a per-pid temp (atomic mv tolerates
 # concurrent sessions), and emits "<five>|<eff5>|<seven>|<eff7>|<burn_tte>" (adopted value + adopted effective window key per class).
@@ -302,6 +310,8 @@ collect_status() {
 # staleness steal (a lock dir older than RL_LOCK_STALE means a holder died mid-frame). Two safe-degradation rules, both per the spec:
 #   • lock NOT acquired (another writer holds it within our bounded attempt) → SKIP the mv (leave the on-disk cache untouched by this
 #     frame) but STILL run the awk read-only so this frame DISPLAYS the correct adopted authority it read — never a stale/empty number.
+#     When its counter advanced past its own row, it records "<counter> <second>" in its own sighting file <cache>.seen.<sid> (one
+#     writer per file, so no lock; temp + rename, never through a link) so its next writable frame stamps that earlier second.
 #   • non-persistable session_id — empty, or not a real (UUID-shaped) Claude Code session id per sid_persistable (cannot record an
 #     observation → contributes nothing) → SKIP the mv (no destructive rewrite, every S/W/P line left intact) but STILL adopt the
 #     existing authority read-only. No lock is taken on this path (we never write).
@@ -395,9 +405,30 @@ _reconcile_core() {
     # adopt the EXISTING authority it read and NOT fold in its own (possibly stale) report — the spec is explicit that a contention frame
     # displays the value it READ (e.g. 47), never its own (e.g. 12). So `writable` gates whether the awk applies this frame's report.
     local writable=0; [ "$have_lock" = 1 ] && [ "$persist" = 1 ] && writable=1
+    # API-activity counter: usable only when it is decimal digits (parse_input already sanitized and capped it); anything else is
+    # absent and the pair-change rule decides. No other value reaches the awk, the row or the sighting file.
+    local apic="" seen="" sctr="" sat="" srest="" hasseen=0 sighttmp="" sightok=0 sightline="" wrote=0 nl=$'\n'
+    case "$api_ms" in ''|*[!0-9]*) ;; *) apic=$api_ms ;; esac
+    # Lock-contention sighting, one file per persistable session (the sid is UUID-shaped, so it is safe in a path). Reading it costs
+    # builtins only: [ -f ] and, when it exists, read. A link or a non-regular file is never read, written or removed (not ours).
+    if [ "$persist" = 1 ]; then
+        seen="$cache.seen.$session_id"
+        if [ -f "$seen" ] && [ ! -L "$seen" ]; then
+            hasseen=1
+            IFS=" " read -r sctr sat srest 2>/dev/null < "$seen"
+            case "$sctr" in ''|*[!0-9]*) sctr="" ;; esac
+            case "$sat" in ''|*[!0-9]*) sat="" ;; esac
+        fi
+        # a contention frame may write one (the awk decides whether its counter advanced), only when the sighting path is free or a
+        # regular file and nothing at all sits at its temp path: anything already there is not ours, so it is never written, moved or removed
+        sighttmp="$seen.$$"
+        if [ "$writable" = 0 ] && [ ! -L "$seen" ] && { [ ! -e "$seen" ] || [ -f "$seen" ]; } \
+           && [ ! -e "$sighttmp" ] && [ ! -L "$sighttmp" ]; then sightok=1; fi
+    fi
     local out
     out=$(awk -v now="$now" -v sid="$session_id" -v r5="$five_reset" -v u5="$five_h" \
-              -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" -v writable="$writable" '
+              -v r7="$seven_reset" -v u7="$seven_d" -v regttl="$RL_REG_TTL" -v tmp="$tmpfile" -v writable="$writable" \
+              -v api="$apic" -v sctr="$sctr" -v sat="$sat" -v sightok="$sightok" '
         function isnum(x){ return (x ~ /^[0-9]+(\.[0-9]+)?$/) }
         # sane live window key: strictly in the future AND below the 8d bound (longest 7d window 604800 + 1d skew margin) —
         # an absurd far-future key (the real cache once carried W 9999999999) would otherwise survive pruning forever
@@ -411,29 +442,46 @@ _reconcile_core() {
             if (!sane(r) || !isnum(u) || !isnum(o)) return
             if (!(c in Rv) || o+0 >= Rf[c]+0) { Rk[c]=r; Rv[c]=u+0; Rf[c]=o }
         }
-        # Record the latest pair for this session. First reports inherit first_seen; only a changed pair is observed now.
-        # The pair test compares used% rounded to one decimal place, on BOTH sides. Older Claude Code builds send the unrounded
-        # product utilization*100 (56.00000000000001) while the cache stores it through the six-digit number conversion as 56,
-        # so a raw comparison saw a change on every frame and an idle session re-took the class authority once a minute
-        # (2026-09-28). One decimal is the grid newer builds already round to. The rounded value is what the S row, the class
-        # record and the burn sample store, and a row written before this rule (56.1234) is compared on its rounded form, so an
-        # upgrade re-stamps nothing.
+        # Record the latest pair for this session and decide its observation time.
+        # With a usable API-activity counter (api non-empty) the counter alone decides: Claude Code advances it only after a model
+        # response whose rate-limit headers were already applied, so "advanced past the counter in my own row" means new data even
+        # when the number is unchanged, and "not advanced" means none even when the number moved (a startup quota probe or a 429
+        # changes rate_limits without a response). No recorded counter (a new session id, a pruned or pre-counter row) is unknown
+        # freshness: the recorded observed_at is kept, or 0, which fills an empty class but never replaces a live record. That is
+        # what stops /clear (new id, hours-old reading), a re-registered week-old session and a startup row from winning.
+        # Without a usable counter the pair-change rule decides, as before: first reports inherit first_seen, only a changed pair
+        # is observed now. The pair test compares used% rounded to one decimal place, on BOTH sides. Older Claude Code builds send
+        # the unrounded product utilization*100 (56.00000000000001) while the cache stores it through the six-digit number
+        # conversion as 56, so a raw comparison saw a change on every frame and an idle session re-took the class authority once a
+        # minute (2026-09-28). One decimal is the grid newer builds already round to. The rounded value is what the S row, the class
+        # record and the burn sample store in both modes, and a row written before this rule (56.1234) is compared on its rounded
+        # form, so an upgrade re-stamps nothing.
         function q1(x){ return sprintf("%.1f", x) + 0 }
+        function ctrok(x){ return (x ~ /^[0-9]+$/) }
+        function advanced(){ return (api != "" && ctrok(myapi) && api+0 > myapi+0) }
         function observe(c, r, u, o) {
             if (!isnum(r) || !isnum(u)) return
             u=q1(u)
-            if (!(c in Mr) || Mr[c]=="-") o=myfs
+            if (api != "") {
+                if (advanced()) o=fresh
+                else if ((c in Mo) && isnum(Mo[c])) o=Mo[c]
+                else o=0
+            }
+            else if (!(c in Mr) || Mr[c]=="-") o=myfs
             else if (Mr[c]""==r"" && q1(Mu[c])==u) o=Mo[c]
             else o=now
             Mr[c]=r; Mu[c]=u; Mo[c]=o
             applycls(c, r, u, o)
         }
-        BEGIN { MAXSAMP=5; HORIZON=10800; MAXWIN=691200 }              # ≤5 samples/window over ~3h; window keys sane below now+8d
-        $1=="S" && NF==9 && isnum($3) && tripleok($4,$5,$6) && tripleok($7,$8,$9) {
-            if ($2==sid || $3+0 > now+0-regttl) {
-                Sf[$2]=$3; S5r[$2]=$4; S5u[$2]=$5; S5o[$2]=$6; S7r[$2]=$7; S7u[$2]=$8; S7o[$2]=$9
+        BEGIN { MAXSAMP=5; HORIZON=10800; MAXWIN=691200; myapi="-" }  # ≤5 samples/window over ~3h; window keys sane below now+8d
+        # Registry rows: current eleven-field, previous nine-field (no counter, last_seen = first_seen) and legacy three-field.
+        # Retention is measured from last_seen, the second of the latest writable frame of the session; this frame keeps its own row.
+        $1=="S" && (NF==11 || NF==9) && isnum($3) && tripleok($4,$5,$6) && tripleok($7,$8,$9) && (NF==9 || ($10=="-" || ctrok($10)) && isnum($11)) {
+            a = (NF==11) ? $10 : "-"; ls = (NF==11) ? $11 : $3
+            if ($2==sid || ls+0 > now+0-regttl) {
+                Sf[$2]=$3; S5r[$2]=$4; S5u[$2]=$5; S5o[$2]=$6; S7r[$2]=$7; S7u[$2]=$8; S7o[$2]=$9; Sa[$2]=a; Sl[$2]=ls
                 if ($2==sid) {
-                    myfs=$3
+                    myfs=$3; myapi=a
                     Mr[5]=$4; Mu[5]=$5; Mo[5]=$6; Mr[7]=$7; Mu[7]=$8; Mo[7]=$9
                 }
             }
@@ -441,7 +489,7 @@ _reconcile_core() {
         }
         $1=="S" && NF==3 && isnum($3) {                                 # legacy registry row: no previous pair for either class
             if ($2==sid || $3+0 > now+0-regttl) {
-                Sf[$2]=$3; S5r[$2]="-"; S5u[$2]="-"; S5o[$2]="-"; S7r[$2]="-"; S7u[$2]="-"; S7o[$2]="-"
+                Sf[$2]=$3; S5r[$2]="-"; S5u[$2]="-"; S5o[$2]="-"; S7r[$2]="-"; S7u[$2]="-"; S7o[$2]="-"; Sa[$2]="-"; Sl[$2]=$3
                 if ($2==sid) { myfs=$3; Mr[5]="-"; Mr[7]="-" }
             }
             next
@@ -462,6 +510,12 @@ _reconcile_core() {
             # Only a WRITABLE frame (lock held + rankable non-empty sid) folds its own report into the authority and registers itself.
             # A read-only frame (lock-contention or empty-sid) leaves the class records exactly as read from cache, so it adopts/displays
             # the value it READ (never its own possibly-stale report) and contributes no S/W mutation — matching the spec safe-degradation rules.
+            # Evidence that this session reported a class: its own numeric resets_at this frame, or a reset key in its own row as read.
+            # Claude Code leaves an expired window out of the JSON, so an idle session past a roll reports no object for that class;
+            # its row still shows it had one, so it keeps showing the live class authority instead of losing the segment.
+            ev5 = (isnum(r5) || ((5 in Mr) && isnum(Mr[5]))); ev7 = (isnum(r7) || ((7 in Mr) && isnum(Mr[7])))
+            # The earlier second a lock-contention frame of this session recorded for exactly this counter value, else now.
+            fresh = (sctr != "" && sat != "" && sctr+0 == api+0 && sat+0 <= now+0) ? sat : now
             if (writable+0 == 1 && sid != "") {
                 if (myfs=="" || !isnum(myfs)) myfs=now                  # new session → first seen is now
                 Sf[sid]=myfs
@@ -470,13 +524,14 @@ _reconcile_core() {
                 observe(5, r5, u5); observe(7, r7, u7)
                 S5r[sid]=Mr[5]; S5u[sid]=((5 in Mu) ? Mu[5] : "-"); S5o[sid]=((5 in Mo) ? Mo[5] : "-")
                 S7r[sid]=Mr[7]; S7u[sid]=((7 in Mu) ? Mu[7] : "-"); S7o[sid]=((7 in Mo) ? Mo[7] : "-")
+                Sa[sid]=((api != "") ? api : "-"); Sl[sid]=now          # the counter baseline for the next frame, and its last write
             }
             # append this frame’s sample (now, adopted used%) under the EFFECTIVE 5h key — the adopted authority’s resets_at, which
             # equals r5 whenever this frame’s snapshot window is live. 7d is never sampled (nothing downstream reads such a series).
-            # The isnum(r5) gate keeps a frame that reports no 5h data at all from sampling another session’s quota.
-            if (isnum(r5) && (5 in Rv)) { np++; Pk[np]=Rk[5]; Pt[np]=now+0; Pu[np]=Rv[5] }
-            for (s in Sf) if (isnum(Sf[s]) && Sf[s]+0 > now+0-regttl)
-                printf "S %s %s %s %s %s %s %s %s\n", s, Sf[s], S5r[s], S5u[s], S5o[s], S7r[s], S7u[s], S7o[s] >> tmp
+            # The ev5 gate keeps a frame with no five-hour evidence at all from sampling another session’s quota.
+            if (ev5 && (5 in Rv)) { np++; Pk[np]=Rk[5]; Pt[np]=now+0; Pu[np]=Rv[5] }
+            for (s in Sf) if ((writable+0 == 1 && s == sid) || (isnum(Sl[s]) && Sl[s]+0 > now+0-regttl))
+                printf "S %s %s %s %s %s %s %s %s %s %s\n", s, Sf[s], S5r[s], S5u[s], S5o[s], S7r[s], S7u[s], S7o[s], Sa[s], Sl[s] >> tmp
             if (5 in Rv) printf "W5 %s %s %s\n", Rk[5], Rv[5], Rf[5] >> tmp
             if (7 in Rv) printf "W7 %s %s %s\n", Rk[7], Rv[7], Rf[7] >> tmp
             # rewrite samples bounded to the newest MAXSAMP per window (chronological); track 5h oldest/newest for the slope
@@ -501,13 +556,18 @@ _reconcile_core() {
                     if (now+0+x < Rk[5]+0) tte=sprintf("%d", x)        # before-reset gate: must run dry before the (effective) window rolls
                 }
             }
-            # 5 fields: adopted value + adopted effective key per class. The isnum(rX) gates keep a frame that reports NO rate-limit
-            # data for a class (API-key auth, older CC) on its own silent segment instead of surfacing another session’s quota.
+            # 5 fields: adopted value + adopted effective key per class. The evX gates keep a frame that never reported a class
+            # (API-key auth, older CC, a session with no row) on its own silent segment instead of surfacing another session’s quota.
             printf "%s|%s|%s|%s|%s\n", \
-                ((isnum(r5) && (5 in Rv)) ? Rv[5]"" : ""), ((isnum(r5) && (5 in Rv)) ? Rk[5] : ""), \
-                ((isnum(r7) && (7 in Rv)) ? Rv[7]"" : ""), ((isnum(r7) && (7 in Rv)) ? Rk[7] : ""), tte
+                ((ev5 && (5 in Rv)) ? Rv[5]"" : ""), ((ev5 && (5 in Rv)) ? Rk[5] : ""), \
+                ((ev7 && (7 in Rv)) ? Rv[7]"" : ""), ((ev7 && (7 in Rv)) ? Rk[7] : ""), tte
+            # A read-only frame of a persistable id (lock contention) whose counter advanced reports when it first saw that count, as a
+            # second line after the five fields; the shell writes it. A sighting that already holds this count is kept, so the earliest
+            # second wins. The awk opens no sighting file itself, so no sighting problem can cost this frame its five fields.
+            if (writable+0 != 1 && sightok+0 == 1 && advanced() && !(sctr != "" && sctr+0 == api+0)) printf "%s %s\n", api, now
         }
     ' "$src" 2>/dev/null)
+    case "$out" in *"$nl"*) sightline=${out#*"$nl"}; out=${out%%"$nl"*} ;; esac   # line 2, when present, is the sighting to record
     # Persist ONLY when this frame both holds the lock AND has a rankable (non-empty) sid; otherwise this is a read-only frame:
     # skip the mv (leave the on-disk cache untouched), drop the temp, but still emit the adopted value computed above. This is the
     # safe-degradation path for both lock-contention and empty-sid, and it never errors out (no set -e).
@@ -515,13 +575,33 @@ _reconcile_core() {
         # Overwrite ONLY when the awk produced a non-empty temp (success). An awk failure leaves an empty/half temp; mv-ing it would
         # wipe the cross-session authority other sessions persisted. rm cleans up the skip case (mv consumes the temp on success);
         # the lock is released on BOTH paths so an awk-failure frame never leaks the lock dir.
-        [ -s "$tmpfile" ] && mv -f "$tmpfile" "$cache" 2>/dev/null
+        [ -s "$tmpfile" ] && mv -f "$tmpfile" "$cache" 2>/dev/null && wrote=1
         rm -f "$tmpfile" 2>/dev/null
         rmdir "$lock" 2>/dev/null
+        # This session's sighting has served its one purpose once the cache holds this frame's observation, used or not.
+        if [ "$hasseen" = 1 ] && [ "$wrote" = 1 ]; then rm -f "$seen" 2>/dev/null; _sighting_sweep; fi
     else
         rm -f "$tmpfile" 2>/dev/null
+        # Lock contention with an advanced counter: write the sighting to this pid's temp (builtin printf, no fork) and land it by
+        # rename, so a reader never sees a partial line. Both ends are re-checked right before the mv: the temp must be the regular
+        # file just written, the destination free or a regular file (mv onto a directory would move the temp INTO it). A failure
+        # leaves display and cache as they are and sweeps nothing; only a temp this frame wrote is ever removed.
+        if [ "$sightok" = 1 ] && [ -n "$sightline" ] && { printf '%s\n' "$sightline" > "$sighttmp"; } 2>/dev/null; then
+            if [ -f "$sighttmp" ] && [ ! -L "$sighttmp" ] && [ ! -L "$seen" ] && { [ ! -e "$seen" ] || [ -f "$seen" ]; } \
+               && mv -f "$sighttmp" "$seen" 2>/dev/null; then
+                _sighting_sweep
+            elif [ -f "$sighttmp" ] && [ ! -L "$sighttmp" ]; then
+                rm -f "$sighttmp" 2>/dev/null
+            fi
+        fi
     fi
     printf '%s\n' "$out"
+}
+
+# Remove sighting files (and orphaned temps) of sessions that ended between a contention frame and their next writable frame.
+# Runs only on a frame that wrote or removed a sighting; -type f leaves links and anything else that is not ours alone.
+_sighting_sweep() {
+    find "$HOME/.claude" -maxdepth 1 -type f -name 'sl-ratelimit-cache.seen.*' -mtime +"${RL_REG_TTL:-604800}"s -delete 2>/dev/null
 }
 
 
