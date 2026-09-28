@@ -287,7 +287,10 @@ done
 [ "$rbad" -eq 0 ] && echo "  COLUMNS 1-2: stderr clean, single line OK" || fail=1
 
 echo "── S. rate-limit used_percentage>100 clamps 'remaining' to 0% (never a negative number)"
-JS=$(jq -cn --arg cwd "$SL" --arg proj "$SL" --arg tp "$TP" '
+# cwd is a fixed-name, non-git directory, not "$SL": the glob below scans the whole line, and the path segment leads it, so
+# a checkout named like a verifier's worktree ("wt-924c378") put a "-<digit>" ahead of the "%" and read as a negative number.
+SDIR="$WORK/clamp"; mkdir -p "$SDIR"
+JS=$(jq -cn --arg cwd "$SDIR" --arg proj "$SDIR" --arg tp "$TP" '
   { workspace:{current_dir:$cwd, project_dir:$proj}, model:{display_name:"Opus"},
     rate_limits:{five_hour:{used_percentage:120, resets_at:(now+100|floor)}},
     session_id:"sl-selftest", transcript_path:$tp }')
