@@ -82,8 +82,8 @@ bash assets/generate.sh
 `T`/`T2` = rate-sync rule matrix + concurrency, `U` = last-msg age (incl. cross-day),
 `DUR` = session-duration primary, `API` = API-thinking-time primary + `fmt_dur_s` + 3-level fallback,
 `V` = parse_input positional sentinel, `W`/`X`/`X2` = token display/dedup/prune,
-`CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `CLK` = path-click publish + opener, `Z`/`Z1`–`Z5` =
-adaptive-layout 14-step degrade. A failure prints `★ FAIL` and the script exits 1. There is **no
+`CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `CLK` = path-click publish + opener,
+`EFF` = effort mode (`ultra` detection), `Z`/`Z1`–`Z5` = adaptive-layout 14-step degrade. A failure prints `★ FAIL` and the script exits 1. There is **no
 per-test flag**; to isolate a case, read its labeled output or temporarily edit the
 script. The harness is self-locating (`SL=$(cd "$(dirname "$0")/.." …)`) and uses a
 fresh `mktemp` work dir + fake `$HOME`, so it survives directory renames and tmp clears.
@@ -143,11 +143,42 @@ the entry point so it follows the `. ` sources.
 
 ### Concurrency model (the core idea)
 
-Every slow external command (jq, git, stty, the transcript tail) runs as a background job
+Every slow external command (jq, git, stty, the transcript scan, ps) runs as a background job
 opened through **process substitution onto a dedicated file descriptor** (`exec 3< <(…)`).
 A `read <&3` blocks until that job hits EOF — **the read IS the sync point**, no `wait` /
 temp files. Jobs are independent, so wall-clock ≈ the single slowest job (~20ms), not the
 sum. Adding a new collected field = add a job + its FD read, keeping read order aligned.
+
+### Effort mode (`effort_scan` / `effort_argv_flag`)
+
+The stdin JSON carries only the resolved `effort.level`, so whether a session is in ultracode (shown as `ultra`, only at
+`xhigh`) or `auto` (shown as `auto·<level>`) is recovered as `effort_mode`, the fourth line of `collect_all`, by two concurrent
+jobs. `render.sh` only picks among the three display forms. This depends on Claude Code **internals** (verified on 2.1.283).
+
+- **Transcript events** (`effort_scan`, one `perl` pass over the **whole** file, never a trailing window: gaps between markers
+  reach thousands of lines). Three event kinds count: an `ultra_effort_enter` attachment record (entered; `reminderType`
+  `full` or `sparse`, written on the first regular prompt once ultracode is in effect, and never by a plain `xhigh` session), an
+  `ultra_effort_exit` attachment record (exited), and the `/effort` stdout as a record's own string content, in a user record
+  (interactive) or a `local_command` system record (`-p`/SDK), saying `Set effort level to <word>` or `Effort level set to
+  <word>` (set). **Latest event wins**: entered sets `ultracode`, exited clears the mode only when it is `ultracode` (so a
+  flag-started session that ran `/effort auto` stays `auto·xhigh`), set takes its word. Every pattern is anchored on the
+  record's own keys; inside a JSON string every quote is escaped, so a tool result or Read result that *quotes* a marker or
+  the stdout never counts.
+- **Argv fallback** (`effort_argv_flag`): only when the transcript holds **no** event (before the first regular prompt the
+  file does not exist yet; a session opened with a skill slash command can go hours without a marker), the level is `xhigh`,
+  and `transcript_path` is non-empty after sanitization (a path blanked for `..` stays a no-op). Then `ps -o args=` of `$PPID`
+  (read in the main shell, the claude process) showing a `"ultracode"` key set to `true`, `--effort ultracode` or
+  `--effort=ultracode` means `ultracode`. Argv never changes after `/effort`, so it never outranks a transcript event.
+  Limits: a settings **file** with `ultracode: true` is invisible to it (those sessions show `xhigh` until their first
+  marker); a `$PPID` that is `sh` finds no flag; and a session whose argv carries the flag but has ultracode off with no
+  transcript event yet (workflows disabled, or ultracode turned off and then `/clear`) shows `ultra` until its first marker.
+
+Every failure (no `perl`, unreadable transcript, failed `ps`, non-decimal pid) falls to the plain level; only a genuine argv
+flag can produce `ultra` without a transcript event. **If `ultra` stops appearing after a Claude Code upgrade, check these two
+record patterns first**: the attachment record (`"attachment":{"type":"ultra_effort_enter"`: type names and key order), then
+the `/effort` stdout record (`"role":"user","content":"<local-command-stdout>Set effort level to …`: record shape and wording).
+Section `EFF` covers the display rules, every event and non-event shape, the turn-off sequences, quoted text, events far from
+the end, the argv matrix through a stand-in claude process, the empty-path gate, and a failed scan.
 
 ### Right-align / adaptive-layout width algorithm (`render_line` + `degrade_layout`)
 

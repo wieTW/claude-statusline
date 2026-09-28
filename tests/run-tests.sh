@@ -17,7 +17,8 @@ FAKE_HOME="$WORK/home"
 TP="$WORK/transcript.jsonl"
 mkdir -p "$FAKE_HOME/.claude/last-msg"
 printf '06-07 19:38\n' > "$FAKE_HOME/.claude/last-msg/sl-selftest"
-printf '{"type":"user","content":"<local-command-stdout>Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration</local-command-stdout>"}\n' > "$TP"
+# The shape Claude Code writes for an interactive /effort: a user record whose message.content is the command's stdout.
+printf '{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration</local-command-stdout>"}}\n' > "$TP"
 # Hermetic git repo for width-sensitive git-segment fixtures: a clean, commit-less repo yields a deterministic
 # "branch only, no dirty, no diffstat" segment. Using the live repo ($SL) would make the segment width track this
 # checkout's uncommitted diff, flaking name-budget asserts (e.g. J) whenever the working tree is dirty.
@@ -2461,6 +2462,191 @@ rm -f "$WORK/jqcount"
 
 rm -rf "$PEERSESS" "$PEERCACHE" "$WORK/peerfake"   # leave no record behind: a later frame's $PPID could collide with a pid used here
 [ "$pbad" -eq 0 ] && echo "  PEER fixed vector, cold first frame, empty name, six silent failure modes, hostile records, all-or-nothing truncation, private cache + re-derivation, pid guard, negative caching, symlink and wrong-shape refusal OK" || fail=1
+
+echo "── EFF. EFFORT MODE: ultracode from attachment records, /effort output and the claude argv fallback; latest event wins; quoted text never counts"
+effbad=0
+EFFD="$WORK/eff"
+mkdir -p "$EFFD/cwd" "$EFFD/noperl"
+# Real-shaped JSONL builders, one line each, keys in the order Claude Code 2.1.283 writes them (the change's design.md quotes them).
+eff_enter() { printf '{"parentUuid":"p1","isSidechain":false,"attachment":{"type":"ultra_effort_enter","reminderType":"%s"},"type":"attachment","uuid":"u1"}\n' "$1"; }
+eff_exit()  { printf '{"parentUuid":"p1","isSidechain":false,"attachment":{"type":"ultra_effort_exit"},"type":"attachment","uuid":"u2"}\n'; }
+eff_stdout() {  # $1=mode word → the text /effort prints for it
+  case "$1" in
+    auto)      printf 'Effort level set to auto' ;;
+    ultracode) printf 'Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration' ;;
+    *)         printf 'Set effort level to %s (this session only)' "$1" ;;
+  esac
+}
+# $1=the command's stdout text. Interactive mode writes a user record; -p/SDK mode writes a system record of subtype local_command.
+eff_set_user() { printf '{"parentUuid":"p1","isSidechain":false,"type":"user","message":{"role":"user","content":"<local-command-stdout>%s</local-command-stdout>"},"uuid":"u3"}\n' "$1"; }
+eff_set_sys()  { printf '{"parentUuid":"p1","isSidechain":false,"type":"system","subtype":"local_command","content":"<local-command-stdout>%s</local-command-stdout>","level":"info","uuid":"u4"}\n' "$1"; }
+# Quotations: a tool_result block that quotes a whole attachment record (its quotes escaped), and one whose content IS the stdout.
+eff_quote_attach() { jq -cn --arg q "$(eff_enter full)" '{parentUuid:"p1",isSidechain:false,type:"user",message:{role:"user",content:[{tool_use_id:"toolu_q1",type:"tool_result",content:$q}]},uuid:"u5"}'; }
+eff_quote_stdout() { printf '{"parentUuid":"p1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_q2","type":"tool_result","content":"<local-command-stdout>%s</local-command-stdout>"}]},"uuid":"u6"}\n' "$(eff_stdout ultracode)"; }
+eff_fill_user() { printf '{"parentUuid":"p1","isSidechain":false,"type":"user","message":{"role":"user","content":"keep going"},"uuid":"u7"}\n'; }
+eff_fill_asst() { printf '{"parentUuid":"p1","isSidechain":false,"message":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]},"type":"assistant","uuid":"u8"}\n'; }
+eff_fill() {  # $1=line count → that many ordinary records, user and assistant alternating
+  awk -v n="$1" -v u="$(eff_fill_user)" -v a="$(eff_fill_asst)" 'BEGIN { for (i = 0; i < n; i++) print (i % 2 ? a : u) }'
+}
+efft() {  # $1=file, then tokens in file order: enter sparse exit set:<word> sys:<word> say:<stdout text> qattach qstdout fill:<lines>
+  local f=$1 t; shift
+  for t in "$@"; do
+    case "$t" in
+      enter)   eff_enter full ;;
+      sparse)  eff_enter sparse ;;
+      exit)    eff_exit ;;
+      set:*)   eff_set_user "$(eff_stdout "${t#set:}")" ;;
+      sys:*)   eff_set_sys "$(eff_stdout "${t#sys:}")" ;;
+      say:*)   eff_set_user "${t#say:}" ;;
+      qattach) eff_quote_attach ;;
+      qstdout) eff_quote_stdout ;;
+      fill:*)  eff_fill "${t#fill:}" ;;
+    esac
+  done > "$f"
+}
+effhas() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }   # $1=haystack $2=literal needle
+
+# EFF-B builder self-check: every line is JSON; the record's own attachment key is unescaped, a quotation of it is not.
+EFFATT='"attachment":{"type":"ultra_effort_'
+EFFSTD='"role":"user","content":"<local-command-stdout>'
+for effb in "eff_enter full" "eff_enter sparse" eff_exit "eff_set_user x" "eff_set_sys x" eff_quote_attach eff_quote_stdout eff_fill_user eff_fill_asst; do
+  $effb | jq -e . >/dev/null 2>&1 || { echo "  ★ FAIL EFF-B builder [$effb] does not emit one JSON object"; effbad=1; }
+done
+for effl in "$(eff_enter full)" "$(eff_enter sparse)" "$(eff_exit)"; do
+  effhas "$effl" "$EFFATT" || { echo "  ★ FAIL EFF-B attachment line lacks the unescaped record key: [$effl]"; effbad=1; }
+done
+effl=$(eff_quote_attach)
+effhas "$effl" 'ultra_effort_enter' && ! effhas "$effl" "$EFFATT" || { echo "  ★ FAIL EFF-B quoting line is not an escaped quotation: [$effl]"; effbad=1; }
+effl=$(eff_quote_stdout)
+effhas "$effl" '<local-command-stdout>Set effort level to ultracode' && ! effhas "$effl" "$EFFSTD" \
+  || { echo "  ★ FAIL EFF-B quoted stdout line carries a record's own stdout anchor: [$effl]"; effbad=1; }
+effhas "$(eff_set_user x)" "$EFFSTD" || { echo "  ★ FAIL EFF-B interactive stdout record lacks its anchor"; effbad=1; }
+echo "  EFF-B builders emit JSON, attachment keys unescaped, quotations escaped"
+
+# A stand-in claude process. The frame's argv lookup reads its parent's argument list through $PPID, so this script runs the frame
+# as a CHILD (never exec, and not as its last command) with the flags it was itself given, and records what `ps` shows for it.
+cat > "$EFFD/wrap.sh" <<'EW'
+#!/bin/bash
+# env: EFF_SL=statusline root, EFF_HOME=the fake HOME, EFF_SIDE=file that receives this process's own `ps -o args=` line
+ps -o args= -p "$$" > "$EFF_SIDE"
+env HOME="$EFF_HOME" bash "$EFF_SL/statusline-command.sh"
+rc=$?
+exit "$rc"
+EW
+effpre=""   # prepended to the frame's PATH; only the failed-source case sets it
+effrender() {  # $1=effort.level $2=transcript_path, then the stand-in claude's argv → the raw frame
+  local lvl=$1 tp=$2; shift 2
+  jq -cn --arg cwd "$EFFD/cwd" --arg tp "$tp" --arg lvl "$lvl" \
+      '{workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5}, effort:{level:$lvl}, transcript_path:$tp}' \
+    | env HOME="$FAKE_HOME" EFF_HOME="$FAKE_HOME" COLUMNS=200 PATH="$effpre$PATH" EFF_SL="$SL" EFF_SIDE="$EFFD/side" \
+        bash "$EFFD/wrap.sh" "$@"
+}
+EFDM=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$DM" )
+EFOG=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$OG" )
+EFRD=$( . "$SL/lib/render.sh"; _theme=""; STYLE="$SASTYLE"; load_palette; printf '%s' "$RD" )
+EFRS=$'\033[0m'
+effcase() {  # $1=case id $2=expected effort text $3=expected SGR $4=effort.level $5=transcript_path, then the stand-in claude's argv
+  local id=$1 want=$2 col=$3 raw got; shift 3
+  raw=$(effrender "$@")
+  got=$(printf '%s' "$raw" | nocol); got=${got#* │ }; got=${got#* │ }; got=${got%% │ *}   # path │ model │ EFFORT │ …
+  printf '  %s want=[%s] got=[%s]\n' "$id" "$want" "$got"
+  [ "$got" = "$want" ] && effhas "$raw" "$col$want$EFRS" && return 0
+  echo "  ★ FAIL $id want [$want] in its colour, got [$got]"; effbad=1
+}
+
+# EFF-W wrapper self-check: the argument list a frame's lookup will read really carries the flag, so a red argv case is never the harness.
+effrender xhigh "$EFFD/absent.jsonl" --settings '{"ultracode":true}' >/dev/null
+effhas "$(cat "$EFFD/side" 2>/dev/null)" '{"ultracode":true}' \
+  && echo "  EFF-W stand-in claude argv seen by ps: [$(cat "$EFFD/side")]" \
+  || { echo "  ★ FAIL EFF-W ps does not show the wrapper's flag: [$(cat "$EFFD/side" 2>/dev/null)]"; effbad=1; }
+
+ON='{"ultracode":true}'
+# Display rules (effort_mode reaches render only through the transcript here).
+efft "$EFFD/t-uc.jsonl" fill:4 set:ultracode fill:2
+efft "$EFFD/t-auto.jsonl" fill:4 set:auto fill:2
+efft "$EFFD/t-none.jsonl" fill:6
+efft "$EFFD/t-said.jsonl" fill:4 "say:Effort level set to xhigh" fill:2
+effcase EFF-1 ultra "$EFDM" xhigh "$EFFD/t-uc.jsonl"
+effcase EFF-2 high "$EFDM" high "$EFFD/t-uc.jsonl"
+effcase EFF-3 "auto·medium" "$EFOG" medium "$EFFD/t-auto.jsonl"
+effcase EFF-4 low "$EFRD" low "$EFFD/t-none.jsonl"
+effcase EFF-5 turbo "$EFDM" turbo "$EFFD/t-none.jsonl"
+effcase EFF-6 xhigh "$EFDM" xhigh "$EFFD/t-said.jsonl"
+# Flag-started ultracode: the real attachment record among ordinary records, no effort-set record, no argv flag.
+efft "$EFFD/t-enter.jsonl" fill:4 enter fill:4
+effcase EFF-7 ultra "$EFDM" xhigh "$EFFD/t-enter.jsonl"
+# Plain xhigh, both ways a session gets there.
+efft "$EFFD/t-setx.jsonl" fill:4 set:xhigh fill:2
+effcase EFF-8 xhigh "$EFDM" xhigh "$EFFD/t-none.jsonl" --effort xhigh
+effcase EFF-9 xhigh "$EFDM" xhigh "$EFFD/t-setx.jsonl"
+# /effort ultracode in the interactive and in the -p record shape.
+efft "$EFFD/t-ucsys.jsonl" fill:4 sys:ultracode fill:2
+effcase EFF-10 ultra "$EFDM" xhigh "$EFFD/t-uc.jsonl"
+effcase EFF-11 ultra "$EFDM" xhigh "$EFFD/t-ucsys.jsonl"
+# Turn-off sequences in a flag-started session (the flag stays in argv; any transcript event outranks it).
+efft "$EFFD/t-off1.jsonl" fill:2 enter fill:2 set:high fill:2
+efft "$EFFD/t-off2.jsonl" fill:2 enter fill:2 set:high fill:2 exit fill:2
+efft "$EFFD/t-off3.jsonl" fill:2 enter fill:2 set:xhigh fill:2 exit fill:2
+efft "$EFFD/t-off4.jsonl" fill:2 enter fill:2 set:auto fill:2
+efft "$EFFD/t-off5.jsonl" fill:2 enter fill:2 set:auto fill:2 exit fill:2
+efft "$EFFD/t-off6.jsonl" fill:2 enter fill:2 exit fill:2
+efft "$EFFD/t-off7.jsonl" fill:2 set:ultracode fill:2 enter fill:2 set:high fill:2 exit fill:2 set:ultracode fill:2
+effcase EFF-12 high "$EFDM" high "$EFFD/t-off1.jsonl" --settings "$ON"
+effcase EFF-13 high "$EFDM" high "$EFFD/t-off2.jsonl" --settings "$ON"
+effcase EFF-14 xhigh "$EFDM" xhigh "$EFFD/t-off3.jsonl" --settings "$ON"
+effcase EFF-15 "auto·xhigh" "$EFDM" xhigh "$EFFD/t-off4.jsonl" --settings "$ON"
+effcase EFF-16 "auto·xhigh" "$EFDM" xhigh "$EFFD/t-off5.jsonl" --settings "$ON"
+effcase EFF-17 xhigh "$EFDM" xhigh "$EFFD/t-off6.jsonl" --settings "$ON"
+effcase EFF-18 ultra "$EFDM" xhigh "$EFFD/t-off7.jsonl" --settings "$ON"
+# Ultracode whose level resolves to something other than xhigh (a model without xhigh).
+effcase EFF-19 high "$EFDM" high "$EFFD/t-enter.jsonl"
+# Quoted event text inside tool results.
+efft "$EFFD/t-qatt.jsonl" fill:4 qattach fill:2
+efft "$EFFD/t-qstd.jsonl" fill:4 qstdout fill:2
+efft "$EFFD/t-qafter.jsonl" fill:2 enter fill:2 exit fill:2 qattach fill:2
+effcase EFF-20 xhigh "$EFDM" xhigh "$EFFD/t-qatt.jsonl"
+effcase EFF-21 xhigh "$EFDM" xhigh "$EFFD/t-qstd.jsonl"
+effcase EFF-22 xhigh "$EFDM" xhigh "$EFFD/t-qafter.jsonl" --settings "$ON"
+# An event on line 20 followed by 2500 ordinary records still decides.
+efft "$EFFD/t-farenter.jsonl" fill:19 enter fill:2500
+efft "$EFFD/t-farset.jsonl" fill:19 set:ultracode fill:2500
+effcase EFF-23 ultra "$EFDM" xhigh "$EFFD/t-farenter.jsonl"
+effcase EFF-24 ultra "$EFDM" xhigh "$EFFD/t-farset.jsonl"
+# Argument fallback matrix: the transcript path is non-empty but names no file yet, or a file with no event.
+effcase EFF-25 ultra "$EFDM" xhigh "$EFFD/absent.jsonl" --dangerously-skip-permissions --settings "$ON"
+effcase EFF-26 ultra "$EFDM" xhigh "$EFFD/t-none.jsonl" --settings '{"ultracode": true}'
+effcase EFF-27 ultra "$EFDM" xhigh "$EFFD/absent.jsonl" --effort ultracode
+effcase EFF-28 xhigh "$EFDM" xhigh "$EFFD/absent.jsonl" --settings '{"ultracode":false}'
+effcase EFF-29 xhigh "$EFDM" xhigh "$EFFD/absent.jsonl" --dangerously-skip-permissions
+effcase EFF-30 high "$EFDM" high "$EFFD/absent.jsonl" --settings "$ON"
+effcase EFF-31 xhigh "$EFDM" xhigh "$EFFD/t-off6.jsonl" --settings "$ON"
+# An empty or blanked transcript_path runs neither source, even with the flag in argv.
+effcase EFF-32 xhigh "$EFDM" xhigh "$EFFD/p/../s.jsonl" --settings "$ON"
+effcase EFF-33 xhigh "$EFDM" xhigh "" --effort ultracode
+# A failed scan (perl exits 1) with no argv flag never yields ultra, even though an enter record is there.
+printf '#!/bin/sh\nexit 1\n' > "$EFFD/noperl/perl"; chmod +x "$EFFD/noperl/perl"
+effpre="$EFFD/noperl:"
+effcase EFF-34 xhigh "$EFDM" xhigh "$EFFD/t-enter.jsonl"
+effpre=""
+
+# effort_scan called directly: "E <mode>" when the file holds an effort event, an empty line when it holds none.
+effscan() {  # $1=transcript → effort_scan's exact output followed by "." so an empty line stays visible
+  env HOME="$FAKE_HOME" bash -c '. "$1/lib/collect.sh"; effort_scan "$2"; printf .' _ "$SL" "$1" 2>/dev/null
+}
+effscancase() {  # $1=case id $2=expected line (without its newline) $3=transcript
+  local got; got=$(effscan "$3")
+  printf '  %s effort_scan want=[%s] got=[%s]\n' "$1" "$2" "${got%$'\n.'}"
+  [ "$got" = "$2"$'\n.' ] && return 0
+  echo "  ★ FAIL $1 effort_scan printed [${got%$'\n.'}], want exactly one line [$2]"; effbad=1
+}
+efft "$EFFD/d-reenter.jsonl" fill:2 enter fill:2 exit fill:2 sparse fill:2
+effscancase EFF-35 "E ultracode" "$EFFD/d-reenter.jsonl"
+effscancase EFF-36 "E auto" "$EFFD/t-off5.jsonl"
+effscancase EFF-37 "E " "$EFFD/t-off6.jsonl"
+efft "$EFFD/d-quoted.jsonl" fill:2 qattach fill:2 qstdout fill:2
+effscancase EFF-38 "" "$EFFD/d-quoted.jsonl"
+
+[ "$effbad" -eq 0 ] && echo "  EFF display rules, attachment + /effort events, latest-event-wins turn-off, quoted text ignored, whole-file scan, argv fallback + its gates, failed source OK" || fail=1
 
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)

@@ -3,7 +3,8 @@
 # collect.sh — input collection: stdin JSON parsing + theme / width / git / effort collected concurrently in the background
 #
 # READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript,
-#         $HOME/.claude/sessions/<claude pid>.json (Claude Code's own per-session registry record — untrusted input)
+#         $HOME/.claude/sessions/<claude pid>.json (Claude Code's own per-session registry record — untrusted input),
+#         the claude process's argument list (`ps -o args=` of $PPID, effort-mode fallback only)
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
 #         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now act_epoch
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
@@ -139,7 +140,7 @@ parse_input() {
     # Post-jq hardening for the fields interpolated into file paths / awk -v / space-delimited cache records (jq guards JSON structure,
     # not these downstream uses). session_id → last-msg path, awk sid, cache fields: allow only [A-Za-z0-9_-] so a crafted value can't
     # inject awk C-escapes (needs \), corrupt space-delimited records (needs whitespace), or traverse paths (needs / or ..); real CC
-    # session IDs (UUIDs) are a subset. transcript_path → tail/find reads: reject path-traversal. Both blank-on-violation; every
+    # session IDs (UUIDs) are a subset. transcript_path → effort-scan/find reads: reject path-traversal. Both blank-on-violation; every
     # downstream reader already treats empty as a graceful no-op.
     case "$session_id" in ''|*[!0-9A-Za-z_-]*) session_id="" ;; esac
     case "$transcript_path" in *..*) transcript_path="" ;; esac
@@ -165,22 +166,50 @@ _sanitize_field() {
 }
 
 
-# effort mode detection: the JSON only gives the resolved level (ultracode→xhigh, auto→resolved value),
-# the mode itself is only recorded in the transcript's /effort stdout (<local-command-stdout> tag); grab the last one.
-# The old 5-process pipe (tail|grep|grep|tail|sed) is shrunk to 3 (tail|grep|sed), taking the last match via bash string expansion.
-# Word extraction must stay with sed: the anchor needs the full "effort level (set to|to)" token —
-# a pure-bash trim anchored on "fort level" would wrongly catch suffixes like comfort/discomfort level (already hit).
-effort_scan() {   # $1=transcript_path → one line of mode text on stdout (empty line if none)
-    local m
-    m=$(tail -n 2000 "$1" 2>/dev/null \
-        | grep -oE '<local-command-stdout>[^<]*[Ee]ffort level (set to|to) [a-zA-Z]+[^<]*</local-command-stdout>' \
-        | sed -E 's/.*[Ee]ffort level (set to|to) ([a-zA-Z]+).*/\2/')
-    printf '%s\n' "${m##*$'\n'}"   # take the last match if there are several
+# effort mode detection: the JSON only gives the resolved level (ultracode→xhigh, auto→resolved value), so the mode is recovered
+# from the transcript's structured effort events, read in file order over the WHOLE file (a trailing window loses events: gaps
+# between markers reach thousands of lines). Three event kinds (Claude Code 2.1.283):
+#   entered: an attachment record {"attachment":{"type":"ultra_effort_enter",…}} (reminderType full or sparse), written on the
+#            first regular prompt once ultracode is in effect and repeated sparsely; a plain xhigh session never writes one
+#   exited:  an attachment record {"attachment":{"type":"ultra_effort_exit"}}, written on the first regular prompt after it stops
+#   set:     the /effort stdout as a record's own string content: a user record ("role":"user","content":"<local-command-stdout>…)
+#            or a -p system record ("subtype":"local_command","content":"<local-command-stdout>…), followed by
+#            "Set effort level to <word>" or "Effort level set to <word>"
+# Latest event wins: entered sets ultracode, exited clears only an ultracode mode (so /effort auto keeps "auto"), set takes its word.
+# Every pattern is anchored on the record's OWN keys: inside a JSON string every quote is escaped, so a tool result or a Read
+# result that quotes a marker or the stdout can never match. If ultra stops appearing after a Claude Code upgrade, check these two
+# record patterns first (the attachment type names / key order, then the /effort stdout wording).
+effort_scan() {   # $1=transcript_path → "E <mode>" when the file holds an effort event (mode may be empty), else an empty line
+    local r
+    r=$(perl -ne '
+        if (/"attachment":\{"type":"ultra_effort_(enter|exit)"/) {
+            if ($1 eq "enter") { $m = "ultracode" } elsif ($m eq "ultracode") { $m = "" }
+            $seen = 1; next;
+        }
+        if (/(?:"role":"user"|"subtype":"local_command"),"content":"<local-command-stdout>(?:Set effort level to|Effort level set to) ([A-Za-z]+)/) {
+            $m = $1; $seen = 1;
+        }
+        END { print $seen ? "E $m" : "" }' -- "$1" 2>/dev/null)
+    printf '%s\n' "$r"   # no perl / unreadable file → empty line = "no event", never a mode
+}
+
+# Session-argument fallback, used only when the transcript holds no effort event (before the first regular prompt the file does not
+# even exist). The claude process's argv never changes after /effort, so it must never outrank a transcript event. Limits: a
+# settings FILE with ultracode:true is invisible here, and a $PPID that is `sh` (statusline command with shell syntax) finds no flag.
+effort_argv_flag() {   # $1=claude pid → "1" when its argv carries an ultracode-on flag, else an empty line
+    local args="" on='"ultracode"[[:space:]]*:[[:space:]]*true|--effort[= ]ultracode'
+    case "$1" in ''|*[!0-9]*) ;; *) args=$(ps -o args= -p "$1" 2>/dev/null) ;; esac
+    if [[ $args =~ $on ]]; then printf '1\n'; else printf '\n'; fi
 }
 
 # Concurrent collection of git×3 + effort: each opens its own FD in the procsub subshell, reaped in order; always emits a fixed 4 lines
-collect_all() {   # $1=cwd $2=transcript_path $3=effort_level → branch / shortstat / untracked / effort_mode
-    local b="" s="" u="" m=""
+# (fd 11 for the argv job, not 10: bash 3.2 parks the stdin saved for this function's own </dev/null redirect on fd 10)
+collect_all() {   # $1=cwd $2=transcript_path $3=effort_level $4=claude pid → branch / shortstat / untracked / effort_mode
+    local b="" s="" u="" m="" argv_on="" scan_transcript=false lookup_argv=false
+    # Each effort gate is decided once, so a job is read exactly when it was started. An empty transcript_path (never sent, or
+    # blanked for "..") is the input-sanitization no-op: neither effort source runs.
+    [ -n "$3" ] && [ -f "$2" ] && scan_transcript=true
+    [ "$3" = xhigh ] && [ -n "$2" ] && lookup_argv=true
     if [ -n "$1" ]; then
         # branch: spends only 1 git process on a branch; falls back to a short sha only on detached HEAD
         # (4/5/6 no longer need </dev/null: collect_all itself is launched with </dev/null, and the child jobs inherit it)
@@ -189,29 +218,32 @@ collect_all() {   # $1=cwd $2=transcript_path $3=effort_level → branch / short
              5< <(git --no-optional-locks -C "$1" diff --shortstat HEAD 2>/dev/null) \
              6< <(git --no-optional-locks -C "$1" ls-files --others --exclude-standard 2>/dev/null | head -1)
     fi
-    if [ -n "$3" ] && [ -f "$2" ]; then
-        exec 7< <(effort_scan "$2" </dev/null)
-    fi
+    $scan_transcript && exec 7< <(effort_scan "$2" </dev/null)
+    $lookup_argv && exec 11< <(effort_argv_flag "$4" </dev/null)
     if [ -n "$1" ]; then
         IFS= read -r b <&4 || :
         IFS= read -r s <&5 || :
         IFS= read -r u <&6 || :
     fi
-    if [ -n "$3" ] && [ -f "$2" ]; then
-        IFS= read -r m <&7 || :
-    fi
+    $scan_transcript && { IFS= read -r m <&7 || :; }
+    $lookup_argv && { IFS= read -r argv_on <&11 || :; }
+    case "$m" in
+        "E "*) m=${m#E } ;;                                   # a transcript event decides, whatever argv says
+        *)     m=""; [ "$argv_on" = 1 ] && m=ultracode ;;     # no event: the argv flag is the only evidence
+    esac
     printf '%s\n%s\n%s\n%s\n' "$b" "$s" "$u" "$m"
 }
 
 collect_status() {
     local git_stat git_untracked   # intermediate values don't leave the function; git_branch/effort_mode are globals for render
+    local claude_pid=$PPID         # read in the main shell: the statusline's parent is the claude process
     git_branch=""; git_stat=""; git_untracked=""; effort_mode=""
     {
         IFS= read -r git_branch
         IFS= read -r git_stat
         IFS= read -r git_untracked
         IFS= read -r effort_mode
-    } < <(collect_all "$cwd" "$transcript_path" "$effort" </dev/null)
+    } < <(collect_all "$cwd" "$transcript_path" "$effort" "$claude_pid" </dev/null)
     _sanitize_field "$git_branch"; git_branch=$REPLY   # git_branch bypasses parse_input's jq (it comes from git) → strip C1/control + cap; else a hostile branch name injects SGR to stdout and desyncs vis_width
 
     # dirty flag + changed-line counts merged (precedence and behavior bit-for-bit identical to the old version):
