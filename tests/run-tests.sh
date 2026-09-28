@@ -409,8 +409,8 @@ t13bad=0
 case "$t13" in *" 25%"*) ;; *"60%"*) echo "  ★ FAIL T13 legacy W line adopted as authority (showed 60%): [$t13]"; t13bad=1 ;; *) echo "  ★ FAIL T13 expected 25%: [$t13]"; t13bad=1 ;; esac
 if grep -q "^W $RT " "$SLC" 2>/dev/null; then echo "  ★ FAIL T13 legacy W line carried forward"; t13bad=1; fi
 grep -q "^W5 $RT 75 " "$SLC" 2>/dev/null || { echo "  ★ FAIL T13 own report did not seed the class authority"; t13bad=1; }
-awk -v r="$RT" -v fs="$OLD" -v sid="$(sidof sOld2)" '$1=="S"&&NF==9&&$2==sid&&$3==fs&&$4==r&&$5==75&&$6==fs&&$7=="-"&&$8=="-"&&$9=="-"{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T13 legacy S row was not upgraded to 9 fields with first_seen observation"; t13bad=1; }
-grep -q "^S sNine $RECENT $RT 20 $RECENT - - -$" "$SLC" || { echo "  ★ FAIL T13 valid 9-field S row did not survive"; t13bad=1; }
+awk -v r="$RT" -v fs="$OLD" -v sid="$(sidof sOld2)" '$1=="S"&&NF==11&&$2==sid&&$3==fs&&$4==r&&$5==75&&$6==fs&&$7=="-"&&$8=="-"&&$9=="-"&&$10=="-"&&$11~/^[0-9]+$/{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T13 legacy S row was not upgraded to 11 fields with first_seen observation"; t13bad=1; }
+grep -q "^S sNine $RECENT $RT 20 $RECENT - - - - $RECENT$" "$SLC" || { echo "  ★ FAIL T13 valid 9-field S row did not survive"; t13bad=1; }
 grep -q '^S sBroken ' "$SLC" && { echo "  ★ FAIL T13 wrong-arity S row survived"; t13bad=1; }
 [ "$t13bad" -eq 0 ] && echo "  T13 legacy S upgraded; valid 9-field S kept; malformed S and untagged W dropped OK" || fail=1
 
@@ -420,7 +420,7 @@ printf "S $(sidof sActive) %s %s 40 %s %s 24 %s\nS $(sidof sIdle) %s %s 70 %s %s
 t14=$(run 200 "$(rsj2 75 "$RT" 24 "$RT7" sActive)" | nocol); t14bad=0
 case "$t14" in *" 25%"*) ;; *) echo "  ★ FAIL T14 older active session did not replace idle authority: [$t14]"; t14bad=1 ;; esac
 if ! awk -v r="$RT" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==75&&$4>min{ok=1} END{exit !ok}' "$SLC"; then echo "  ★ FAIL T14 W5 did not persist the changed pair with fresh observed_at"; t14bad=1; fi
-if ! awk -v r="$RT" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==75&&$6>min{ok=1} END{exit !ok}' "$SLC"; then echo "  ★ FAIL T14 active S row did not record the changed pair"; t14bad=1; fi
+if ! awk -v r="$RT" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$4==r&&$5==75&&$6>min{ok=1} END{exit !ok}' "$SLC"; then echo "  ★ FAIL T14 active S row did not record the changed pair"; t14bad=1; fi
 [ "$t14bad" -eq 0 ] && echo "  T14 older active session overrides idle newer session with freshest observation OK" || fail=1
 
 # T17 follows T14: the idle session reports its unchanged stale pair and must not take authority back.
@@ -429,7 +429,7 @@ t17=$(run 200 "$(rsj2 70 "$RT" 24 "$RT7" sIdle)" | nocol); t17bad=0
 case "$t17" in *" 25%"*) ;; *) echo "  ★ FAIL T17 idle unchanged session re-took authority: [$t17]"; t17bad=1 ;; esac
 wafter=$(grep "^W5 $RT " "$SLC")
 [ "$wbefore" = "$wafter" ] || { echo "  ★ FAIL T17 W5 changed: before=[$wbefore] after=[$wafter]"; t17bad=1; }
-awk -v r="$RT" -v o="$RECENT" -v sid="$(sidof sIdle)" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==70&&$6==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T17 idle S row refreshed its carried observation"; t17bad=1; }
+awk -v r="$RT" -v o="$RECENT" -v sid="$(sidof sIdle)" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$4==r&&$5==70&&$6==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T17 idle S row refreshed its carried observation"; t17bad=1; }
 [ "$t17bad" -eq 0 ] && echo "  T17 idle unchanged session cannot re-take authority OK" || fail=1
 
 # T15 a cap increase can lower used%; the changed lower pair is still the freshest observation.
@@ -438,7 +438,7 @@ printf "S $(sidof sActive) %s %s 70 %s - - -\nS $(sidof sIdle) %s %s 70 %s - - -
 t15=$(run 200 "$(rsj 38 "$RT" sActive)" | nocol); t15bad=0
 case "$t15" in *" 62%"*) ;; *) echo "  ★ FAIL T15 cap-raise drop was not adopted: [$t15]"; t15bad=1 ;; esac
 awk -v r="$RT" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==38&&$4>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T15 lower W5 value/observation not persisted"; t15bad=1; }
-awk -v r="$RT" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==38&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T15 active S row did not record the lowered pair"; t15bad=1; }
+awk -v r="$RT" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$4==r&&$5==38&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T15 active S row did not record the lowered pair"; t15bad=1; }
 [ "$t15bad" -eq 0 ] && echo "  T15 cap-raise drop adopted by freshest observation OK" || fail=1
 
 # T16 a changed reset key is a fresh observation and re-keys the whole class without retaining the old W5.
@@ -448,7 +448,7 @@ printf "S $(sidof sActive) %s %s 87 %s - - -\nS $(sidof sIdle) %s %s 87 %s - - -
 t16=$(run 200 "$(rsj 3 "$RTNEW" sActive)" | nocol); t16bad=0
 case "$t16" in *" 97%"*) ;; *) echo "  ★ FAIL T16 rolled window was not adopted: [$t16]"; t16bad=1 ;; esac
 awk -v r="$RTNEW" -v min="$RECENT" '$1=="W5"&&NF==4&&$2==r&&$3==3&&$4>min{n++} END{exit !(n==1)}' "$SLC" || { echo "  ★ FAIL T16 new W5 key/value/observation not persisted exactly once"; t16bad=1; }
-awk -v r="$RTNEW" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==3&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T16 active S row did not record the rolled pair"; t16bad=1; }
+awk -v r="$RTNEW" -v min="$RECENT" -v sid="$(sidof sActive)" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$4==r&&$5==3&&$6>min{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T16 active S row did not record the rolled pair"; t16bad=1; }
 grep -q "^W5 $RTOLD " "$SLC" && { echo "  ★ FAIL T16 old W5 key survived window re-key"; t16bad=1; }
 [ "$t16bad" -eq 0 ] && echo "  T16 window roll adopts new key and drops old class record OK" || fail=1
 
@@ -495,7 +495,7 @@ for t18n in 1 2; do
   t18=$(run 200 "$t18j" | nocol)
   case "$t18" in *" 27%"*) ;; *) echo "  ★ FAIL T18 frame $t18n: idle session repeating $t18lit took the 7d authority (expected 27% left): [$t18]"; t18bad=1 ;; esac
   [ "$(grep '^W7 ' "$SLC")" = "$t18w" ] || { echo "  ★ FAIL T18 frame $t18n: W7 changed: before=[$t18w] after=[$(grep '^W7 ' "$SLC")]"; t18bad=1; }
-  awk -v sid="$t18sid" -v r="$RT7" -v o="$T18O" '$1=="S"&&NF==9&&$2==sid&&$7==r&&$8==56&&$9==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18 frame $t18n: idle row o7 moved: [$(grep "^S $t18sid " "$SLC")]"; t18bad=1; }
+  awk -v sid="$t18sid" -v r="$RT7" -v o="$T18O" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$7==r&&$8==56&&$9==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18 frame $t18n: idle row o7 moved: [$(grep "^S $t18sid " "$SLC")]"; t18bad=1; }
 done
 [ "$t18bad" -eq 0 ] && echo "  T18 idle session repeating an unrounded 7d literal ($t18lit) cannot re-take the authority OK" || fail=1
 
@@ -507,7 +507,7 @@ t18bw=$(grep '^W5 ' "$SLC")
 t18b=$(run 200 "$(rsj "$t18blit" "$RT" sIdle18b)" | nocol)
 case "$t18b" in *" 80%"*) ;; *) echo "  ★ FAIL T18b idle session repeating $t18blit took the 5h authority (expected 80% left): [$t18b]"; t18bbad=1 ;; esac
 [ "$(grep '^W5 ' "$SLC")" = "$t18bw" ] || { echo "  ★ FAIL T18b W5 changed: before=[$t18bw] after=[$(grep '^W5 ' "$SLC")]"; t18bbad=1; }
-awk -v sid="$t18bsid" -v r="$RT" -v o="$T18O" '$1=="S"&&NF==9&&$2==sid&&$4==r&&$5==7&&$6==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18b idle row o5 moved: [$(grep "^S $t18bsid " "$SLC")]"; t18bbad=1; }
+awk -v sid="$t18bsid" -v r="$RT" -v o="$T18O" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$4==r&&$5==7&&$6==o{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18b idle row o5 moved: [$(grep "^S $t18bsid " "$SLC")]"; t18bbad=1; }
 [ "$t18bbad" -eq 0 ] && echo "  T18b idle session repeating an unrounded 5h literal ($t18blit) cannot re-take the authority OK" || fail=1
 
 # T18c formula sweep: p = 0..100, utilization p/100, both formulas, both classes in one frame. The idle row starts with no
@@ -536,7 +536,7 @@ printf "S %s %s - - - %s 56.1234 %s\nW7 %s 73 %s\n" "$t18dsid" "$T18FS" "$RT7" "
 t18dw=$(grep '^W7 ' "$SLC")
 run 200 "$(rsj7 56.12345 "$RT7" sB18d)" >/dev/null
 [ "$(grep '^W7 ' "$SLC")" = "$t18dw" ] || { echo "  ★ FAIL T18d W7 changed: before=[$t18dw] after=[$(grep '^W7 ' "$SLC")]"; t18dbad=1; }
-grep -q "^S $t18dsid $T18FS - - - $RT7 56\\.1 $T18O\$" "$SLC" || { echo "  ★ FAIL T18d pre-rounding row was not carried over as 56.1: [$(grep "^S $t18dsid " "$SLC")]"; t18dbad=1; }
+grep -q "^S $t18dsid $T18FS - - - $RT7 56\\.1 $T18O - [0-9][0-9]*\$" "$SLC" || { echo "  ★ FAIL T18d pre-rounding row was not carried over as 56.1: [$(grep "^S $t18dsid " "$SLC")]"; t18dbad=1; }
 [ "$t18dbad" -eq 0 ] && echo "  T18d pre-rounding row (56.1234) re-reported as 56.12345 keeps its o7 and is rewritten as 56.1 OK" || fail=1
 
 # T18e positive control: a genuine change of one tenth (56 -> 56.1) is a fresh observation, stamped now and adopted.
@@ -545,10 +545,305 @@ t18ebad=0; t18esid=$(sidof sA18e)
 printf "S %s %s - - - %s 56 %s\nW7 %s 56 %s\n" "$t18esid" "$T18FS" "$RT7" "$T18O" "$RT7" "$T18O" > "$SLC"
 t18et=$(date +%s)
 run 200 "$(rsj7 56.1 "$RT7" sA18e)" >/dev/null
-awk -v sid="$t18esid" -v r="$RT7" -v t="$t18et" '$1=="S"&&NF==9&&$2==sid&&$7==r&&$8=="56.1"&&$9>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18e a 0.1 change was not stamped now: [$(grep "^S $t18esid " "$SLC")]"; t18ebad=1; }
+awk -v sid="$t18esid" -v r="$RT7" -v t="$t18et" '$1=="S"&&NF==11&&$10=="-"&&$11~/^[0-9]+$/&&$2==sid&&$7==r&&$8=="56.1"&&$9>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18e a 0.1 change was not stamped now: [$(grep "^S $t18esid " "$SLC")]"; t18ebad=1; }
 awk -v r="$RT7" -v t="$t18et" '$1=="W7"&&NF==4&&$2==r&&$3=="56.1"&&$4>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T18e W7 did not adopt 56.1 at now: [$(grep '^W7 ' "$SLC")]"; t18ebad=1; }
 [ "$t18ebad" -eq 0 ] && echo "  T18e a 0.1 change (56 -> 56.1) is stamped now and adopted as W7 56.1 OK" || fail=1
 rm -f "$SLC"
+
+# T19-T22 (rate-sync-freshness-from-api-counter): the observation time comes from Claude Code's API-activity counter,
+# cost.total_api_duration_ms, which moves only when a model response completed after its rate-limit headers were applied.
+# A counter that did not advance means no new data, whatever the reported number does; a report with no recorded counter
+# gets observation time 0 (freshness unknown). Assertions marked "(format)" pin the eleven-field row
+# `S <sid> <first_seen> <r5> <u5> <o5> <r7> <u7> <o7> <api_ms> <last_seen>`; every other assertion is behavioural (the displayed
+# remaining %, the W5/W7 record, a P sample, a sighting file), so a red run on the pre-change tree can be read by reason.
+# Most cases seed the previous nine-field row, which both trees read, and let one frame of the code under test record the
+# counter baseline before the frame that is judged; that keeps the behavioural verdict free of the format difference.
+# rsjc: statusline JSON with any combination of five_hour / seven_day and a VERBATIM cost.total_api_duration_ms literal.
+rsjc() {  # $1=used5 $2=reset5 $3=used7 $4=reset7 ("-" omits the class) $5=counter JSON literal or "absent" $6=label (via sidof) or raw:<sid>
+  local sid
+  case "$6" in raw:*) sid=${6#raw:} ;; *) sid=$(sidof "$6") ;; esac
+  jq -cn --arg cwd "$SL" --arg tp "$TP" --arg sid "$sid" --arg u5 "$1" --arg r5 "$2" --arg u7 "$3" --arg r7 "$4" --arg c "$5" '
+    ( (if $u5 == "-" then {} else {five_hour:{used_percentage:($u5|fromjson), resets_at:($r5|fromjson)}} end)
+    + (if $u7 == "-" then {} else {seven_day:{used_percentage:($u7|fromjson), resets_at:($r7|fromjson)}} end) ) as $rl
+    | { workspace:{current_dir:$cwd}, model:{display_name:"Opus"}, context_window:{used_percentage:5},
+        session_id:$sid, transcript_path:$tp }
+    + (if $rl == {} then {} else {rate_limits:$rl} end)
+    + (if $c == "absent" then {} else {cost:{total_api_duration_ms:($c|fromjson)}} end)'
+}
+srow() { awk -v sid="$(sidof "$1")" '$1=="S"&&$2==sid' "$SLC"; }   # $1=label → that session's registry row as stored
+SEEN="$SLC.seen"; T19LOCK="$SLC.lock"
+t19wait() { while [ "$(date +%s)" -le "$1" ]; do sleep 0.2; done; }  # $1=epoch second → return once the clock has passed it
+# Helper self-check: each counter literal reaches the script byte-for-byte, and "absent" sends no cost object.
+t19hbad=0
+for t19hl in 43500 0 null 12.5 '"abc"' absent; do
+  t19hw="{\"total_api_duration_ms\":$t19hl}"; [ "$t19hl" = absent ] && t19hw=null
+  t19hg=$(rsjc 10 "$RT" 56.00000000000001 "$RT7" "$t19hl" sHelp19 | jq -c .cost)
+  [ "$t19hg" = "$t19hw" ] || { echo "  ★ FAIL T19 helper: counter literal [$t19hl] reached the script as [$t19hg], want [$t19hw]"; t19hbad=1; }
+done
+case "$(rsjc 10 "$RT" 56.00000000000001 "$RT7" 0 sHelp19)" in *'"used_percentage":56.00000000000001,'*) ;;
+  *) echo "  ★ FAIL T19 helper lost the unrounded used% literal"; t19hbad=1 ;; esac
+[ "$(rsjc - - - - absent sHelp19 | jq -c '.rate_limits')" = null ] || { echo "  ★ FAIL T19 helper: omitting both classes still sent rate_limits"; t19hbad=1; }
+[ "$t19hbad" -eq 0 ] && echo "  T19 fixture helper passes every counter literal (digits, 0, null, 12.5, string, absent) through verbatim OK" || fail=1
+
+# T19a an advanced counter stamps the report now even when the value is unchanged (spec: a busy session confirms 74).
+t19abad=0; tn=$(date +%s); t19afs=$((tn-5000))
+printf "S %s %s - - - %s 74 %s\nW7 %s 74 %s\n" "$(sidof sAct19a)" "$t19afs" "$RT7" $((tn-3000)) "$RT7" $((tn-100)) > "$SLC"
+t19aw=$(grep '^W7 ' "$SLC")
+run 200 "$(rsjc - - 74 "$RT7" 42000 sAct19a)" >/dev/null        # records the counter baseline; nothing new, nothing re-stamped
+[ "$(grep '^W7 ' "$SLC")" = "$t19aw" ] || { echo "  ★ FAIL T19a the baseline frame re-stamped W7: [$(grep '^W7 ' "$SLC")]"; t19abad=1; }
+t19a=$(run 200 "$(rsjc - - 74 "$RT7" 43500 sAct19a)" | nocol)     # a response arrived: the counter advanced, the value did not change
+case "$t19a" in *" 26%"*) ;; *) echo "  ★ FAIL T19a expected 26% remaining: [$t19a]"; t19abad=1 ;; esac
+awk -v r="$RT7" -v t="$tn" '$1=="W7"&&NF==4&&$2==r&&$3==74&&$4>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T19a an advanced counter did not re-stamp W7 (same value, new data): [$(grep '^W7 ' "$SLC")]"; t19abad=1; }
+srow sAct19a | awk -v fs="$t19afs" -v r="$RT7" -v t="$tn" 'NF==11&&$3==fs&&$4=="-"&&$5=="-"&&$6=="-"&&$7==r&&$8==74&&$9>=t&&$10=="43500"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19a (format) row: [$(srow sAct19a)]"; t19abad=1; }
+[ "$t19abad" -eq 0 ] && echo "  T19a an advanced counter re-stamps an unchanged 74 as a fresh observation OK" || fail=1
+
+# T19b an idle session with an unchanged counter keeps its observation time, in any float formatting (guards E1).
+t19bbad=0; tn=$(date +%s); t19bo=$((tn-3000))
+printf "S %s %s - - - %s 56 %s\nW7 %s 73 %s\n" "$(sidof sIdle19b)" $((tn-5000)) "$RT7" "$t19bo" "$RT7" $((tn-100)) > "$SLC"
+t19bw=$(grep '^W7 ' "$SLC")
+for t19bn in 1 2 3; do                                             # frame 1 records the baseline; frames 2 and 3 repeat it
+  t19bt=$(date +%s)
+  t19b=$(run 200 "$(rsjc - - 56.00000000000001 "$RT7" 42000 sIdle19b)" | nocol)
+  case "$t19b" in *" 27%"*) ;; *) echo "  ★ FAIL T19b frame $t19bn: idle session took the 7d authority (expected 27% left): [$t19b]"; t19bbad=1 ;; esac
+  [ "$(grep '^W7 ' "$SLC")" = "$t19bw" ] || { echo "  ★ FAIL T19b frame $t19bn: W7 changed: [$(grep '^W7 ' "$SLC")]"; t19bbad=1; }
+  srow sIdle19b | awk -v o="$t19bo" '$9==o{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19b frame $t19bn: o7 moved: [$(srow sIdle19b)]"; t19bbad=1; }
+  srow sIdle19b | awk -v r="$RT7" -v o="$t19bo" -v t="$t19bt" 'NF==11&&$7==r&&$8==56&&$9==o&&$10=="42000"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19b frame $t19bn (format) row: [$(srow sIdle19b)]"; t19bbad=1; }
+done
+[ "$t19bbad" -eq 0 ] && echo "  T19b idle session repeating 56.00000000000001 with an unchanged counter keeps o7 and shows 27% OK" || fail=1
+
+# T19c a changed pair without a counter advance does not refresh the observation (spec: a quota probe changed the reading).
+t19cbad=0; tn=$(date +%s); t19cfs=$((tn-5000)); t19co=$((tn-3000))
+printf "S %s %s - - - %s 70 %s\nW7 %s 73 %s\n" "$(sidof sProbe19c)" "$t19cfs" "$RT7" "$t19co" "$RT7" $((tn-100)) > "$SLC"
+t19cw=$(grep '^W7 ' "$SLC")
+run 200 "$(rsjc - - 70 "$RT7" 42000 sProbe19c)" >/dev/null        # baseline
+t19c=$(run 200 "$(rsjc - - 75 "$RT7" 42000 sProbe19c)" | nocol)   # the value moved, the counter did not
+case "$t19c" in *" 27%"*) ;; *) echo "  ★ FAIL T19c a changed pair without a counter advance took the authority (expected 27% left): [$t19c]"; t19cbad=1 ;; esac
+[ "$(grep '^W7 ' "$SLC")" = "$t19cw" ] || { echo "  ★ FAIL T19c W7 changed: before=[$t19cw] after=[$(grep '^W7 ' "$SLC")]"; t19cbad=1; }
+srow sProbe19c | awk -v o="$t19co" '$8==75&&$9==o{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19c the new pair was not recorded with the carried o7: [$(srow sProbe19c)]"; t19cbad=1; }
+srow sProbe19c | awk -v fs="$t19cfs" -v r="$RT7" -v o="$t19co" -v t="$tn" 'NF==11&&$3==fs&&$7==r&&$8==75&&$9==o&&$10=="42000"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19c (format) row: [$(srow sProbe19c)]"; t19cbad=1; }
+[ "$t19cbad" -eq 0 ] && echo "  T19c a changed pair without a counter advance keeps its o7 and leaves W7 alone OK" || fail=1
+
+# T19d (E-clear) a new session id carrying an older reading cannot take the authority; its first advanced frame is fresh.
+t19dbad=0; tn=$(date +%s)
+printf "W7 %s 73 %s\n" "$RT7" $((tn-100)) > "$SLC"
+t19dw=$(grep '^W7 ' "$SLC")
+t19d=$(run 200 "$(rsjc - - 56 "$RT7" 0 sNew19d)" | nocol)          # /clear in an idle process: new id, counter 0, hours-old 56
+case "$t19d" in *" 27%"*) ;; *) echo "  ★ FAIL T19d (E-clear) a new id with counter 0 took the authority with its old 56 (expected 27% left): [$t19d]"; t19dbad=1 ;; esac
+[ "$(grep '^W7 ' "$SLC")" = "$t19dw" ] || { echo "  ★ FAIL T19d (E-clear) W7 changed: [$(grep '^W7 ' "$SLC")]"; t19dbad=1; }
+t19dfs=$(srow sNew19d | awk '{print $3}')
+srow sNew19d | awk -v r="$RT7" -v t="$tn" 'NF==11&&$3>=t&&$4=="-"&&$7==r&&$8==56&&$9=="0"&&$10=="0"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19d (format) first row: [$(srow sNew19d)]"; t19dbad=1; }
+t19dt=$(date +%s)
+t19d2=$(run 200 "$(rsjc - - 75 "$RT7" 1800 sNew19d)" | nocol)      # the first reply: counter 0 -> 1800
+case "$t19d2" in *" 25%"*) ;; *) echo "  ★ FAIL T19d the first advanced frame was not adopted (expected 25% left): [$t19d2]"; t19dbad=1 ;; esac
+awk -v r="$RT7" -v t="$t19dt" '$1=="W7"&&NF==4&&$2==r&&$3==75&&$4>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T19d W7 did not take 75 at now: [$(grep '^W7 ' "$SLC")]"; t19dbad=1; }
+srow sNew19d | awk -v fs="$t19dfs" -v r="$RT7" -v t="$t19dt" 'NF==11&&$3==fs&&$7==r&&$8==75&&$9>=t&&$10=="1800"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19d (format) second row: [$(srow sNew19d)]"; t19dbad=1; }
+[ "$t19dbad" -eq 0 ] && echo "  T19d (E-clear) a new id with counter 0 cannot take W7; its first advanced frame is adopted OK" || fail=1
+
+# T19e (E-first) a session registered at startup, before its first reply, is fresh on its first real report.
+t19ebad=0; tn=$(date +%s); t19efs=$((tn-5000))
+printf "S %s %s - - - - - -\nW7 %s 70 %s\n" "$(sidof sStart19e)" "$t19efs" "$RT7" $((tn-100)) > "$SLC"
+run 200 "$(rsjc - - - - 0 sStart19e)" >/dev/null                  # startup frame: no rate_limits yet, counter 0
+srow sStart19e | awk -v fs="$t19efs" -v t="$tn" 'NF==11&&$3==fs&&$4=="-"&&$7=="-"&&$10=="0"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19e (format) startup row: [$(srow sStart19e)]"; t19ebad=1; }
+t19e=$(run 200 "$(rsjc - - 73 "$RT7" 5200 sStart19e)" | nocol)     # first reply: first real report, counter advanced
+case "$t19e" in *" 27%"*) ;; *) echo "  ★ FAIL T19e (E-first) the first real report lost to an older record (expected 27% left): [$t19e]"; t19ebad=1 ;; esac
+awk -v r="$RT7" -v t="$tn" '$1=="W7"&&NF==4&&$2==r&&$3==73&&$4>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T19e (E-first) W7 did not take 73 at now: [$(grep '^W7 ' "$SLC")]"; t19ebad=1; }
+srow sStart19e | awk -v fs="$t19efs" -v r="$RT7" -v t="$tn" 'NF==11&&$3==fs&&$7==r&&$8==73&&$9>=t&&$10=="5200"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19e (format) row: [$(srow sStart19e)]"; t19ebad=1; }
+[ "$t19ebad" -eq 0 ] && echo "  T19e (E-first) the first report after the first reply is stamped now, not first_seen OK" || fail=1
+
+# T19f a smaller counter (a resumed session) becomes the new baseline, and the next increase is fresh.
+t19fbad=0; tn=$(date +%s); t19fo=$((tn-100))
+printf "S %s %s - - - %s 73 %s\nW7 %s 73 %s\n" "$(sidof sRes19f)" $((tn-5000)) "$RT7" "$t19fo" "$RT7" "$t19fo" > "$SLC"
+t19fw=$(grep '^W7 ' "$SLC")
+run 200 "$(rsjc - - 73 "$RT7" 50000 sRes19f)" >/dev/null           # baseline 50000
+run 200 "$(rsjc - - 73 "$RT7" 20000 sRes19f)" >/dev/null           # resumed: restored to a smaller saved counter
+[ "$(grep '^W7 ' "$SLC")" = "$t19fw" ] || { echo "  ★ FAIL T19f a smaller counter counted as an advance: [$(grep '^W7 ' "$SLC")]"; t19fbad=1; }
+srow sRes19f | awk -v o="$t19fo" '$9==o&&$10=="20000"{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19f (format) the smaller counter was not recorded as the baseline: [$(srow sRes19f)]"; t19fbad=1; }
+t19ft=$(date +%s)
+run 200 "$(rsjc - - 73 "$RT7" 20500 sRes19f)" >/dev/null           # 20000 -> 20500: a response after the resume
+awk -v r="$RT7" -v t="$t19ft" '$1=="W7"&&NF==4&&$2==r&&$3==73&&$4>=t{ok=1} END{exit !ok}' "$SLC" || { echo "  ★ FAIL T19f the increase past the smaller baseline was not fresh: [$(grep '^W7 ' "$SLC")]"; t19fbad=1; }
+srow sRes19f | awk -v t="$t19ft" 'NF==11&&$9>=t&&$10=="20500"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19f (format) row: [$(srow sRes19f)]"; t19fbad=1; }
+[ "$t19fbad" -eq 0 ] && echo "  T19f a smaller counter becomes the baseline and the next increase is fresh OK" || fail=1
+
+# T19g the usable/unusable counter table. A usable counter decides the observation time (here: no recorded counter yet, so the
+# changed pair is carried, not stamped); an unusable one falls back to the pair-change rule (the changed pair is stamped now).
+t19gbad=0
+while read -r t19gl t19gpct t19gfld; do
+  tn=$(date +%s); t19go=$((tn-3000))
+  printf "S %s %s %s 14 %s - - -\nW5 %s 20 %s\n" "$(sidof "sTab19g$t19gl")" $((tn-5000)) "$RT" "$t19go" "$RT" $((tn-100)) > "$SLC"
+  t19g=$(run 200 "$(rsjc 21 "$RT" - - "$t19gl" "sTab19g$t19gl")" | nocol)
+  case "$t19g" in *" $t19gpct%"*) ;; *) echo "  ★ FAIL T19g counter [$t19gl]: expected $t19gpct% left: [$t19g]"; t19gbad=1 ;; esac
+  srow "sTab19g$t19gl" | awk -v f="$t19gfld" 'NF==11&&$10==f{ok=1} END{exit !ok}' || { echo "  ★ FAIL T19g (format) counter [$t19gl] should be recorded as [$t19gfld]: [$(srow "sTab19g$t19gl")]"; t19gbad=1; }
+done <<'T19G'
+43500 80 43500
+0 80 0
+absent 79 -
+null 79 -
+12.5 79 -
+"abc" 79 -
+T19G
+[ "$t19gbad" -eq 0 ] && echo "  T19g digits (incl. 0) are a usable counter; absent/null/12.5/string fall back to the pair rule and record '-' OK" || fail=1
+
+# T20 (E5) Claude Code leaves an expired window out of the JSON. A session whose own row shows it reported that class keeps showing
+# the live class authority (value and countdown); a session that never reported the class stays silent.
+t20bad=0; tn=$(date +%s)
+printf "S %s %s %s 10 %s %s 56 %s\nW7 %s 2 %s\n" "$(sidof sIdle20)" $((tn-5000)) "$RT" $((tn-3000)) $((tn-100)) $((tn-4000)) "$RT7" $((tn-50)) > "$SLC"
+t20=$(run 200 "$(rsjc 10 "$RT" - - 42000 sIdle20)" | nocol)       # 5h object only: the weekly window rolled while it idled
+case "$t20" in *"3D11H 98%"*) ;; *) echo "  ★ FAIL T20 (E5) an idle session that stopped receiving seven_day did not show the live W7 (3D11H 98%): [$t20]"; t20bad=1 ;; esac
+srow sIdle20 | awk -v r=$((tn-100)) -v o=$((tn-4000)) '$7==r&&$8==56&&$9==o{ok=1} END{exit !ok}' || { echo "  ★ FAIL T20 the adopting session's own 7d triple changed: [$(srow sIdle20)]"; t20bad=1; }
+mkdir "$T19LOCK" 2>/dev/null                                       # same frame, read-only (lock held): adoption is identical
+t20ro=$(run 200 "$(rsjc 10 "$RT" - - 42000 sIdle20)" | nocol); rmdir "$T19LOCK" 2>/dev/null
+case "$t20ro" in *"3D11H 98%"*) ;; *) echo "  ★ FAIL T20 (E5) a read-only frame did not show the live W7: [$t20ro]"; t20bad=1 ;; esac
+tn=$(date +%s)
+printf "S %s %s %s 40 %s - - -\nW5 %s 3 %s\n" "$(sidof sIdle20b)" $((tn-5000)) $((tn-100)) $((tn-4000)) "$RT" $((tn-50)) > "$SLC"
+t20b=$(run 200 "$(rsjc - - - - 42000 sIdle20b)" | nocol)           # no rate_limits object at all
+case "$t20b" in *"2H"*" 97%"*) ;; *) echo "  ★ FAIL T20 (E5) an idle session that stopped receiving five_hour did not show the live W5 (2H.. 97%): [$t20b]"; t20bad=1 ;; esac
+awk -v r="$RT" -v t="$tn" '$1=="P"&&$2==r&&$3>=t&&$4==3{n++} END{exit !(n==1)}' "$SLC" || { echo "  ★ FAIL T20 (E5) no single P sample under the W5 key with the W5 value: [$(grep '^P ' "$SLC")]"; t20bad=1; }
+srow sIdle20b | awk -v r=$((tn-100)) -v o=$((tn-4000)) '$4==r&&$5==40&&$6==o{ok=1} END{exit !ok}' || { echo "  ★ FAIL T20 the adopting session's own 5h triple changed: [$(srow sIdle20b)]"; t20bad=1; }
+tn=$(date +%s)
+printf "S %s %s %s 10 %s - - -\nW7 %s 2 %s\n" "$(sidof sOther20)" $((tn-5000)) "$RT" $((tn-3000)) "$RT7" $((tn-50)) > "$SLC"
+t20c=$(run 200 "$(rsjc 10 "$RT" - - 42000 sOther20)" | nocol)     # never reported seven_day
+case "$t20c" in *" 90%"*) ;; *) echo "  ★ FAIL T20 positive control: the five-hour-only session lost its own 5h segment: [$t20c]"; t20bad=1 ;; esac
+case "$t20c" in *"98%"*) echo "  ★ FAIL T20 a session that never reported seven_day surfaced another session's W7: [$t20c]"; t20bad=1 ;; esac
+t20d=$(run 200 "$(rsjc 10 "$RT" - - 42000 raw:sl-e5probe)" | nocol)   # refused id, no row
+case "$t20d" in *" 90%"*) ;; *) echo "  ★ FAIL T20 positive control: the refused id lost its own 5h segment: [$t20d]"; t20bad=1 ;; esac
+case "$t20d" in *"98%"*) echo "  ★ FAIL T20 a refused id with no row surfaced another session's W7: [$t20d]"; t20bad=1 ;; esac
+[ "$t20bad" -eq 0 ] && echo "  T20 (E5) a session whose row shows the class keeps showing the live authority and sampling 5h; others stay silent OK" || fail=1
+
+# T21 (E4) a lock-contention frame records when it first saw a new API-activity count, so a later writable frame cannot stamp
+# that older reading with a later second (spec example: A's 72 seen at 1000 loses to B's 73 observed at 1030).
+t21bad=0; tn=$(date +%s); t21a=$(sidof sA21); t21b=$(sidof sB21)
+printf "S %s %s - - - %s 71 %s\nS %s %s - - - %s 72 %s\nW7 %s 72 %s\n" \
+  "$t21a" $((tn-5000)) "$RT7" $((tn-3000)) "$t21b" $((tn-5000)) "$RT7" $((tn-100)) "$RT7" $((tn-100)) > "$SLC"
+run 200 "$(rsjc - - 71 "$RT7" 40000 sA21)" >/dev/null; run 200 "$(rsjc - - 72 "$RT7" 90000 sB21)" >/dev/null   # baselines
+cp "$SLC" "$WORK/t21.before"
+mkdir "$T19LOCK" 2>/dev/null                                       # another writer holds the lock
+t21t0=$(date +%s)
+t21c1=$(run 200 "$(rsjc - - 72 "$RT7" 41000 sA21)" | nocol)       # A's response arrived; its frame is read-only
+t21t1=$(date +%s); rmdir "$T19LOCK" 2>/dev/null
+case "$t21c1" in *" 28%"*) ;; *) echo "  ★ FAIL T21 the contention frame did not display the authority it read (28%): [$t21c1]"; t21bad=1 ;; esac
+cmp -s "$SLC" "$WORK/t21.before" || { echo "  ★ FAIL T21 the contention frame changed the shared cache"; t21bad=1; }
+t21s=""; [ -f "$SEEN.$t21a" ] && read -r t21sc t21s < "$SEEN.$t21a"
+if [ "${t21sc:-}" = 41000 ] && [ -n "$t21s" ] && [ "$t21s" -ge "$t21t0" ] && [ "$t21s" -le "$t21t1" ]; then :; else
+  echo "  ★ FAIL T21 (E4) the contention frame did not write the sighting '41000 <second>': [$(cat "$SEEN.$t21a" 2>/dev/null)]"; t21bad=1; t21s=$t21t1; fi
+[ "$(stat -f '%Lp' "$SEEN.$t21a" 2>/dev/null)" = 600 ] || { echo "  ★ FAIL T21 the sighting is not mode 600: [$(stat -f '%Lp' "$SEEN.$t21a" 2>/dev/null)]"; t21bad=1; }
+t19wait "$t21s"                                                    # B's observation is strictly later than A's sighting
+run 200 "$(rsjc - - 73 "$RT7" 91000 sB21)" >/dev/null
+t21w=$(grep '^W7 ' "$SLC")
+case "$t21w" in "W7 $RT7 73 "*) ;; *) echo "  ★ FAIL T21 B's newer 73 was not adopted: [$t21w]"; t21bad=1 ;; esac
+t21c2=$(run 200 "$(rsjc - - 72 "$RT7" 41000 sA21)" | nocol)       # A's next frame is writable, same counter as the sighting
+case "$t21c2" in *" 27%"*) ;; *) echo "  ★ FAIL T21 (E4) A's older 72 took the authority from B's 73 (expected 27% left): [$t21c2]"; t21bad=1 ;; esac
+[ "$(grep '^W7 ' "$SLC")" = "$t21w" ] || { echo "  ★ FAIL T21 (E4) W7 moved off B's record: before=[$t21w] after=[$(grep '^W7 ' "$SLC")]"; t21bad=1; }
+srow sA21 | awk -v s="$t21s" '$8==72&&$9==s{ok=1} END{exit !ok}' || { echo "  ★ FAIL T21 (E4) A's o7 is not the sighting's second $t21s: [$(srow sA21)]"; t21bad=1; }
+srow sA21 | awk -v s="$t21s" 'NF==11&&$9==s&&$10=="41000"&&$11>=s{ok=1} END{exit !ok}' || { echo "  ★ FAIL T21 (format) A's row: [$(srow sA21)]"; t21bad=1; }
+[ -e "$SEEN.$t21a" ] && { echo "  ★ FAIL T21 the used sighting was not removed"; t21bad=1; }
+[ "$t21bad" -eq 0 ] && echo "  T21 (E4) a change first seen under lock contention keeps that second and loses to a later observation OK" || fail=1
+
+# T21b a sighting that does not match the frame's advanced counter (another value, a future second, or malformed) is not used,
+# and the writable frame removes it after its cache write.
+t21bbad=0
+for t21bk in other future junk; do
+  tn=$(date +%s); t21bs=$(sidof "sA21b$t21bk")
+  printf "S %s %s - - - %s 71 %s\nW7 %s 72 %s\n" "$t21bs" $((tn-5000)) "$RT7" $((tn-3000)) "$RT7" $((tn-100)) > "$SLC"
+  run 200 "$(rsjc - - 71 "$RT7" 40000 "sA21b$t21bk")" >/dev/null  # baseline 40000
+  case "$t21bk" in
+    other)  printf '41000 %s\n' $((tn-2000)) > "$SEEN.$t21bs" ;;   # an older response's sighting
+    future) printf '42500 %s\n' $((tn+100000)) > "$SEEN.$t21bs" ;; # right counter, a second in the future
+    junk)   printf 'garbage\n' > "$SEEN.$t21bs" ;;
+  esac
+  t21bt=$(date +%s)
+  run 200 "$(rsjc - - 72 "$RT7" 42500 "sA21b$t21bk")" >/dev/null
+  srow "sA21b$t21bk" | awk -v t="$t21bt" '$8==72&&$9>=t&&$9<=t+60{ok=1} END{exit !ok}' || { echo "  ★ FAIL T21b [$t21bk] sighting was used instead of now: [$(srow "sA21b$t21bk")]"; t21bbad=1; }
+  [ -e "$SEEN.$t21bs" ] && { echo "  ★ FAIL T21b [$t21bk] the unused sighting was not removed"; t21bbad=1; }
+done
+[ "$t21bbad" -eq 0 ] && echo "  T21b a sighting for another counter, a future second or a malformed one is ignored and removed OK" || fail=1
+
+# T21c frames without a contended advance create no sighting; a symbolic link at the sighting path is never written through.
+t21cbad=0; tn=$(date +%s); t21cs=$(sidof sC21c); rm -f "$SEEN".* 2>/dev/null   # judge only what these frames create
+t21cnone() {  # $1=case label → FAIL when any sighting file exists
+  for f in "$SEEN".*; do [ -e "$f" ] || [ -L "$f" ] || continue; echo "  ★ FAIL T21c [$1] created a sighting: [${f##*/}]"; t21cbad=1; rm -f "$f"; done; }
+printf "S %s %s - - - %s 71 %s\nW7 %s 72 %s\n" "$t21cs" $((tn-5000)) "$RT7" $((tn-3000)) "$RT7" $((tn-100)) > "$SLC"
+run 200 "$(rsjc - - 71 "$RT7" 40000 sC21c)" >/dev/null             # baseline 40000
+run 200 "$(rsjc - - 72 "$RT7" 41000 sC21c)" >/dev/null; t21cnone uncontended
+mkdir "$T19LOCK" 2>/dev/null
+run 200 "$(rsjc - - 72 "$RT7" 41000 sC21c)" >/dev/null; t21cnone not-advanced
+run 200 "$(rsjc - - 72 "$RT7" absent sC21c)" >/dev/null; t21cnone unusable-counter
+run 200 "$(rsjc - - 72 "$RT7" 99000 raw:sl-e4probe)" >/dev/null; t21cnone refused-id
+run 200 "$(rsjc - - 72 "$RT7" 99000 raw:)" >/dev/null; t21cnone empty-id
+printf "S %s %s - - - %s 71 %s\n" "$(sidof sD21c)" $((tn-5000)) "$RT7" $((tn-3000)) >> "$SLC"
+run 200 "$(rsjc - - 72 "$RT7" 99000 sD21c)" >/dev/null; t21cnone no-recorded-counter
+printf 'keep\n' > "$WORK/t21c.target"; ln -s "$WORK/t21c.target" "$SEEN.$t21cs"
+t21cl=$(run 200 "$(rsjc - - 72 "$RT7" 99000 sC21c)" | nocol)     # advanced under contention, but the path is a link
+rmdir "$T19LOCK" 2>/dev/null
+[ -L "$SEEN.$t21cs" ] && [ "$(cat "$WORK/t21c.target")" = keep ] || { echo "  ★ FAIL T21c a sighting was written through or over a symbolic link"; t21cbad=1; }
+case "$t21cl" in *" 28%"*) ;; *) echo "  ★ FAIL T21c the frame facing a linked sighting path did not display normally: [$t21cl]"; t21cbad=1 ;; esac
+printf '99000 %s\n' $((tn-2000)) > "$WORK/t21c.target"; t21ct=$(date +%s)
+run 200 "$(rsjc - - 73 "$RT7" 99000 sC21c)" >/dev/null             # writable: a linked sighting that would match is not used
+srow sC21c | awk -v t="$t21ct" '$9>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T21c a linked sighting was used: [$(srow sC21c)]"; t21cbad=1; }
+rm -f "$SEEN.$t21cs"
+[ "$t21cbad" -eq 0 ] && echo "  T21c no sighting from uncontended, non-advanced, unusable, refused or empty ids; links are never written or used OK" || fail=1
+
+# T22 the eleven-field row, its upgrades, and retention measured from the session's last write.
+t22bad=0; tn=$(date +%s); rm -f "$SLC"
+run 200 "$(rsjc 20 "$RT" - - 5000 sFmt22)" >/dev/null
+srow sFmt22 | awk -v r="$RT" -v t="$tn" 'NF==11&&$3>=t&&$4==r&&$5==20&&$10=="5000"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T22 (format) the frame's own row is not eleven fields: [$(srow sFmt22)]"; t22bad=1; }
+# upgrade table: row before | frame counter | expected o5 and counter; W5 must stay the newer record in every row
+while read -r t22row t22ctr t22o t22f; do
+  tn=$(date +%s); t22fs=$((tn-5000)); t22sid=$(sidof "sUp22$t22row")
+  case "$t22row" in
+    three*) printf "S %s %s\nW5 %s 20 %s\n" "$t22sid" "$t22fs" "$RT" $((tn-100)) > "$SLC" ;;
+    nine)   printf "S %s %s %s 14 %s - - -\nW5 %s 20 %s\n" "$t22sid" "$t22fs" "$RT" $((tn-4000)) "$RT" $((tn-100)) > "$SLC" ;;
+  esac
+  t22w=$(grep '^W5 ' "$SLC")
+  run 200 "$(rsjc 14 "$RT" - - "$t22ctr" "sUp22$t22row")" >/dev/null
+  [ "$(grep '^W5 ' "$SLC")" = "$t22w" ] || { echo "  ★ FAIL T22 upgrading a $t22row row handed it the authority: [$(grep '^W5 ' "$SLC")]"; t22bad=1; }
+  case "$t22o" in fs) t22o=$t22fs ;; o9) t22o=$((tn-4000)) ;; esac
+  srow "sUp22$t22row" | awk -v fs="$t22fs" -v r="$RT" -v o="$t22o" -v f="$t22f" -v t="$tn" 'NF==11&&$3==fs&&$4==r&&$5==14&&$6==o&&$7=="-"&&$8=="-"&&$9=="-"&&$10==f&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T22 (format) upgrade of a $t22row row with counter [$t22ctr]: [$(srow "sUp22$t22row")]"; t22bad=1; }
+done <<'T22U'
+three absent fs -
+threec 42000 0 42000
+nine 42000 o9 42000
+T22U
+# other sessions' rows across one rewrite: eleven kept as is, nine and three upgraded, malformed dropped
+tn=$(date +%s); t22fs=$((tn-5000)); t22ls=$((tn-50))
+{ printf "S eleven22 %s %s 20 %s - - - 42000 %s\n" "$t22fs" "$RT" $((tn-4000)) "$t22ls"
+  printf "S nine22 %s %s 20 %s - - -\n" "$t22fs" "$RT" $((tn-4000))
+  printf "S three22 %s\n" "$t22fs"
+  printf "S broken22 %s %s 20\n" "$t22fs" "$RT"
+  printf "S ten22 %s - - - - - - 42000\n" "$t22fs"
+  printf "S badctr22 %s - - - - - - x %s\n" "$t22fs" "$t22ls"
+  printf "S badls22 %s - - - - - - 42000 y\n" "$t22fs"; } > "$SLC"
+run 200 "$(rsjc 20 "$RT" - - 5000 sWriter22)" >/dev/null
+grep -qx "S eleven22 $t22fs $RT 20 $((tn-4000)) - - - 42000 $t22ls" "$SLC" || { echo "  ★ FAIL T22 (format) a current eleven-field row did not survive unchanged: [$(grep '^S eleven22 ' "$SLC")]"; t22bad=1; }
+grep -qx "S nine22 $t22fs $RT 20 $((tn-4000)) - - - - $t22fs" "$SLC" || { echo "  ★ FAIL T22 (format) a nine-field row was not upgraded with last_seen = first_seen: [$(grep '^S nine22 ' "$SLC")]"; t22bad=1; }
+grep -qx "S three22 $t22fs - - - - - - - $t22fs" "$SLC" || { echo "  ★ FAIL T22 (format) a three-field row was not upgraded: [$(grep '^S three22 ' "$SLC")]"; t22bad=1; }
+grep -q '^S \(broken22\|ten22\|badctr22\|badls22\) ' "$SLC" && { echo "  ★ FAIL T22 a malformed S row survived: [$(grep '^S \(broken22\|ten22\|badctr22\|badls22\) ' "$SLC")]"; t22bad=1; }
+# E3 a terminal left open for eight days: first_seen is old, last_seen is recent, so another session's rewrite keeps its row
+tn=$(date +%s); t22lfs=$((tn-8*86400)); t22lo=$((tn-8*86400+50000)); t22lid=$(sidof sLong22)
+printf "S %s %s - - - %s 56 %s 880000 %s\nS %s %s %s 20 %s - - - 5000 %s\nW7 %s 73 %s\n" "$t22lid" "$t22lfs" "$RT7" "$t22lo" $((tn-60)) \
+  "$(sidof sWriter22)" $((tn-5000)) "$RT" $((tn-4000)) $((tn-60)) "$RT7" $((tn-100)) > "$SLC"
+t22w=$(grep '^W7 ' "$SLC")
+run 200 "$(rsjc 20 "$RT" - - 5000 sWriter22)" >/dev/null          # another session rewrites the cache
+[ -n "$(srow sLong22)" ] || { echo "  ★ FAIL T22 (E3) a session still writing lost its row to another session's rewrite"; t22bad=1; }
+t22l=$(run 200 "$(rsjc - - 56 "$RT7" 880000 sLong22)" | nocol)
+case "$t22l" in *" 27%"*) ;; *) echo "  ★ FAIL T22 (E3) a session open for eight days re-took the authority with its frozen 56 (expected 27% left): [$t22l]"; t22bad=1 ;; esac
+[ "$(grep '^W7 ' "$SLC")" = "$t22w" ] || { echo "  ★ FAIL T22 (E3) W7 changed: [$(grep '^W7 ' "$SLC")]"; t22bad=1; }
+srow sLong22 | awk -v fs="$t22lfs" -v o="$t22lo" -v t="$tn" 'NF==11&&$3==fs&&$9==o&&$10=="880000"&&$11>=t{ok=1} END{exit !ok}' || { echo "  ★ FAIL T22 (format) E3 row: [$(srow sLong22)]"; t22bad=1; }
+# E3b the same session carried over as a nine-field row (no last_seen yet) is pruned, and its next report cannot take the authority
+tn=$(date +%s)
+printf "S %s %s - - - %s 56 %s\nW7 %s 73 %s\n" "$(sidof sLong22b)" $((tn-8*86400)) "$RT7" $((tn-8*86400+50000)) "$RT7" $((tn-100)) > "$SLC"
+t22w=$(grep '^W7 ' "$SLC")
+run 200 "$(rsjc 20 "$RT" - - 5000 sWriter22)" >/dev/null
+t22lb=$(run 200 "$(rsjc - - 56 "$RT7" 880000 sLong22b)" | nocol)
+case "$t22lb" in *" 27%"*) ;; *) echo "  ★ FAIL T22 (E3b) a re-registered session re-took the authority with its frozen 56 (expected 27% left): [$t22lb]"; t22bad=1 ;; esac
+[ "$(grep '^W7 ' "$SLC")" = "$t22w" ] || { echo "  ★ FAIL T22 (E3b) W7 changed: [$(grep '^W7 ' "$SLC")]"; t22bad=1; }
+# a row not written within the retention is pruned by another session's rewrite
+tn=$(date +%s)
+printf "S gone22 %s %s 20 %s - - - 42000 %s\n" $((tn-700000)) "$RT" $((tn-700000)) $((tn-604900)) > "$SLC"
+run 200 "$(rsjc 20 "$RT" - - 5000 sWriter22)" >/dev/null
+grep -q '^S gone22 ' "$SLC" && { echo "  ★ FAIL T22 a row last written more than RL_REG_TTL ago was not pruned"; t22bad=1; }
+[ -n "$(srow sWriter22)" ] || { echo "  ★ FAIL T22 positive control: the writer's own row is missing"; t22bad=1; }
+[ "$t22bad" -eq 0 ] && echo "  T22 eleven-field rows, previous-format upgrades, malformed rows dropped, retention from last activity (E3) OK" || fail=1
+rm -f "$SLC" "$SEEN".* 2>/dev/null; rm -rf "$T19LOCK" 2>/dev/null
 
 echo "── T2. RATE-SYNC CONCURRENCY: mkdir-lock serialises read+awk+mv (no lost-update), lock-contention safe-skip, empty-sid read-only, torn-cache survives"
 LOCK="$SLC.lock"
@@ -714,8 +1009,8 @@ PYAUDIT
 #       * FALSE RED — the delta spec is explicit that a refused id's row is never deleted or rewritten, so a LEGAL leftover row
 #         written before the gate shipped may sit in this file forever. Failing on it would keep the suite red for a machine
 #         state this change never claimed to repair. Attribution is therefore BY TIME: a synthetic row fails only when the newest
-#         numeric stamp on it (first_seen / o5 / o7, i.e. fields 3, 6 and 9 of "S <sid> <first_seen> <r5> <u5> <o5> <r7> <u7>
-#         <o7>") is at or after HARNESS_T0, the second this run started — only then could this run have written it. Anything
+#         numeric stamp on it (first_seen / o5 / o7 / last_seen, i.e. fields 3, 6, 9 and 11 of "S <sid> <first_seen> <r5> <u5> <o5>
+#         <r7> <u7> <o7> <api_ms> <last_seen>") is at or after HARNESS_T0, the second this run started — only then could this run have written it. Anything
 #         older is reported as pre-existing residue and does not fail. Conservative edge: a synthetic row written by a CONCURRENT
 #         third party mid-run is indistinguishable from one of ours and does fail — that is still a true pollution report.
 #     SL_AUDIT_CACHE overrides the file inspected, so this audit is itself auditable: point it at a fixture to exercise the
@@ -731,11 +1026,11 @@ else
   t4audited=yes
   # Emits one "NEW:<sid>" or "OLD:<sid>" token per synthetic row: NEW = stampable by this run (fails), OLD = pre-existing (reported only).
   t4synth=$( . "$SL/lib/collect.sh" 2>/dev/null
-             while read -r t4tag t4sid t4fs t4r5 t4u5 t4o5 t4r7 t4u7 t4o7; do
+             while read -r t4tag t4sid t4fs t4r5 t4u5 t4o5 t4r7 t4u7 t4o7 t4api t4ls; do
                [ "$t4tag" = "S" ] || continue
                sid_persistable "$t4sid" && continue
                t4newest=0
-               for t4ts in "$t4fs" "$t4o5" "$t4o7"; do
+               for t4ts in "$t4fs" "$t4o5" "$t4o7" "$t4ls"; do
                  case "$t4ts" in (''|*[!0-9]*) continue ;; esac      # "-" placeholders and junk carry no attribution. The
                  # leading "(" is load-bearing: bash 3.2 (macOS /bin/bash) cannot parse a bare case pattern inside $( ).
                  [ "$t4ts" -gt "$t4newest" ] && t4newest=$t4ts
