@@ -5,7 +5,7 @@
 # READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript,
 #         $HOME/.claude/sessions/<claude pid>.json (Claude Code's own per-session registry record — untrusted input),
 #         the claude process's argument list (`ps -o args=` of $PPID, effort-mode fallback only),
-#         $HOME/.claude/sl-subagents/<session_id> (subagent counts written by subagent-status-line.sh — untrusted input)
+#         $HOME/.claude/sl-subagents/<session_id> (subagent counts written by subagent-status-line.sh, untrusted input)
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
 #         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now act_epoch
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols

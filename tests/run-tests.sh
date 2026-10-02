@@ -3079,7 +3079,7 @@ subseed "0 0 0 3 0 0 0" 0 sl-sepdemo; subframe 140 "$(subjson sl-sepdemo)"; sub2
 subclear
 [ "$sub2bad" -eq 0 ] && echo "  SUB2 18 unusable states: output byte-identical to no state file, one line, empty stderr OK" || fail=1
 
-echo "── SUB3. SUMMARY LINE NARROWING: full form, total + FAIL/KILL/PAUS, total alone, nothing — by drawable width"
+echo "── SUB3. SUMMARY LINE NARROWING: full form, total + FAIL/KILL/PAUS, total alone, nothing, by drawable width"
 sub3bad=0
 for sub3c in "49:$SUBFULL" "48:sub 7 │ FAIL 1 │ PAUS 1" "23:sub 7 │ FAIL 1 │ PAUS 1" "22:sub 7" "5:sub 7" "4:"; do
   sub3d=${sub3c%%:*}; sub3w=${sub3c#*:}
@@ -3172,7 +3172,7 @@ sub6frame "$WORK/sub6.a"
 mkdir -p -m 700 "$SUB6H/.claude/sl-subagents"
 printf 'V1 %s 1 0 1 3 1 1 0\n' "$(date +%s)" > "$SUB6H/.claude/sl-subagents/$SUBSID"
 sub6frame "$WORK/sub6.b"
-[ -s "$WORK/sub6.a" ] || { echo "  ★ FAIL SUB6 the shims logged nothing — the trace is not running"; sub6bad=1; }
+[ -s "$WORK/sub6.a" ] || { echo "  ★ FAIL SUB6 the shims logged nothing, so the trace is not running"; sub6bad=1; }
 sub6r=$(sub6diff "$WORK/sub6.a" "$WORK/sub6.b")
 [ "$sub6r" = same ] || { echo "  ★ FAIL SUB6 a fresh state file changes the session line's external commands: $sub6r"; sub6bad=1; }
 SUB6SA=$(printf '%s' "$SAREAL1" | jq -c '.session_id="'"$SUBSID"'"')
