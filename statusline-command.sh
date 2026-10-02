@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reference: https://github.com/Raymondhou0917/claude-code-resources/blob/master/starter-kit/06-statusline.md
-# Claude Code statusline — reads JSON from stdin, prints a single colored status line, plus one subagent summary line above
+# Claude Code statusline — reads JSON from stdin, prints a single colored status line, plus one subagent summary line below
 # it while this session's subagent state is fresh (see SUB_LINE_POS and read_sub_state in lib/collect.sh).
 # Left: path + resource state (model / ctx / quota) + last-message time; right: git / session, right-aligned to the terminal edge.
 # A │ separator sits at the left/right junction (reads as " │ ", matching in-segment separators); when the line doesn't fit,
@@ -65,11 +65,12 @@ BURN_SENS="balanced" # rate-limit burn-projection alarm sensitivity (needs RL_SY
 # actual prompt-cache TTL/state, so the colour stays an idle-time INFERENCE, never a literal "cache cold" assertion; the duration is a fact, the colour is the read.
 LASTMSG_WARN=300   # Δ ≥ this (sec) → yellow: default 5-min prompt cache has gone idle-cold (5 min)
 LASTMSG_STALE=3600 # Δ ≥ this (sec) → red: even the 1-hour extended cache is gone; continuing pays a full cache write (1 h)
-SUB_LINE_POS=above # where the subagent summary line goes relative to the session line: above (printed first) or below; any
-                   # other value behaves as above. NOT a user knob: the settled layout is above (Claude Code draws every line
-                   # this command prints between the input box and its own hint line, so above = directly under the input box).
-                   # With below, the session line's SGR state would carry into the summary line, so its final reset would need
-                   # checking too. tests/run-tests.sh reads this constant, so only the case pinning the shipped value changes.
+SUB_LINE_POS=below # where the subagent summary line goes relative to the session line: below (printed after it) or above; any
+                   # other value behaves as above. NOT a user knob: the settled layout (2026-10-02, second layout) is below
+                   # (Claude Code draws every line this command prints between the input box and its own hint line, so below =
+                   # directly under the session line). Claude Code carries a line's SGR state into the next line, so the
+                   # summary line starts with a reset (build_sub_line) and the session line's bytes stay as they are.
+                   # tests/run-tests.sh reads this constant; the cases pinning the shipped order check line positions.
 
 # RL_REG_TTL floor: registry retention MUST never be shorter than the longest reset window (604800s / 7d). Retention runs from last
 # activity, and the floor keeps the row of a session whose frames pause (the machine slept) for at least the longest window; a pruned

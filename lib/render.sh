@@ -829,28 +829,31 @@ render_line() {
     fi
 }
 
-# Subagent summary line (subagent-summary-line): "sub <total>" then every non-zero class in the settled order FAIL KILL PAUS RUN
-# IDLE PEND DONE, each in its status marker's colour (the same roles subagent-status-line.sh gives the row markers), joined by
-# the session line's own separator. It ends in a reset, because Claude Code carries an unterminated line's SGR state into the
-# next line. It is a separate physical row with its own width budget, the session line's drawable width: it never takes a
-# column from the session line and is not one of the 14 sacrifice steps. Tiers, first that fits: the full form; the total
-# plus the non-zero FAIL / KILL / PAUS; the total alone; nothing. Width unavailable → the full form, unbounded, the same
-# fallback the session line takes. Only digits read_sub_state accepted reach this text.
+# Subagent summary line (subagent-summary-line): "<total> agents" ("1 agent" for one), then "<count> <word>" for every non-zero
+# class in the settled order failed killed paused running idle pending done, each entry (count included) in its status
+# marker's colour (the same roles subagent-status-line.sh gives the row markers), joined by " · " in the separator grey. The
+# entry point prints it on the line BELOW the session line, and Claude Code carries a line's SGR state into the next line,
+# so it starts with a reset (no colour of the session line can bleed into it, and the session line's own bytes stay
+# untouched) and ends with one. It is a separate physical row with its own width budget, the session line's drawable width:
+# it never takes a column from the session line and is not one of the 14 sacrifice steps. Tiers, first that fits: the full
+# form; the total plus the non-zero failed / killed / paused; the total alone; nothing. Width unavailable → the full form,
+# unbounded, the same fallback the session line takes. Only digits read_sub_state accepted reach this text.
 build_sub_line() {   # reads sub_* (read_sub_state) + term_cols EDGE_PAD RIGHT_ALIGN + palette → _subline ("" = print nothing)
     _subline=""
     [ -n "$sub_fail" ] || return 0
-    local s="${SP} │ ${RS}" n head ph crit="" pc="" rest="" pr="" avail
+    local s="${SP} · ${RS}" n head ph crit="" pc="" rest="" pr="" avail
     n=$(( sub_fail + sub_kill + sub_paus + sub_run + sub_idle + sub_pend + sub_done ))
-    head="${WH}sub ${n}${RS}"; ph="sub $n"
+    if [ "$n" -eq 1 ]; then ph="1 agent"; else ph="$n agents"; fi
+    head="${RS}${WH}${ph}${RS}"
     # Each form is kept twice: coloured for output, plain for measuring. vis_width counts the same cells either way, but on
     # the plain text it has no SGR codes to walk, which keeps this function under its share of the frame budget.
-    [ "$sub_fail" -eq 0 ] || { crit+="${s}${RD}FAIL ${sub_fail}${RS}"; pc+=" │ FAIL $sub_fail"; }
-    [ "$sub_kill" -eq 0 ] || { crit+="${s}${RD}KILL ${sub_kill}${RS}"; pc+=" │ KILL $sub_kill"; }
-    [ "$sub_paus" -eq 0 ] || { crit+="${s}${OG}PAUS ${sub_paus}${RS}"; pc+=" │ PAUS $sub_paus"; }
-    [ "$sub_run"  -eq 0 ] || { rest+="${s}${GR}RUN ${sub_run}${RS}";   pr+=" │ RUN $sub_run"; }
-    [ "$sub_idle" -eq 0 ] || { rest+="${s}${DM}IDLE ${sub_idle}${RS}"; pr+=" │ IDLE $sub_idle"; }
-    [ "$sub_pend" -eq 0 ] || { rest+="${s}${DM}PEND ${sub_pend}${RS}"; pr+=" │ PEND $sub_pend"; }
-    [ "$sub_done" -eq 0 ] || { rest+="${s}${GR}DONE ${sub_done}${RS}"; pr+=" │ DONE $sub_done"; }
+    [ "$sub_fail" -eq 0 ] || { crit+="${s}${RD}${sub_fail} failed${RS}";  pc+=" · $sub_fail failed"; }
+    [ "$sub_kill" -eq 0 ] || { crit+="${s}${RD}${sub_kill} killed${RS}";  pc+=" · $sub_kill killed"; }
+    [ "$sub_paus" -eq 0 ] || { crit+="${s}${OG}${sub_paus} paused${RS}";  pc+=" · $sub_paus paused"; }
+    [ "$sub_run"  -eq 0 ] || { rest+="${s}${GR}${sub_run} running${RS}";  pr+=" · $sub_run running"; }
+    [ "$sub_idle" -eq 0 ] || { rest+="${s}${DM}${sub_idle} idle${RS}";    pr+=" · $sub_idle idle"; }
+    [ "$sub_pend" -eq 0 ] || { rest+="${s}${DM}${sub_pend} pending${RS}"; pr+=" · $sub_pend pending"; }
+    [ "$sub_done" -eq 0 ] || { rest+="${s}${GR}${sub_done} done${RS}";    pr+=" · $sub_done done"; }
     if ! $RIGHT_ALIGN || ! [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then _subline="$head$crit$rest"; return 0; fi
     avail=$(( term_cols - EDGE_PAD ))
     vis_width "$ph$pc$pr"; if [ "$_w" -le "$avail" ]; then _subline="$head$crit$rest"; return 0; fi
