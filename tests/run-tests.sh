@@ -32,6 +32,20 @@ GREPO="$WORK/grepo"; git init -q "$GREPO" >/dev/null 2>&1 || mkdir -p "$GREPO"
 # Pull EDGE_PAD / JGAP from the script so the asserts track the real config instead of hardcoding 3 / 2.
 EDGE_PAD=$(sed -n 's/^EDGE_PAD=\([0-9][0-9]*\).*/\1/p' "$SL/statusline-command.sh"); EDGE_PAD=${EDGE_PAD:-3}
 JGAP=$(sed -n 's/^JGAP=\([0-9][0-9]*\).*/\1/p' "$SL/statusline-command.sh"); JGAP=${JGAP:-2}
+# Which of the (at most) two output lines is the subagent summary line. Read from the script like EDGE_PAD / JGAP, so the
+# helpers that tell the two lines apart follow the constant and only the SUB1 case that pins the shipped value would change
+# with it. Empty (a build without the constant) behaves as "above", the same as any value other than "below".
+SUBPOS=$(sed -n 's/^SUB_LINE_POS=\([A-Za-z]*\).*/\1/p' "$SL/statusline-command.sh")
+
+# SET (seeded here, checked after the last section): neither command may write, create, rename or remove a settings file
+# under ~/.claude. Two fixed files with a two-day-old mtime sit in the fake HOME for the whole run; every SA and SUB
+# invocation (and every other frame) runs against that HOME. No "theme" key, so the palette resolves exactly as before
+# (resolve_theme's fallback is "dark", which load_palette treats like the empty theme).
+printf '{"permissions":{"allow":[]},"statusLine":{"type":"command","refreshInterval":60}}\n' > "$FAKE_HOME/.claude/settings.json"
+printf '{"permissions":{"deny":[]}}\n' > "$FAKE_HOME/.claude/settings.local.json"
+touch -t "$(date -v-2d +%Y%m%d%H%M.%S)" "$FAKE_HOME/.claude/settings.json" "$FAKE_HOME/.claude/settings.local.json"
+setsnap() { local f; for f in settings.json settings.local.json; do printf '%s %s %s\n' "$f" "$(cksum < "$FAKE_HOME/.claude/$f" 2>&1)" "$(stat -f %m "$FAKE_HOME/.claude/$f" 2>&1)"; done; }
+SETSNAP0=$(setsnap)
 
 mkjson() {  # $1=cwd $2=project_dir $3=session_name → one-line statusline JSON on stdout
   jq -cn --arg cwd "$1" --arg proj "$2" --arg sn "$3" --arg tp "$TP" '
@@ -1038,7 +1052,8 @@ echo "── T4. SANDBOX DISCIPLINE: nothing here may render the statusline agai
 t4bad=0
 # (a) Self-audit: every invocation of the real command in THIS harness must carry a HOME override (or go through sandbox-run.sh).
 #     Backslash-continued lines are joined first, so an `env … HOME=… \` + `bash …statusline-command.sh` pair reads as one command.
-t4esc=$(python3 - "$SL/tests/run-tests.sh" <<'PYAUDIT'
+t4audit() {  # $1=harness file → its un-isolated command invocations, one per line (empty = clean)
+  python3 - "$1" <<'PYAUDIT'
 import sys, re
 joined = re.sub(r'\\\n\s*', ' ', open(sys.argv[1]).read())
 bad = [l.strip() for l in joined.split('\n')
@@ -1046,8 +1061,16 @@ bad = [l.strip() for l in joined.split('\n')
        and 'HOME=' not in l and 'sandbox-run.sh' not in l]
 print('\n'.join(bad))
 PYAUDIT
-)
+}
+t4esc=$(t4audit "$SL/tests/run-tests.sh")
 [ -z "$t4esc" ] || { printf '  ★ FAIL T4 harness renders the statusline with no HOME override:\n%s\n' "$t4esc"; t4bad=1; }
+# (d) The subagent command writes under $HOME too (~/.claude/sl-subagents), so the audit must flag an un-isolated run of it,
+#     by path and through $SASCRIPT. The synthetic lines are assembled with %s so this source line itself never matches.
+printf 'o=$(printf x | bash "$SL/subagent-status-%s.sh")\nprintf x | bash "$%s" >/dev/null\nprintf x | env HOME="$FAKE_HOME" bash "$%s"\n' \
+  line SASCRIPT SASCRIPT > "$WORK/t4d.sh"
+t4d=$(t4audit "$WORK/t4d.sh")
+[ "$(printf '%s' "$t4d" | grep -c 'subagent-status-line\.sh\|SASCRIPT" >')" = 2 ] && [ "$(printf '%s\n' "$t4d" | grep -c .)" = 2 ] \
+  || { printf '  ★ FAIL T4(d) the audit missed an un-isolated subagent command run (or flagged an isolated one):\n%s\n' "$t4d"; t4bad=1; }
 # (b) MACHINE-STATE AUDIT — the ONE check in this file that is not a hermetic code test. Everything else here renders against
 #     $FAKE_HOME and asserts a property of the CODE; this block opens the user's REAL shared cache and asserts a property of the
 #     MACHINE, so its verdict depends on state no test fixture controls. It is kept deliberately: it is the standing detector for
@@ -1112,10 +1135,20 @@ else
   [ "$t4sbrc" = 2 ] || { echo "  ★ FAIL T4 sandbox-run.sh did not refuse a /Users sandbox HOME (rc=$t4sbrc): [$t4sb]"; t4bad=1; }
   case "$t4sb" in *"refusing to run"*) ;; *) echo "  ★ FAIL T4 sandbox-run.sh guard message missing: [$t4sb]"; t4bad=1 ;; esac
 fi
-# (d) …and must still render a normal frame from its own throwaway HOME.
+# (c, continued) …and must still render a normal frame from its own throwaway HOME.
 t4line=$(printf '%s' "$(rsj 20 "$RT" sSandbox)" | bash "$SL/scripts/sandbox-run.sh" --columns 120); t4nl=$(printf '%s' "$t4line" | grep -c '')
 [ "$t4nl" -eq 1 ] || { echo "  ★ FAIL T4 sandbox-run.sh did not emit a single line ($t4nl): [$t4line]"; t4bad=1; }
 case "$(printf '%s' "$t4line" | nocol)" in *%*) ;; *) echo "  ★ FAIL T4 sandbox-run.sh rendered no percentage: [$t4line]"; t4bad=1 ;; esac
+# (e) --subagents SID=FILE seeds this session's subagent state in the throwaway HOME (fresh epoch when FILE holds only the
+#     seven counts), so a hand-rendered frame shows the summary line; the same frame without the option shows one line.
+printf '0 0 0 2 0 0 0\n' > "$WORK/t4e.sub"
+t4e=$(printf '%s' "$(rsj 20 "$RT" sSandbox)" | bash "$SL/scripts/sandbox-run.sh" --subagents "$(sidof sSandbox)=$WORK/t4e.sub" --columns 140 2>&1)
+t4e1=$(printf '%s\n' "$t4e" | sed -n 1p | nocol); t4e2=$(printf '%s\n' "$t4e" | sed -n 2p | nocol)
+[ "$SUBPOS" != below ] || { t4ex=$t4e1; t4e1=$t4e2; t4e2=$t4ex; }
+[ "$(printf '%s\n' "$t4e" | grep -c '')" = 2 ] && [ "$t4e1" = "sub 2 │ RUN 2" ] && case "$t4e2" in *%*) true ;; *) false ;; esac \
+  || { echo "  ★ FAIL T4(e) sandbox-run.sh --subagents did not render the summary line next to the session line: [$(printf '%s' "$t4e" | nocol)]"; t4bad=1; }
+t4e0=$(printf '%s' "$(rsj 20 "$RT" sSandbox)" | bash "$SL/scripts/sandbox-run.sh" --columns 140 2>&1)
+[ "$(printf '%s\n' "$t4e0" | grep -c '')" = 1 ] || { echo "  ★ FAIL T4(e) without --subagents the frame is not one line: [$(printf '%s' "$t4e0" | nocol)]"; t4bad=1; }
 # The summary must state whether (b) actually ran: "OK" with the machine-state audit skipped would be the very false green above.
 if [ "$t4bad" -ne 0 ]; then fail=1
 elif [ "$t4audited" = yes ]; then echo "  T4 harness is HOME-isolated, real-cache audit ran and found no row this run could have written, sandbox-run.sh fails closed and renders OK"
@@ -2932,6 +2965,247 @@ sa9t0=$(date +%s); sa9run "$_h" "$SA9REF" >/dev/null; sa9t1=$(date +%s)
 [ -f "$sa9d/11111111-1111-4111-8111-111111111111" ] || { echo "  ★ FAIL a steady-state write swept another session's two-day-old entry"; sa9bad=1; }
 [ "$sa9bad" -eq 0 ] && echo "  content + 600/700, unwritable dir, canonical order, 6 refused ids, 5 refused paths, counting, mtime sweep OK" || fail=1
 
+# ── SUBAGENT SUMMARY LINE (SUB1-SUB6) ───────────────────────────────────────────────────────────────────────
+# While this session's ~/.claude/sl-subagents/<session_id> holds fresh, well-formed counts with a non-zero total,
+# statusline-command.sh prints one summary line ("sub 7 │ FAIL 1 │ …") next to the session line; otherwise it prints
+# exactly today's single line. The state file is written by subagent-status-line.sh (SA9). Every frame below carries
+# HOME="$FAKE_HOME" (or its own fake HOME), and the frames carry no clock-dependent segment unless a case says so, so
+# two frames of the same input can be compared byte for byte.
+SUBSID=$SA9SID
+SUBDIR="$FAKE_HOME/.claude/sl-subagents"
+SUBFULL='sub 7 │ FAIL 1 │ PAUS 1 │ RUN 3 │ IDLE 1 │ PEND 1'
+subjson() {  # $1=session id → a session-line frame without rate limits, transcript or cost (no clock-dependent text)
+  jq -cn --arg cwd "$GREPO" --arg s "$1" '{workspace:{current_dir:$cwd, project_dir:$cwd},
+    model:{display_name:"Opus 4.8 (1M context)"}, context_window:{used_percentage:6.2},
+    session_id:$s, session_name:"summary line fixture"}'
+}
+SUBJ=$(subjson "$SUBSID")
+subseed() {  # $1=the seven counts "FAIL KILL PAUS RUN IDLE PEND DONE" $2=epoch offset from now in s (negative = past) [$3=session id]
+  mkdir -p "$SUBDIR" && chmod 700 "$SUBDIR"
+  printf 'V1 %s %s\n' "$(( $(date +%s) + $2 ))" "$1" > "$SUBDIR/${3:-$SUBSID}"
+}
+subraw() {  # $1=exact entry content, printf %b escapes honoured → this session's entry
+  mkdir -p "$SUBDIR" && chmod 700 "$SUBDIR"
+  printf '%b' "$1" > "$SUBDIR/$SUBSID"
+}
+subclear() { rm -rf "$SUBDIR"; }
+subsync() { local s; s=$(date +%s); while [ "$(date +%s)" = "$s" ]; do sleep 0.02; done; }   # start of a fresh second
+subframe() {  # $1=COLUMNS [$2=payload, default $SUBJ] → stdout in $WORK/sub.out, stderr in $WORK/sub.err
+  printf '%s' "${2:-$SUBJ}" | env COLUMNS="$1" HOME="$FAKE_HOME" bash "$SL/statusline-command.sh" >"$WORK/sub.out" 2>"$WORK/sub.err"
+}
+subpick() {  # $1=summary|session [$2=output file, default $WORK/sub.out] → that line, raw, no newline ("" when there is none)
+  # Which line is which comes from SUB_LINE_POS (SUBPOS, read from the script at the top of this file), never from position.
+  python3 -c '
+import sys
+want, path, pos = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(path, "rb").read().decode("utf-8", "replace").split("\n")
+if lines and lines[-1] == "": lines.pop()
+if len(lines) == 1: summ, sess = "", lines[0]
+elif len(lines) == 2: summ, sess = (lines[1], lines[0]) if pos == "below" else (lines[0], lines[1])
+else: summ = sess = "<%d lines>" % len(lines)
+sys.stdout.write(summ if want == "summary" else sess)' "$1" "${2:-$WORK/sub.out}" "$SUBPOS"
+}
+subnl() { grep -c '' "${1:-$WORK/sub.out}"; }   # number of output lines
+subsepok() {  # stdin=raw summary line → "OK" when every " │ " separator is drawn in the structural grey role
+  python3 -c '
+import sys, re
+s = sys.stdin.read(); sp = sys.argv[1]
+n = re.sub(r"\x1b\[[0-9;]*m", "", s).count(" │ "); m = len(re.findall(re.escape(sp) + " │ ", s))
+print("OK" if n > 0 and n == m else "%d separators, %d of them in SP" % (n, m))' "$SASP"
+}
+
+echo "── SUB1. SUMMARY LINE: content in the settled class order, only non-zero classes, colour roles, trailing reset, line order"
+sub1bad=0
+subclear; subframe 140; cp "$WORK/sub.out" "$WORK/sub1.base"
+subseed "1 0 1 3 1 1 0" 0; subframe 140
+sub1s=$(subpick summary)
+[ "$(subnl)" = 2 ] || { echo "  ★ FAIL SUB1 FAIL 1 PAUS 1 RUN 3 IDLE 1 PEND 1 gave $(subnl) line(s), want 2: [$(nocol < "$WORK/sub.out")]"; sub1bad=1; }
+[ "$(printf '%s' "$sub1s" | nocol)" = "$SUBFULL" ] || { echo "  ★ FAIL SUB1 full distribution: [$(printf '%s' "$sub1s" | nocol)], want [$SUBFULL]"; sub1bad=1; }
+[ "$(subpick session)" = "$(subpick session "$WORK/sub1.base")" ] || { echo "  ★ FAIL SUB1 the session line changed next to the summary line"; sub1bad=1; }
+case "$sub1s" in *$'\033[0m') ;; *) echo "  ★ FAIL SUB1 the summary line does not end with ESC [ 0 m: $(printf '%q' "${sub1s: -12}")"; sub1bad=1 ;; esac
+for sub1c in "sub 7:$SAWH" "FAIL 1:$SARD" "PAUS 1:$SAOG" "RUN 3:$SAGR" "IDLE 1:$SADM" "PEND 1:$SADM"; do
+  sub1r=$(printf '%s' "$sub1s" | sacolat "${sub1c%%:*}" "${sub1c#*:}")
+  [ "$sub1r" = OK ] || { echo "  ★ FAIL SUB1 colour of [${sub1c%%:*}]: $sub1r"; sub1bad=1; }
+done
+sub1r=$(printf '%s' "$sub1s" | subsepok); [ "$sub1r" = OK ] || { echo "  ★ FAIL SUB1 separator role: $sub1r"; sub1bad=1; }
+# the shipped order: SUB_LINE_POS=above, so the summary line is the FIRST of the two lines
+[ "$SUBPOS" = above ] && [ "$(sed -n 1p "$WORK/sub.out")" = "$sub1s" ] && [ -n "$sub1s" ] \
+  || { echo "  ★ FAIL SUB1 shipped SUB_LINE_POS is [$SUBPOS] / the summary line is not the first line, want above"; sub1bad=1; }
+subseed "0 0 0 3 0 0 0" 0; subframe 140
+[ "$(subpick summary | nocol)" = "sub 3 │ RUN 3" ] || { echo "  ★ FAIL SUB1 only non-zero classes: [$(subpick summary | nocol)], want [sub 3 │ RUN 3]"; sub1bad=1; }
+subseed "0 1 0 0 0 0 2" 0; subframe 140
+sub1s=$(subpick summary)
+[ "$(printf '%s' "$sub1s" | nocol)" = "sub 3 │ KILL 1 │ DONE 2" ] || { echo "  ★ FAIL SUB1 KILL and DONE: [$(printf '%s' "$sub1s" | nocol)], want [sub 3 │ KILL 1 │ DONE 2]"; sub1bad=1; }
+for sub1c in "KILL 1:$SARD" "DONE 2:$SAGR" "sub 3:$SAWH"; do
+  sub1r=$(printf '%s' "$sub1s" | sacolat "${sub1c%%:*}" "${sub1c#*:}")
+  [ "$sub1r" = OK ] || { echo "  ★ FAIL SUB1 colour of [${sub1c%%:*}]: $sub1r"; sub1bad=1; }
+done
+[ ! -s "$WORK/sub.err" ] || { echo "  ★ FAIL SUB1 stderr: [$(head -c 200 "$WORK/sub.err")]"; sub1bad=1; }
+[ "$sub1bad" -eq 0 ] && echo "  SUB1 full distribution, non-zero classes only, seven colour roles + SP separators, trailing reset, shipped order above OK" || fail=1
+
+echo "── SUB2. SUMMARY LINE ABSENT: no file, total zero, stale, future, malformed, leading zeros, hostile bytes, links, wrong shapes"
+# Every case must leave the output byte-identical to the same frame rendered with no state file: one line, empty stderr.
+sub2bad=0
+subclear; subframe 140; cp "$WORK/sub.out" "$WORK/sub2.base"
+[ "$(subnl "$WORK/sub2.base")" = 1 ] && [ ! -s "$WORK/sub.err" ] || { echo "  ★ FAIL SUB2 baseline frame is not one clean line"; sub2bad=1; }
+sub2chk() {  # $1=case label [$2=baseline output file] → assert on the frame just rendered
+  cmp -s "$WORK/sub.out" "${2:-$WORK/sub2.base}" \
+    || { echo "  ★ FAIL SUB2 $1: output differs from the frame without a state file: [$(head -c 300 "$WORK/sub.out" | nocol)]"; sub2bad=1; }
+  [ "$(subnl)" = 1 ] || { echo "  ★ FAIL SUB2 $1: $(subnl) output lines, want 1"; sub2bad=1; }
+  [ ! -s "$WORK/sub.err" ] || { echo "  ★ FAIL SUB2 $1: stderr [$(head -c 200 "$WORK/sub.err")]"; sub2bad=1; }
+}
+subclear; subframe 140; sub2chk "no file"
+subseed "0 0 0 0 0 0 0" 0; subframe 140; sub2chk "total zero"
+subseed "0 0 0 3 0 0 0" -21; subframe 140; sub2chk "written 21 s ago"
+subsync; subseed "0 0 0 3 0 0 0" 6; subframe 140; sub2chk "written 6 s in the future"
+subraw "V1 $(date +%s) 0 0 0 3\n"; subframe 140; sub2chk "wrong field count"
+subraw "V1 $(date +%s) 0 0 0 3 x 0 0\n"; subframe 140; sub2chk "non-digit field"
+subraw "V1 $(date +%s) 0 0 0 08 0 0 0\n"; subframe 140; sub2chk "leading zero 08"
+subraw "V1 $(date +%s) 0 0 0 010 0 0 0\n"; subframe 140; sub2chk "leading zero 010"
+subraw "V1 $(date +%s)  0 0 0 3 0 0 0\n"; subframe 140; sub2chk "double space"
+subraw "V1 $(date +%s) 0 0 0 \033[31m3 0 0 0\n"; subframe 140; sub2chk "escape sequence"
+subraw "V1 $(date +%s) 0 0 0 \302\2333 0 0 0\n"; subframe 140; sub2chk "C1 byte"
+subraw "V1 $(date +%s) 0 0 0 $(head -c 4096 /dev/zero | tr '\0' '1') 0 0 0\n"; subframe 140; sub2chk "4 KB line"
+subclear; mkdir -p "$WORK/sub2t"; printf 'V1 %s 0 0 0 3 0 0 0\n' "$(date +%s)" > "$WORK/sub2t/target"
+mkdir -m 700 "$SUBDIR"; ln -s "$WORK/sub2t/target" "$SUBDIR/$SUBSID"; subframe 140; sub2chk "linked entry"
+subclear; mkdir -p "$WORK/sub2d"; printf 'V1 %s 0 0 0 3 0 0 0\n' "$(date +%s)" > "$WORK/sub2d/$SUBSID"
+ln -s "$WORK/sub2d" "$SUBDIR"; subframe 140; sub2chk "linked directory"
+rm -f "$SUBDIR"; printf 'V1 %s 0 0 0 3 0 0 0\n' "$(date +%s)" > "$SUBDIR"; subframe 140; sub2chk "plain file at the directory path"
+rm -f "$SUBDIR"; mkdir -p -m 700 "$SUBDIR/$SUBSID"; subframe 140; sub2chk "directory at the entry path"
+subclear; subseed "0 0 0 3 0 0 0" 0 11111111-1111-4111-8111-111111111111; subframe 140; sub2chk "another session's file"
+subclear; subframe 140 "$(subjson sl-sepdemo)"; cp "$WORK/sub.out" "$WORK/sub2.base2"
+subseed "0 0 0 3 0 0 0" 0 sl-sepdemo; subframe 140 "$(subjson sl-sepdemo)"; sub2chk "non-UUID session id" "$WORK/sub2.base2"
+subclear
+[ "$sub2bad" -eq 0 ] && echo "  SUB2 18 unusable states: output byte-identical to no state file, one line, empty stderr OK" || fail=1
+
+echo "── SUB3. SUMMARY LINE NARROWING: full form, total + FAIL/KILL/PAUS, total alone, nothing — by drawable width"
+sub3bad=0
+for sub3c in "49:$SUBFULL" "48:sub 7 │ FAIL 1 │ PAUS 1" "23:sub 7 │ FAIL 1 │ PAUS 1" "22:sub 7" "5:sub 7" "4:"; do
+  sub3d=${sub3c%%:*}; sub3w=${sub3c#*:}
+  subseed "1 0 1 3 1 1 0" 0; subframe $(( sub3d + EDGE_PAD ))
+  sub3g=$(subpick summary | nocol)
+  [ "$sub3g" = "$sub3w" ] || { echo "  ★ FAIL SUB3 drawable width $sub3d: [$sub3g], want [$sub3w]"; sub3bad=1; }
+done
+subseed "1 0 1 3 1 1 0" 0; subframe 0
+[ "$(subpick summary | nocol)" = "$SUBFULL" ] || { echo "  ★ FAIL SUB3 unavailable width: [$(subpick summary | nocol)], want the full form unbounded"; sub3bad=1; }
+subclear
+[ "$sub3bad" -eq 0 ] && echo "  SUB3 widths 49/48/23/22/5/4 + unavailable → full / FAIL-KILL-PAUS / total / none / full OK" || fail=1
+
+echo "── SUB4. SUMMARY LINE vs THE 14-STEP ORDER: the session line is byte-identical with and without state at every width"
+# A fixture that walks the sacrifice order: git, effort, a long session name, the 7d window (1D6H30m out, so its countdown
+# reads 1D6H for half an hour either way and two frames a second apart cannot differ).
+sub4bad=0
+SUB4J=$(jq -cn --arg cwd "$GREPO" --arg s "$SUBSID" '{workspace:{current_dir:$cwd, project_dir:$cwd},
+  model:{display_name:"Opus 4.8 (1M context)"}, context_window:{used_percentage:3}, effort:{level:"high"},
+  rate_limits:{seven_day:{used_percentage:86, resets_at:(now+109800|floor)}}, session_id:$s,
+  session_name:"a long session name so the right half degrades across the whole sweep"}')
+for sub4c in 200 160 140 130 120 110 100 90 80 70 60 53 50 40 30 27 24 20 17 10 9 8 5 4 3 2; do
+  subclear; subframe "$sub4c" "$SUB4J"; cp "$WORK/sub.out" "$WORK/sub4.a"
+  subseed "1 0 1 3 1 1 0" 0; subframe "$sub4c" "$SUB4J"
+  [ "$(subnl "$WORK/sub4.a")" = 1 ] || { echo "  ★ FAIL SUB4 C=$sub4c no-state frame has $(subnl "$WORK/sub4.a") lines"; sub4bad=1; }
+  [ "$(subpick session)" = "$(cat "$WORK/sub4.a")" ] || { echo "  ★ FAIL SUB4 C=$sub4c session line differs with state present"; sub4bad=1; }
+  sub4s=$(subpick summary)
+  if [ $(( sub4c - EDGE_PAD )) -ge 5 ]; then
+    [ -n "$sub4s" ] || { echo "  ★ FAIL SUB4 C=$sub4c no summary line although 'sub 7' fits"; sub4bad=1; }
+    [ "$(printf '%s' "$sub4s" | vw)" -le $(( sub4c - EDGE_PAD )) ] || { echo "  ★ FAIL SUB4 C=$sub4c summary line wider than $(( sub4c - EDGE_PAD )): [$(printf '%s' "$sub4s" | nocol)]"; sub4bad=1; }
+  else
+    [ -z "$sub4s" ] || { echo "  ★ FAIL SUB4 C=$sub4c summary line printed although 'sub 7' cannot fit: [$(printf '%s' "$sub4s" | nocol)]"; sub4bad=1; }
+  fi
+done
+subclear
+[ "$sub4bad" -eq 0 ] && echo "  SUB4 200..2 cols: session line unchanged by the summary line, summary within the drawable width OK" || fail=1
+
+echo "── SUB5. END TO END: subagent-status-line.sh writes the counts, the next session-line frame shows them; stale after 20 s"
+sub5bad=0
+SUB5SID=$(printf '%s' "$SAREAL1" | jq -r .session_id)
+SUB5J=$(subjson "$SUB5SID")
+sub5shift() {  # $1=seconds → move the entry's written epoch that far into the past
+  local v ep rest; IFS=' ' read -r v ep rest < "$SUBDIR/$SUB5SID"
+  printf '%s %s %s\n' "$v" "$(( ep - $1 ))" "$rest" > "$SUBDIR/$SUB5SID"
+}
+subclear; sarun "$SAREAL1" >/dev/null
+subframe 140 "$SUB5J"
+[ "$(subpick summary | nocol)" = "sub 1 │ RUN 1" ] || { echo "  ★ FAIL SUB5 captured payload → summary [$(subpick summary | nocol)], want [sub 1 │ RUN 1]"; sub5bad=1; }
+sub5shift 19; subframe 140 "$SUB5J"
+[ "$(subpick summary | nocol)" = "sub 1 │ RUN 1" ] || { echo "  ★ FAIL SUB5 a write 19 s old is dropped: [$(subpick summary | nocol)]"; sub5bad=1; }
+sarun "$SAREAL1" >/dev/null; sub5shift 30; subframe 140 "$SUB5J"
+[ "$(subnl)" = 1 ] && [ -z "$(subpick summary)" ] || { echo "  ★ FAIL SUB5 a write 30 s old still shows: [$(nocol < "$WORK/sub.out")]"; sub5bad=1; }
+subclear
+[ "$sub5bad" -eq 0 ] && echo "  SUB5 captured payload → state file → summary line, kept at 19 s, gone at 30 s OK" || fail=1
+
+echo "── SUB6. SUMMARY LINE COST: no added process on the session line, exactly one (mv) on the subagent command"
+# (a) PATH shims log every external command a run starts. Each run has its own fake HOME so the detached jobs of other
+#     sections cannot leave records behind, and every run waits for its own detached jobs before the next one starts.
+sub6bad=0
+SUB6H="$WORK/sub6home"; mkdir -p "$SUB6H/.claude"
+SUB6SHIM="$WORK/sub6shim"; mkdir -p "$SUB6SHIM"
+for sub6c in awk basename cat chmod cksum cut date dirname find git grep head jq ln md5 mkdir mv od openssl perl pgrep ps \
+             python3 rm sed shasum sleep sort stat stty tail touch tr uniq wc; do
+  sub6p=$(command -v "$sub6c" 2>/dev/null); case "$sub6p" in /*) ;; *) continue ;; esac
+  printf '#!/bin/bash\nprintf "%%s\\n" %s >> "$SUB6LOG"\nexec %s "$@"\n' "$sub6c" "$sub6p" > "$SUB6SHIM/$sub6c"; chmod +x "$SUB6SHIM/$sub6c"
+done
+sub6settle() { local n=0; while [ "$n" -lt 30 ] && pgrep -f "$SL/(statusline-command|subagent-status-line)\.sh" >/dev/null 2>&1; do sleep 0.1; n=$((n+1)); done; }
+sub6frame() {  # $1=log file → one session-line frame of $SUBJ in $SUB6H, every external command logged
+  : > "$1"
+  printf '%s' "$SUBJ" | env PATH="$SUB6SHIM:$PATH" SUB6LOG="$1" COLUMNS=140 HOME="$SUB6H" bash "$SL/statusline-command.sh" >/dev/null 2>&1
+  sub6settle
+}
+sub6sa() {  # $1=log file $2=payload → one subagent-command run in $SUB6H, every external command logged
+  : > "$1"
+  printf '%s' "$2" | env PATH="$SUB6SHIM:$PATH" SUB6LOG="$1" HOME="$SUB6H" bash "$SASCRIPT" >/dev/null 2>&1
+  sub6settle
+}
+sub6diff() {  # $1=log $2=log → "<cmd> +n" / "<cmd> -n" for every command started a different number of times, "same" if none
+  python3 -c '
+import sys, collections
+a = collections.Counter(open(sys.argv[1]).read().split()); b = collections.Counter(open(sys.argv[2]).read().split())
+d = ["%s %+d" % (k, b[k] - a[k]) for k in sorted(set(a) | set(b)) if a[k] != b[k]]
+print(" ".join(d) if d else "same")' "$1" "$2"
+}
+sub6settle
+sub6frame "$WORK/sub6.warm"
+sub6frame "$WORK/sub6.a"
+mkdir -p -m 700 "$SUB6H/.claude/sl-subagents"
+printf 'V1 %s 1 0 1 3 1 1 0\n' "$(date +%s)" > "$SUB6H/.claude/sl-subagents/$SUBSID"
+sub6frame "$WORK/sub6.b"
+[ -s "$WORK/sub6.a" ] || { echo "  ★ FAIL SUB6 the shims logged nothing — the trace is not running"; sub6bad=1; }
+sub6r=$(sub6diff "$WORK/sub6.a" "$WORK/sub6.b")
+[ "$sub6r" = same ] || { echo "  ★ FAIL SUB6 a fresh state file changes the session line's external commands: $sub6r"; sub6bad=1; }
+SUB6SA=$(printf '%s' "$SAREAL1" | jq -c '.session_id="'"$SUBSID"'"')
+sub6sa "$WORK/sub6.sa0" "$SUB6SA"        # first write of the run: creates the entry
+[ -f "$SUB6H/.claude/sl-subagents/$SUBSID" ] || { echo "  ★ FAIL SUB6 the subagent command wrote no state entry"; sub6bad=1; }
+sub6sa "$WORK/sub6.sau" "$SUB6SA"        # steady state: the entry is present
+sub6sa "$WORK/sub6.san" "$(printf '%s' "$SAREAL1" | jq -c '.session_id="sl-sepdemo"')"   # no write at all
+sub6r=$(sub6diff "$WORK/sub6.san" "$WORK/sub6.sau")
+[ "$sub6r" = "mv +1" ] || { echo "  ★ FAIL SUB6 subagent command with its entry present vs no write: [$sub6r], want [mv +1]"; sub6bad=1; }
+# (b) Median timings, measured and printed, not asserted: a fraction of a millisecond of budget is far inside the jitter of
+#     a ~30 ms frame on a shared machine. The spec bounds (session line +0.3 ms, subagent command +5 ms against the build
+#     before this capability) are checked against the base build outside the suite; this line makes a regression visible.
+python3 - "$SL" "$SUB6H" "$SUBSID" "$SUBJ" "$SUB6SA" "$(printf '%s' "$SAREAL1" | jq -c '.session_id="sl-sepdemo"')" <<'PYTIME'
+import sys, os, subprocess, time, statistics
+sl, home, sid, frame, sa_uuid, sa_none = sys.argv[1:7]
+env = dict(os.environ, HOME=home, COLUMNS="140")
+entry = os.path.join(home, ".claude", "sl-subagents", sid)
+def med(script, payload, seed):
+    ts = []
+    for _ in range(11):
+        if seed is True:
+            with open(entry, "w") as f: f.write("V1 %d 1 0 1 3 1 1 0\n" % int(time.time()))
+        elif seed is False and os.path.exists(entry): os.remove(entry)
+        t = time.perf_counter()
+        subprocess.run(["bash", script], input=payload.encode(), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ts.append((time.perf_counter() - t) * 1000)
+    return statistics.median(ts)
+s0 = med(os.path.join(sl, "statusline-command.sh"), frame, False)
+s1 = med(os.path.join(sl, "statusline-command.sh"), frame, True)
+a0 = med(os.path.join(sl, "subagent-status-line.sh"), sa_none, None)
+a1 = med(os.path.join(sl, "subagent-status-line.sh"), sa_uuid, None)
+print("  NOTE SUB6(b) medians of 11 (measured, not asserted): session line %.1f ms without state, %.1f ms with (%+.1f); "
+      "subagent command %.1f ms without a write, %.1f ms with (%+.1f)" % (s0, s1, s1 - s0, a0, a1, a1 - a0))
+PYTIME
+sub6settle
+[ "$sub6bad" -eq 0 ] && echo "  SUB6 session line starts the same commands with a fresh state file; subagent command starts exactly one more (mv) OK" || fail=1
+
 # PEER (change statusline-session-peer-id) The six-hex reference Claude Code's own agent listing shows in brackets after a session.
 # It is derived from the per-session registry record ~/.claude/sessions/<claude pid>.json — a file written by ANOTHER program, so it
 # is treated as hostile input: one field, string type only, and the only thing that can reach the line is a digest matching
@@ -3436,5 +3710,13 @@ effscancase EFF-38 "" "$EFFD/d-quoted.jsonl"
 
 echo "── G. perf: 10 frames"
 time (for _ in 1 2 3 4 5 6 7 8 9 10; do run 140 "$J" >/dev/null; done)
+
+
+echo "── SET. SETTINGS UNTOUCHED: after every frame of this run, both seeded settings files keep content and mtime, none added"
+setbad=0
+[ "$(setsnap)" = "$SETSNAP0" ] || { printf '  ★ FAIL SET a settings file changed:\n  before: %s\n  after:  %s\n' "$SETSNAP0" "$(setsnap)"; setbad=1; }
+setls=$(cd "$FAKE_HOME/.claude" && ls -d settings*.json 2>&1 | tr '\n' ' ')
+[ "$setls" = "settings.json settings.local.json " ] || { echo "  ★ FAIL SET ~/.claude/settings*.json is now [$setls]"; setbad=1; }
+[ "$setbad" -eq 0 ] && echo "  SET settings.json + settings.local.json unchanged (content + mtime), no other settings*.json OK" || fail=1
 
 if [ "$fail" -eq 0 ]; then echo "ALL CHECKS PASSED"; else echo "SOME FAILED"; exit 1; fi
