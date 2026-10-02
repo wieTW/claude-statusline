@@ -2450,7 +2450,7 @@ sa2ben=$(printf '%s' "$sa2be" | sasegs)
 [ "$sa2ben" -eq 7 ] || { echo "  ★ FAIL inner whitespace was squeezed before comparing ($sa2ben segments): [$sa2be]"; sa2bbad=1; }
 # (f) the real captured shape this rule exists for
 sa2bf=$(sarun '{"columns":160,"tasks":[{"id":"tid","type":"local_agent","status":"running","description":"Codex: review relay guard design","label":"Codex: review relay guard design","model":"claude-sonnet-5","contextWindowSize":1000000}]}' | saraw tid | nocol)
-[ "$sa2bf" = "RUN  │     - │  - │    - │ Sonnet 5 │ Codex: review relay guard design" ] || { echo "  ★ FAIL real duplicated frame: [$sa2bf]"; sa2bbad=1; }
+[ "$sa2bf" = "RUN  │     - │   - │    - │ Sonnet 5 │ Codex: review relay guard design" ] || { echo "  ★ FAIL real duplicated frame: [$sa2bf]"; sa2bbad=1; }
 [ "$sa2bbad" -eq 0 ] && echo "  identical / trim-identical dropped; different, case-differing, spacing-differing all kept OK" || fail=1
 
 echo "── SA2T. SUBAGENT: Token usage cell — position, colour, placeholders, and dropped whole, never cut"
@@ -2467,11 +2467,11 @@ sa2tb=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 262414 running)" |
 sarole "$sa2tb" 3 "$SAWH" "token cell (must be WH, never YL)" || sa2tbad=1
 # (c) absent → a "-" placeholder in the cell's own column; nothing else moves
 sa2tc=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 '' running)" | saraw tid | nocol)
-[ "$sa2tc" = "RUN  │     - │  - │    - │ Sonnet 5 │ DESCR │ LABEL" ] || { echo "  ★ FAIL absent tokenCount: wanted [RUN  │     - │  - │    - │ Sonnet 5 │ DESCR │ LABEL], got [$sa2tc]"; sa2tbad=1; }
+[ "$sa2tc" = "RUN  │     - │   - │    - │ Sonnet 5 │ DESCR │ LABEL" ] || { echo "  ★ FAIL absent tokenCount: wanted [RUN  │     - │   - │    - │ Sonnet 5 │ DESCR │ LABEL], got [$sa2tc]"; sa2tbad=1; }
 # (d) non-numeric → the same placeholder, and the rest of the payload still renders
 sa2td=$(sarun '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL","tokenCount":"abc"},'"$SACTL"']}')
 sa2tdc=$(printf '%s' "$sa2td" | saraw tid | nocol)
-[ "$sa2tdc" = "RUN  │     - │  - │    - │ Sonnet 5 │ DESCR │ LABEL" ] || { echo "  ★ FAIL non-numeric tokenCount: wanted [RUN  │     - │  - │    - │ Sonnet 5 │ DESCR │ LABEL], got [$sa2tdc]"; sa2tbad=1; }
+[ "$sa2tdc" = "RUN  │     - │   - │    - │ Sonnet 5 │ DESCR │ LABEL" ] || { echo "  ★ FAIL non-numeric tokenCount: wanted [RUN  │     - │   - │    - │ Sonnet 5 │ DESCR │ LABEL], got [$sa2tdc]"; sa2tbad=1; }
 sactl_check "$sa2td" || sa2tbad=1
 # (e) zero is a real count and prints 0 (and 0%), never a placeholder and never omitted
 sa2te=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 0 running)" | saraw tid | nocol)
@@ -2538,7 +2538,7 @@ sa3oct=$(sarun '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"
 [ "$sa3oct" = "RUN  │     - │ 50% │ 100K │ Sonnet 5 │ d │ l" ] || { echo "  ★ FAIL leading-zero window read as octal: wanted [RUN  │     - │ 50% │ 100K │ Sonnet 5 │ d │ l], got [$sa3oct]"; sa3bad=1; }
 # window size absent → the percentage cannot be computed and prints "-"; no guessed default window
 sa3f=$(sarun "$(samk claude-sonnet-5 '' d l 120 50000 running)" | saraw tid | nocol)
-[ "$sa3f" = "RUN  │     - │  - │  50K │ Sonnet 5 │ d │ l" ] || { echo "  ★ FAIL absent window size: wanted [RUN  │     - │  - │  50K │ Sonnet 5 │ d │ l], got [$sa3f]"; sa3bad=1; }
+[ "$sa3f" = "RUN  │     - │   - │  50K │ Sonnet 5 │ d │ l" ] || { echo "  ★ FAIL absent window size: wanted [RUN  │     - │   - │  50K │ Sonnet 5 │ d │ l], got [$sa3f]"; sa3bad=1; }
 # Every colour role of the text cells on one row, each was unguarded until a mutation run showed that swapping
 # the role changed the output with the suite green.
 sa3g=$(sarun "$(samk claude-sonnet-5 1000000 DTEXT LTEXT 120 50000 running)" | saraw tid)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034,SC2154  # cross-module globals, same contract lib/collect.sh and lib/render.sh use:
-#   _w / _line / _trunc / _tok / _mname / _win / _content are set by one function and read by another, and
+#   _w / _line / _trunc / _tok / _dur / _mname / _content / _rw are set by one function and read by another, and
 #   STYLE / SEP / _theme are read by render.sh. Lint via: shellcheck -x subagent-status-line.sh
 # subagent-status-line.sh — Claude Code's SUBAGENT status line: the rows that list the subagents currently
 # running. Sibling of statusline-command.sh, which owns the single session line; the two never touch.
@@ -12,23 +12,43 @@
 # task row this script takes over, NOT an array. A task id we do not print keeps Claude Code's own default
 # row. That guaranteed fallback is this script's ONLY error path: whenever something about a row is
 # unusable we stay silent about that row rather than draw something that might be wrong. `content` carries
-# ANSI colour codes and is rendered verbatim.
+# ANSI colour codes and is rendered verbatim. A record is never emitted with empty content to hide a row:
+# which rows show, their order and the "↓ N more" fold belong to Claude Code.
 #
-# Row layout — three segments joined by the same " │ " separator the single line uses:
+# Row layout — seven cells joined by the same " │ " separator the single line uses, one after the marker too:
 #
-#     <description> │ <Model>(<Window>) │ <tokens> │ <label>
-#     實作 subagent 狀態列 │ Opus 5(1M) │ 262k │ Updating sa3b expectation in run-tests.sh
+#     <marker> │ <elapsed> │ <ctx%> │ <tokens> │ <model> │ <description> │ <label>
+#     RUN  │   12m │ 13% │ 128K │ Opus 5 │ Fold 682173 into 681727 │ Confirming mirror refs unchanged after cleanup
 #
-# The label is dropped when it only repeats the description (Claude Code fills it that way while an agent
-# is starting), and the token segment is dropped when there is no usable non-zero count. Under a narrow
-# terminal the label is truncated first and the description second; the model and token segments are never
-# truncated, because they are the two things this row was added to show.
+# marker: the class name padded to 4 columns (RUN/DONE green, IDLE/PEND grey, PAUS orange, FAIL/KILL red).
+# elapsed: now - startTime, right-aligned to 5, "45s" under a minute and fmt_dur's "12m"/"1H15m"/"1D3H" from
+# there; it keeps counting on finished rows because the payload has no end time. ctx%: round half up of
+# 100 * tokenCount / contextWindowSize, right-aligned to 3, red above 92 on a window of 1,000,000 or more and
+# above 80 below that. tokens: fmt_tok with an uppercase K, right-aligned to 4, "0" for zero. model: the
+# display name derived by rule (no window marker), padded to the widest name among this invocation's rows.
+# A value the payload does not supply in usable form prints "-"; a PEND row prints 0% and 0 instead and
+# draws elapsed, ctx% and tokens grey, never red. The label is dropped when it only repeats the description
+# (Claude Code fills it that way while an agent is starting), and promoted when the description is empty.
+# A row wider than `columns` gives up, in this order, only as much as it must: label truncated, label
+# dropped, tokens, model, elapsed, description truncated; marker and ctx% are never dropped.
 #
-# What the payload can and cannot say (measured against 152 captured frames / 164 task rows, 2026-09-03):
-# each task carries id / type / status / description / label / startTime / model / contextWindowSize /
-# tokenCount / cwd. `type` is always the literal "local_agent" and the top-level `agent_type` is the MAIN
-# session's profile — the subagent's own agent type is simply NOT in the payload, so this script does not
-# try to show it and does not infer it from anywhere else.
+# Classification (one pass, the same answer for the marker and for anything counted later):
+#   running + the last SA_IDLE_SAMPLES (16) tokenSamples all numbers and none of their 15 adjacent pairs
+#   increasing → IDLE; running otherwise (fewer samples, a non-number, any increase) → RUN; pending → PEND;
+#   paused → PAUS; failed → FAIL; killed → KILL; completed → DONE; anything else, absent included →
+#   unclassified: no record, so Claude Code keeps its default row. The status string is never rendered.
+#
+# Claude Code facts this rests on, read from the 2.1.287 binary (check these first after an upgrade):
+#   F1 this command runs on a tick chain while at least one task exists: ~0.3 s after the panel mounts, then
+#      every 5 s, single-flight, 5000 ms timeout; never with zero tasks.
+#   F2 the payload holds every non-dismissed task, completed ones for 30 s more; each carries id, type,
+#      status, description, label, startTime (epoch ms), model, contextWindowSize, tokenCount, tokenSamples,
+#      cwd, and no end time; the top level carries session_id, transcript_path, cwd, columns.
+#   F3 tokenSamples gets one entry per tick and is spliced to the last 16, so 16 flat samples span ~75-80 s.
+#   F4 for local_agent tasks only running and completed are written by constructors, failed and killed by
+#      later transitions; no write site of pending or paused was found, so PEND and PAUS may never appear.
+#   F5 rows with content "" are filtered before Claude Code picks its 5-row window; the rest fold into
+#      "↓ N more", in Claude Code's own order (parent tree, then startTime). This command cannot reorder.
 #
 # Hard rules inherited from statusline-command.sh (see CLAUDE.md): never `set -e`; every background job
 # gets </dev/null (a job inherits the stdin JSON pipe and only the parsing jq may read it); LC_ALL=C pinned
@@ -99,23 +119,6 @@ sa_model_name() {   # $1=raw model identifier → _mname
     _mname="${up:${#idx}:1}${fam:1} $nums"
 }
 
-# Context-window marker. Present only when the size is usable: no placeholder, no assumed default, because
-# a guessed window is exactly the kind of confident wrong answer this line must never give. A full window
-# is normal and wears the model's own colour; anything smaller is the condition the reader needs to spot,
-# so it wears the warning role.
-sa_window() {   # $1=raw contextWindowSize → _win (coloured, empty when unusable)
-    local n=$1
-    _win=""
-    case "$n" in ''|*[!0-9]*) return ;; esac
-    [ "${#n}" -le 15 ] || return                  # keep the arithmetic well inside 64-bit signed
-    n=$(( 10#$n ))                                # base 10 always: bash reads a leading zero as octal
-    if [ "$n" -ge 1000000 ]; then _win="${MD}(1M)${RS}"; return; fi
-    fmt_tok "$n"                                  # borrowed from render.sh: <1000 raw, else "Nk"
-    [ -n "$_tok" ] || return
-    case "$_tok" in *k) _tok="${_tok%k}K" ;; esac
-    _win="${YL}(${_tok})${RS}"
-}
-
 # Strip leading and trailing spaces/tabs, no fork. Used ONLY to compare the description against the
 # activity label, never to alter what is printed. bash 3.2 has no ${var//pattern} anchoring that would do
 # this in one step, and the fields are capped at 256 codepoints so the loop is bounded and cheap.
@@ -125,25 +128,60 @@ sa_trim() {   # $1=string → _trim
     while :; do case "$_trim" in *' '|*"$SA_TAB") _trim=${_trim%?} ;; *) break ;; esac; done
 }
 
-# Token usage for this subagent. Plain-text colour (WH), deliberately NOT the warning yellow: on this row
-# YL already means "the context window was cut down", and the single status line uses YL for its own
-# subagent-token total, so a second yellow here would make the actual warning unreadable.
-# Omitted when the count is absent, non-numeric, or zero — the same rule the single line applies to its
-# subagent-token segment. A subagent that has burned nothing has nothing to report, and a "0" on every
-# freshly started row is noise; a missing count is never rendered as 0 or as a placeholder either.
-sa_tokens() {   # $1=raw tokenCount → _tok_seg (coloured, empty when absent / non-numeric / zero)
-    local n=$1
-    _tok_seg=""
-    case "$n" in ''|*[!0-9]*) return ;; esac
-    [ "${#n}" -le 15 ] || return                  # keep the arithmetic well inside 64-bit signed
-    n=$(( 10#$n ))                                # base 10 always: bash reads a leading zero as octal
-    [ "$n" -gt 0 ] || return
-    fmt_tok "$n"                                  # borrowed from render.sh: 262414 → "262k", 1234567 → "1.2M"
-    [ -n "$_tok" ] || return
-    _tok_seg="${WH}${_tok}${RS}"
+# A count or epoch from the payload, usable only as decimal digits within 15 of them (well inside 64-bit signed
+# arithmetic). jq's tostring erases the JSON type, so a string-typed "0262414" reaches the shell verbatim and bash
+# would read the leading zero as OCTAL: every caller therefore expands the value with the 10# prefix.
+sa_num_ok() {   # $1=raw value → rc 0 when usable
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 15 ]
 }
 
-sa_join() {   # $@=segments in order; an empty one is skipped along with the separator that would precede it
+sa_lpad() {   # $1=ASCII text $2=width → _pad, right-aligned with leading spaces (never cut)
+    _pad=$1
+    while [ "${#_pad}" -lt "$2" ]; do _pad=" $_pad"; done
+}
+
+# The three numeric cells of one row. A value the payload does not supply in usable form prints "-"; a PEND row
+# prints the settled 0% and 0 instead and draws all three in the secondary grey, never red.
+sa_cells() {   # $1=class $2=raw startTime $3=raw contextWindowSize $4=raw tokenCount → _el _cx _tk (coloured, padded)
+    local cls=$1 s n w pct role
+    if [ -n "$sa_now_ms" ] && sa_num_ok "$2"; then
+        s=$(( (10#$sa_now_ms - 10#$2) / 1000 ))
+        [ "$s" -ge 0 ] || s=0                     # a start in the future (clock skew) is "just started"
+        fmt_elapsed "$s"; sa_lpad "$_dur" 5
+    else
+        sa_lpad "-" 5
+    fi
+    _el="${DM}${_pad}${RS}"
+    role=$WH; [ "$cls" != PEND ] || role=$DM
+    if sa_num_ok "$4" && sa_num_ok "$3" && [ $(( 10#$3 )) -gt 0 ]; then
+        n=$(( 10#$4 )); w=$(( 10#$3 ))
+        pct=$(( (200 * n + w) / (2 * w) ))        # round half up of 100*n/w in integer math
+        if [ "$cls" != PEND ]; then
+            # Same -gt comparison as the session line's context meter: 92 on a 1M window, 80 below it.
+            if [ "$w" -ge 1000000 ]; then [ "$pct" -le 92 ] || role=$RD; else [ "$pct" -le 80 ] || role=$RD; fi
+        fi
+        sa_lpad "${pct}%" 3
+    elif [ "$cls" = PEND ]; then
+        sa_lpad "0%" 3
+    else
+        sa_lpad "-" 3
+    fi
+    _cx="${role}${_pad}${RS}"
+    role=$WH; [ "$cls" != PEND ] || role=$DM
+    if sa_num_ok "$4"; then
+        fmt_tok "$(( 10#$4 ))"                    # borrowed from render.sh: 262414 → "262k", 1234567 → "1.2M"
+        case "$_tok" in *k) _tok="${_tok%k}K" ;; esac
+        sa_lpad "$_tok" 4
+    elif [ "$cls" = PEND ]; then
+        sa_lpad "0" 4
+    else
+        sa_lpad "-" 4
+    fi
+    _tk="${role}${_pad}${RS}"
+}
+
+sa_join() {   # $@=cells in order; an empty one is skipped along with the separator that would precede it
     local p
     sa_parts=()
     for p in "$@"; do [ -n "$p" ] && sa_parts[${#sa_parts[@]}]=$p; done
@@ -151,40 +189,46 @@ sa_join() {   # $@=segments in order; an empty one is skipped along with the sep
     _content=$_line
 }
 
-# Assemble one row and bound it to the reported column count. Sacrifice order: the activity label shrinks
-# first, the description only if that was not enough. The model name and its window marker are never
-# truncated at any width — identifying the model is the entire reason this row is being taken over.
-sa_render() {   # $1=description $2=model segment $3=token segment $4=label $5=column cap → _content
-    local desc="${WH}$1${RS}" mseg=$2 tseg=$3 lseg="" cap=$5
-    local wd wm wt wl nsep room
-    [ -z "$4" ] || lseg="${DM}$4${RS}"
-    vis_width "$desc"; wd=$_w
-    vis_width "$mseg"; wm=$_w
-    wt=0; if [ -n "$tseg" ]; then vis_width "$tseg"; wt=$_w; fi
-    wl=0; if [ -n "$lseg" ]; then vis_width "$lseg"; wl=$_w; fi
+sa_rowwidth() {   # $@=cells in order, empty ones absent → _rw = visible width of the joined row
+    local p n=0 t=0
+    for p in "$@"; do [ -n "$p" ] || continue; vis_width "$p"; t=$(( t + _w )); n=$(( n + 1 )); done
+    _rw=$t; [ "$n" -le 1 ] || _rw=$(( t + (n - 1) * SA_SEPW ))
+}
+
+# Assemble one row and bound it to the reported column count. Each step below runs only when the row still does
+# not fit, and keeps what the earlier steps did: truncate the label, drop the label (when it cannot keep one
+# character plus the ellipsis), drop tokens, drop model, drop elapsed, truncate the description. Marker and ctx%
+# are never dropped; when not even one description character plus the ellipsis fits beside them, the row is the
+# two of them alone, emitted even past the column count (Claude Code truncates it). Widths include the padding.
+sa_render() {   # $1=marker $2=elapsed $3=ctx% $4=tokens $5=model $6=description $7=label (coloured, "" = absent) $8=cap → _content
+    local mk=$1 el=$2 cx=$3 tk=$4 mo=$5 de=$6 lb=$7 cap=$8 room
     case "$cap" in
         ''|*[!0-9]*) cap=0 ;;
         *) if [ "${#cap}" -le 9 ]; then cap=$(( 10#$cap )); else cap=0; fi ;;
     esac
-    nsep=1                                        # separators = one fewer than the segments actually present
-    [ -z "$tseg" ] || nsep=$(( nsep + 1 ))
-    [ -z "$lseg" ] || nsep=$(( nsep + 1 ))
     # No usable column count → nothing to bound against, so render the row whole (the single line takes the
     # same unbounded path when the terminal width cannot be measured).
-    if [ "$cap" -le 0 ]; then sa_join "$desc" "$mseg" "$tseg" "$lseg"; return; fi
-    if [ $(( wd + wm + wt + wl + nsep * SA_SEPW )) -le "$cap" ]; then sa_join "$desc" "$mseg" "$tseg" "$lseg"; return; fi
-
-    if [ -n "$lseg" ]; then
-        room=$(( cap - wd - wm - wt - nsep * SA_SEPW ))
+    if [ "$cap" -le 0 ]; then sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$lb"; return; fi
+    sa_rowwidth "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$lb"
+    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$lb"; return; fi
+    if [ -n "$lb" ]; then
+        sa_rowwidth "$mk" "$el" "$cx" "$tk" "$mo" "$de"
+        room=$(( cap - _rw - SA_SEPW ))
         if [ "$room" -ge 2 ]; then                # 2 cells is trunc_head's floor: one glyph plus the ellipsis
-            trunc_head "$lseg" "$room"; sa_join "$desc" "$mseg" "$tseg" "$_trunc"; return
+            trunc_head "$lb" "$room"; sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$_trunc"; return
         fi
-        lseg=""; nsep=$(( nsep - 1 ))             # not even room for an ellipsis → drop segment and separator
-        if [ $(( wd + wm + wt + nsep * SA_SEPW )) -le "$cap" ]; then sa_join "$desc" "$mseg" "$tseg" ""; return; fi
+        if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de"; return; fi
     fi
-    room=$(( cap - wm - wt - nsep * SA_SEPW ))
-    if [ "$room" -ge 2 ]; then trunc_head "$desc" "$room"; sa_join "$_trunc" "$mseg" "$tseg" ""; return; fi
-    sa_join "" "$mseg" "$tseg" ""                 # pathologically narrow: model and usage are the last to go
+    sa_rowwidth "$mk" "$el" "$cx" "$mo" "$de"
+    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$mo" "$de"; return; fi
+    sa_rowwidth "$mk" "$el" "$cx" "$de"
+    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$de"; return; fi
+    sa_rowwidth "$mk" "$cx" "$de"
+    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$cx" "$de"; return; fi
+    sa_rowwidth "$mk" "$cx"
+    room=$(( cap - _rw - SA_SEPW ))
+    if [ "$room" -ge 2 ]; then trunc_head "$de" "$room"; sa_join "$mk" "$cx" "$_trunc"; return; fi
+    sa_join "$mk" "$cx"                           # pathologically narrow: marker and ctx% are the last to go
 }
 
 
@@ -194,29 +238,51 @@ sa_render() {   # $1=description $2=model segment $3=token segment $4=label $5=c
 # from under the one jq that is allowed to have it.
 exec 3< <(sa_resolve_theme </dev/null)
 
+# IDLE needs this many trailing tokenSamples, i.e. SA_IDLE_SAMPLES - 1 adjacent pairs without an increase. Claude
+# Code pushes one sample per 5 s tick and keeps the last 16 (F3), so 16 is the whole window it keeps: about 75-80 s
+# without a new token. Fewer samples mean not enough evidence, and a young agent stays RUN.
+SA_IDLE_SAMPLES=16
+
 # One jq in. Every field is extracted behind `select(type == "object")` plus has()/null tests rather than a
 # `//` chain, because jq ABORTS the whole program (rc 5) on a type-mismatched index — that would drop every
 # task's row, not just the offending one. Newlines become spaces, control characters are removed by
 # explode/implode codepoint math, and each field is capped at 256 codepoints. Output is positional: one
-# line for the column count, then six lines per task. Lines, not a delimiter: tab is IFS whitespace, so
-# `read` would silently merge consecutive empty fields, and empty fields are the normal case here.
-# shellcheck disable=SC2016  # $k / $ARGS below are jq variables, not shell ones — single quotes are required
+# line for the column count, one for jq's clock in epoch ms, then eight lines per task, the last one the
+# task's class (empty when unclassified). Lines, not a delimiter: tab is IFS whitespace, so `read` would
+# silently merge consecutive empty fields, and empty fields are the normal case here. The class is decided
+# here, once, so the marker and anything counted from it can never disagree.
+# shellcheck disable=SC2016  # $k / $n / $s / $t / $w are jq variables, not shell ones — single quotes are required
 SA_JQ='
 def clean: tostring
   | gsub("\n"; " ") | gsub("\r"; " ")
   | explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode
   | .[0:256];
 def fld($k): if has($k) and (.[$k] != null) then (.[$k] | clean) else "" end;
+def idle: (if has("tokenSamples") then .tokenSamples else null end) as $t
+  | ($t | type) == "array" and ($t | length) >= $n
+    and ($t[-$n:] as $w | ($w | all(type == "number")) and ([range(1; $n)] | all($w[.] <= $w[. - 1])));
+def class: (if has("status") then .status else null end) as $s
+  | if   $s == "running"   then (if idle then "IDLE" else "RUN" end)
+    elif $s == "pending"   then "PEND"
+    elif $s == "paused"    then "PAUS"
+    elif $s == "failed"    then "FAIL"
+    elif $s == "killed"    then "KILL"
+    elif $s == "completed" then "DONE"
+    else "" end;
 (if type == "object" then (if (.columns | type) == "number" then (.columns | floor | tostring) else "" end) else "" end),
+(now * 1000 | floor | tostring),
 ( (if type == "object" then .tasks else null end)
   | (if type == "array" then . else [] end)
   | .[]
   | select(type == "object")
-  | fld("id"), fld("model"), fld("contextWindowSize"), fld("description"), fld("label"), fld("tokenCount") )
+  | fld("id"), fld("model"), fld("contextWindowSize"), fld("description"), fld("label"), fld("tokenCount"),
+    fld("startTime"), class )
 '
-exec 4< <(jq -r "$SA_JQ" 2>/dev/null)
-sa_cols=""
+exec 4< <(jq -r --argjson n "$SA_IDLE_SAMPLES" "$SA_JQ" 2>/dev/null)
+sa_cols=""; sa_now_ms=""
 IFS= read -r sa_cols <&4
+IFS= read -r sa_now_ms <&4
+sa_num_ok "$sa_now_ms" || sa_now_ms=""
 
 # STYLE is the single line's palette knob. Derived from there rather than defined a second time, so the two
 # lines cannot drift apart — the same trick tests/run-tests.sh uses for EDGE_PAD / JGAP. Unreadable → empty
@@ -230,40 +296,69 @@ SA_TAB=$'\t'                   # named so sa_trim's case patterns stay readable
 SEP="${SP} │ ${RS}"            # same separator the single line uses, so the two read as one system
 vis_width "$SEP"; SA_SEPW=$_w  # derived, not hardcoded, so a separator change cannot desync the width math
 
-sa_out=()
+# First pass: classify, build every cell but the model's padding, and find the widest model name among the rows
+# that will be emitted. Second pass: pad the model cell to that width and narrow each row on its own.
+sa_ids=(); sa_mk=(); sa_el=(); sa_cx=(); sa_tk=(); sa_mn=(); sa_mw=(); sa_de=(); sa_lb=()
+sa_mwmax=0
 while IFS= read -r sa_id <&4; do
     IFS= read -r sa_model <&4 || break
     IFS= read -r sa_win   <&4 || break
     IFS= read -r sa_desc  <&4 || break
     IFS= read -r sa_label <&4 || break
     IFS= read -r sa_tokc  <&4 || break
+    IFS= read -r sa_start <&4 || break
+    IFS= read -r sa_class <&4 || break
+    # Unclassified status (absent, or not one of the seven values) → keep Claude Code's default row.
+    [ -n "$sa_class" ] || continue
     # No id → the row cannot be addressed. No model → the reason this row exists is missing, and a row
     # without it is worse than Claude Code's default row. Either way: emit nothing, keep the default.
     [ -n "$sa_id" ] && [ -n "$sa_model" ] || continue
-    # Description missing → promote the activity label into the first segment, and do NOT also repeat it as
-    # the third, or the same sentence appears twice on one row.
+    # Description missing → promote the activity label into the description cell, and do NOT also repeat it
+    # as the label, or the same sentence appears twice on one row.
     if [ -z "$sa_desc" ]; then sa_desc=$sa_label; sa_label=""; fi
     [ -n "$sa_desc" ] || continue     # nothing names this task → unattributable row → keep the default
     # While a subagent is starting and has no concrete action yet, Claude Code fills `label` with the
     # description, so the same sentence would be printed twice (45 of 316 rows in the captured sample —
-    # 14%). Equal after trimming → drop the THIRD segment, keeping the description that names the task.
+    # 14%). Equal after trimming → drop the label cell, keeping the description that names the task.
     # Trimming is the ONLY normalisation: no case folding, no width folding, no squeezing of inner
     # whitespace. Those would merge strings that genuinely differ, and if the label really is a different
-    # activity, showing it matters more than saving a segment. The printed description keeps its own
+    # activity, showing it matters more than saving a cell. The printed description keeps its own
     # spacing verbatim — the trim decides the comparison, never the output.
     if [ -n "$sa_label" ]; then
         sa_trim "$sa_desc"; sa_dtrim=$_trim
         sa_trim "$sa_label"
         [ "$sa_dtrim" != "$_trim" ] || sa_label=""
     fi
+    case "$sa_class" in
+        RUN|DONE)  sa_mcol=$GR ;;
+        IDLE|PEND) sa_mcol=$DM ;;
+        PAUS)      sa_mcol=$OG ;;
+        *)         sa_mcol=$RD ;;             # FAIL, KILL
+    esac
+    sa_mpad=$sa_class; while [ "${#sa_mpad}" -lt 4 ]; do sa_mpad="$sa_mpad "; done
+    sa_cells "$sa_class" "$sa_start" "$sa_win" "$sa_tokc"
     sa_model_name "$sa_model"
-    sa_window "$sa_win"
-    sa_tokens "$sa_tokc"
-    sa_render "$sa_desc" "${MD}${_mname}${RS}${_win}" "$_tok_seg" "$sa_label" "$sa_cols"
-    sa_out[${#sa_out[@]}]=$sa_id
-    sa_out[${#sa_out[@]}]=$_content
+    vis_width "$_mname"; [ "$_w" -le "$sa_mwmax" ] || sa_mwmax=$_w
+    sa_i=${#sa_ids[@]}
+    sa_ids[sa_i]=$sa_id; sa_mk[sa_i]="${sa_mcol}${sa_mpad}${RS}"
+    sa_el[sa_i]=$_el; sa_cx[sa_i]=$_cx; sa_tk[sa_i]=$_tk
+    sa_mn[sa_i]=$_mname; sa_mw[sa_i]=$_w
+    sa_de[sa_i]="${WH}${sa_desc}${RS}"
+    sa_lb[sa_i]=""; [ -z "$sa_label" ] || sa_lb[sa_i]="${DM}${sa_label}${RS}"
 done
 exec 4<&-
+
+sa_out=()
+sa_i=0
+while [ "$sa_i" -lt "${#sa_ids[@]}" ]; do
+    sa_mcell=${sa_mn[sa_i]}; sa_k=${sa_mw[sa_i]}
+    while [ "$sa_k" -lt "$sa_mwmax" ]; do sa_mcell="$sa_mcell "; sa_k=$(( sa_k + 1 )); done
+    sa_render "${sa_mk[sa_i]}" "${sa_el[sa_i]}" "${sa_cx[sa_i]}" "${sa_tk[sa_i]}" "${MD}${sa_mcell}${RS}" \
+              "${sa_de[sa_i]}" "${sa_lb[sa_i]}" "$sa_cols"
+    sa_out[${#sa_out[@]}]=${sa_ids[sa_i]}
+    sa_out[${#sa_out[@]}]=$_content
+    sa_i=$(( sa_i + 1 ))
+done
 
 # One jq out. The records are built by jq from positional arguments, never by hand-concatenating JSON: the
 # content holds ANSI escapes and arbitrary printable text, and escaping that is jq's job, not a printf's.

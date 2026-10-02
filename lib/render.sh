@@ -158,6 +158,13 @@ fmt_dur_s() {   # $1=seconds (non-negative integer) → _dur="45s"/"3m45s"/"1H15
     else fmt_dur "$s"; fi
 }
 
+# Elapsed time of a subagent task (subagent-status-line.sh's elapsed cell): under a minute in whole seconds ("45s", "0s"),
+# from 60 s on fmt_dur's minute-grained forms ("12m", "1H15m", "1D3H"). Separate from fmt_dur_s, whose sub-hour form
+# carries seconds ("3m45s"), and leaves both existing formatters untouched. Writes _dur.
+fmt_elapsed() {   # $1=seconds (non-negative integer) → _dur="45s"/"12m"/"1H15m"
+    if [ "$1" -lt 60 ]; then _dur="${1}s"; else fmt_dur "$1"; fi
+}
+
 # Usability gate for the two cost.*_ms fields, mirroring ctx_aligned_pct's: jq's tostring erases the JSON type, so a
 # string-typed "0900000" arrives verbatim and bash reads the leading zero as OCTAL — either aborting the expression with
 # "value too great for base" (the error text lands on the statusline's stderr) or, for a legal octal literal like
