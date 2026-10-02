@@ -2200,7 +2200,7 @@ rm -f "$qdir/claude-opus-4-8"
 
 [ "$qbad" -eq 0 ] && echo "  quota label + value + marker + no-cache + unknown-model + off-by-default + ladder OK" || fail=1
 
-# ── SUBAGENT STATUS LINE (SA1-SA8) ──────────────────────────────────────────────────────────────────
+# ── SUBAGENT STATUS LINE (SA1-SA9) ──────────────────────────────────────────────────────────────────
 # Second entry point. subagent-status-line.sh reads the subagent status JSON on stdin and prints JSON Lines
 # ({"id":…,"content":…}), one record per task row it takes over. A task id it does NOT print keeps Claude
 # Code's own default row, and that guaranteed fallback is this script's ONLY error path — so "emitted nothing
@@ -2791,6 +2791,146 @@ print(" ".join(out))')
 [ "$sa8sev" = "s1:IDLE s2:RUN  s3:DONE s4:FAIL s5:KILL s6:PAUS s7:PEND" ] \
   || { echo "  ★ FAIL seven classified tasks: wanted [s1:IDLE s2:RUN  s3:DONE s4:FAIL s5:KILL s6:PAUS s7:PEND], got [$sa8sev]"; sa8bad=1; }
 [ "$sa8bad" -eq 0 ] && echo "  8-width IDLE table, marker+ctx% floor, unbounded, per-row independence, 7 records in order OK" || fail=1
+
+echo "── SA9. SUBAGENT: per-session state file — content, permissions, UUID gate, refusals, counting, mtime sweep"
+# subagent-status-line.sh hands its per-class counts to the session line through ~/.claude/sl-subagents/<session_id>:
+# one line "V1 <epoch> <FAIL> <KILL> <PAUS> <RUN> <IDLE> <PEND> <DONE>", written atomically on every invocation whose
+# session_id is a real Claude Code UUID. Every case runs in its OWN fake HOME, so no case can see another's files, and
+# the payloads carry no startTime, so stdout does not depend on the clock and can be compared byte for byte.
+sa9bad=0
+SA9SID=0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+sa9n=0
+sa9home() {  # → a fresh fake HOME holding an empty .claude, path in _h
+  sa9n=$((sa9n + 1)); _h="$WORK/sa9-home-$sa9n"; mkdir -p "$_h/.claude"
+}
+sa9run() { printf '%s' "$2" | env HOME="$1" bash "$SASCRIPT"; }   # $1=HOME $2=payload → JSON Lines
+sa9pay() {  # $1=session id ("ABSENT" omits the key) $2=JSON array of tasks → payload
+  if [ "$1" = ABSENT ]; then jq -cn --argjson t "$2" '{columns:120, tasks:$t}'
+  else jq -cn --arg s "$1" --argjson t "$2" '{session_id:$s, columns:120, tasks:$t}'; fi
+}
+sa9tasks() {  # $@="<kind>:<count>" with kind running|idle|pending|paused|failed|killed|completed|mystery → JSON array
+  local a="" kind cnt i st smp
+  for p in "$@"; do
+    kind=${p%%:*}; cnt=${p#*:}; i=0
+    while [ "$i" -lt "$cnt" ]; do
+      st=$kind; smp=""; [ "$kind" != idle ] || { st=running; smp=",\"tokenSamples\":$SA16"; }
+      a="$a${a:+,}{\"id\":\"$kind$i\",\"status\":\"$st\",\"model\":\"claude-sonnet-5\",\"contextWindowSize\":1000000,\"tokenCount\":5000,\"description\":\"task $kind $i\"$smp}"
+      i=$((i + 1))
+    done
+  done
+  printf '[%s]' "$a"
+}
+sa9line() {  # $1=state file $2=epoch lower bound $3=epoch upper bound → the counts after the epoch, or why not
+  python3 -c '
+import sys, re
+try: b = open(sys.argv[1], "rb").read()
+except Exception as e: print("unreadable: %s" % e.__class__.__name__); sys.exit(0)
+m = re.fullmatch(rb"V1 (0|[1-9][0-9]*)((?: (?:0|[1-9][0-9]*)){7})\n", b)
+if not m: print("malformed: %r" % b); sys.exit(0)
+ep = int(m.group(1))
+if not int(sys.argv[2]) <= ep <= int(sys.argv[3]): print("epoch %d outside [%s,%s]" % (ep, sys.argv[2], sys.argv[3])); sys.exit(0)
+print(m.group(2).decode().strip())' "$1" "$2" "$3"
+}
+sa9mode() { stat -f '%Lp' "$1" 2>/dev/null || echo missing; }
+SA9REF=$(sa9pay "$SA9SID" "$(sa9tasks running:2 idle:1 completed:1)")
+# (a) RUN, RUN, IDLE, DONE → "V1 <now> 0 0 0 2 1 0 1", file 600 in a 700 directory
+sa9home; sa9ha=$_h
+sa9t0=$(date +%s); sa9out=$(sa9run "$sa9ha" "$SA9REF"); sa9t1=$(date +%s)
+sa9f="$sa9ha/.claude/sl-subagents/$SA9SID"
+sa9c=$(sa9line "$sa9f" "$sa9t0" "$sa9t1")
+[ "$sa9c" = "0 0 0 2 1 0 1" ] || { echo "  ★ FAIL state file for RUN RUN IDLE DONE: wanted [0 0 0 2 1 0 1], got [$sa9c]"; sa9bad=1; }
+[ "$(sa9mode "$sa9f")" = 600 ] || { echo "  ★ FAIL state file mode $(sa9mode "$sa9f"), want 600"; sa9bad=1; }
+[ "$(sa9mode "$sa9ha/.claude/sl-subagents")" = 700 ] || { echo "  ★ FAIL state directory mode $(sa9mode "$sa9ha/.claude/sl-subagents"), want 700"; sa9bad=1; }
+[ "$(printf '%s\n' "$sa9out" | sajsonl)" = "OK 4" ] || { echo "  ★ FAIL the four rows were not emitted next to the state write: [$sa9out]"; sa9bad=1; }
+# stdout is byte-identical to the same run whose directory cannot be written, and that run writes nothing
+sa9home; mkdir -m 500 "$_h/.claude/sl-subagents"
+sa9ro=$(sa9run "$_h" "$SA9REF")
+[ "$sa9ro" = "$sa9out" ] || { echo "  ★ FAIL stdout differs when the state directory is unwritable"; sa9bad=1; }
+[ -z "$(ls -A "$_h/.claude/sl-subagents")" ] || { echo "  ★ FAIL something was written into an unwritable directory"; sa9bad=1; }
+chmod 700 "$_h/.claude/sl-subagents"
+# (b) every class in its own field, in the order FAIL KILL PAUS RUN IDLE PEND DONE, canonical decimals (10, not 010)
+sa9home
+sa9t0=$(date +%s); sa9run "$_h" "$(sa9pay "$SA9SID" "$(sa9tasks failed:1 killed:2 paused:3 running:10 idle:4 pending:5 completed:6)")" >/dev/null; sa9t1=$(date +%s)
+sa9c=$(sa9line "$_h/.claude/sl-subagents/$SA9SID" "$sa9t0" "$sa9t1")
+[ "$sa9c" = "1 2 3 10 4 5 6" ] || { echo "  ★ FAIL field order / canonical decimals: wanted [1 2 3 10 4 5 6], got [$sa9c]"; sa9bad=1; }
+# (c) a session_id that is not a real Claude Code UUID writes nothing — not even the directory — and the rows still render
+for sa9sid in sl-sepdemo ../x '' ABSENT 0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D "$SA9SID-x"; do
+  sa9home
+  sa9o=$(sa9run "$_h" "$(sa9pay "$sa9sid" "$(sa9tasks running:1)")")
+  [ ! -e "$_h/.claude/sl-subagents" ] || { echo "  ★ FAIL session id [$sa9sid] created $(ls -A "$_h/.claude/sl-subagents" | head -3)"; sa9bad=1; }
+  [ "$(printf '%s\n' "$sa9o" | sajsonl)" = "OK 1" ] || { echo "  ★ FAIL session id [$sa9sid] lost its row: [$sa9o]"; sa9bad=1; }
+done
+# (d) refused paths: nothing written through them, nothing repaired or removed, stdout unchanged
+sa9home; mkdir "$_h/elsewhere"; ln -s "$_h/elsewhere" "$_h/.claude/sl-subagents"
+sa9o=$(sa9run "$_h" "$SA9REF")
+[ -L "$_h/.claude/sl-subagents" ] && [ -z "$(ls -A "$_h/elsewhere")" ] || { echo "  ★ FAIL written through a linked state directory"; sa9bad=1; }
+[ "$sa9o" = "$sa9out" ] || { echo "  ★ FAIL stdout changed with a linked state directory"; sa9bad=1; }
+sa9home; printf 'keep\n' > "$_h/.claude/sl-subagents"
+sa9o=$(sa9run "$_h" "$SA9REF")
+[ -f "$_h/.claude/sl-subagents" ] && [ "$(cat "$_h/.claude/sl-subagents")" = keep ] || { echo "  ★ FAIL a plain file at the directory path was touched"; sa9bad=1; }
+[ "$sa9o" = "$sa9out" ] || { echo "  ★ FAIL stdout changed with a plain file at the directory path"; sa9bad=1; }
+sa9home; mkdir -m 700 "$_h/.claude/sl-subagents"; printf 'orig\n' > "$_h/target"; ln -s "$_h/target" "$_h/.claude/sl-subagents/$SA9SID"
+sa9o=$(sa9run "$_h" "$SA9REF")
+[ -L "$_h/.claude/sl-subagents/$SA9SID" ] && [ "$(cat "$_h/target")" = orig ] || { echo "  ★ FAIL written through a linked entry"; sa9bad=1; }
+[ "$(ls -A "$_h/.claude/sl-subagents")" = "$SA9SID" ] || { echo "  ★ FAIL leftover next to a linked entry: [$(ls -A "$_h/.claude/sl-subagents")]"; sa9bad=1; }
+[ "$sa9o" = "$sa9out" ] || { echo "  ★ FAIL stdout changed with a linked entry"; sa9bad=1; }
+sa9home; mkdir -p -m 700 "$_h/.claude/sl-subagents/$SA9SID"
+sa9o=$(sa9run "$_h" "$SA9REF")
+[ -d "$_h/.claude/sl-subagents/$SA9SID" ] && [ -z "$(ls -A "$_h/.claude/sl-subagents/$SA9SID")" ] || { echo "  ★ FAIL a directory at the entry path was written into"; sa9bad=1; }
+[ "$(ls -A "$_h/.claude/sl-subagents")" = "$SA9SID" ] || { echo "  ★ FAIL leftover next to a directory entry: [$(ls -A "$_h/.claude/sl-subagents")]"; sa9bad=1; }
+[ "$sa9o" = "$sa9out" ] || { echo "  ★ FAIL stdout changed with a directory at the entry path"; sa9bad=1; }
+# An existing temp path: the temp name carries the writer's $$, and `exec` keeps the pid, so the wrapper below plants
+# ".<sid>.<its own pid>" and then becomes the script under that same pid.
+sa9home; mkdir -m 700 "$_h/.claude/sl-subagents"
+sa9o=$(printf '%s' "$SA9REF" | env HOME="$_h" SA9SID="$SA9SID" bash -c 'printf "half" > "$HOME/.claude/sl-subagents/.$SA9SID.$$"; exec bash "$0"' "$SASCRIPT")
+sa9tmp=$(ls -A "$_h/.claude/sl-subagents")
+case "$sa9tmp" in ".$SA9SID."[0-9]*) [ "$(cat "$_h/.claude/sl-subagents/$sa9tmp")" = half ] || { echo "  ★ FAIL an existing temp file was overwritten"; sa9bad=1; } ;;
+  *) echo "  ★ FAIL an existing temp path was not refused, the directory holds [$sa9tmp]"; sa9bad=1 ;; esac
+[ "$sa9o" = "$sa9out" ] || { echo "  ★ FAIL stdout changed with an existing temp path"; sa9bad=1; }
+# (e) counting depends on classification alone: a failed task without a model gets no record but is counted
+sa9home
+sa9o=$(sa9run "$_h" "$(sa9pay "$SA9SID" '[{"id":"ok","status":"running","model":"claude-sonnet-5","description":"has a model"},{"id":"nomodel","status":"failed","description":"no model"}]')")
+sa9ids=$(printf '%s\n' "$sa9o" | python3 -c 'import sys, json; print(" ".join(json.loads(l)["id"] for l in sys.stdin if l.strip()))')
+[ "$sa9ids" = ok ] || { echo "  ★ FAIL records for running + model-less failed: [$sa9ids], want [ok]"; sa9bad=1; }
+sa9c=$(sa9line "$_h/.claude/sl-subagents/$SA9SID" 0 9999999999)
+[ "$sa9c" = "1 0 0 1 0 0 0" ] || { echo "  ★ FAIL model-less failed task not counted: wanted [1 0 0 1 0 0 0], got [$sa9c]"; sa9bad=1; }
+# eight tasks: five running, a completed background agent, a running nested subagent, and a mystery status → total 7,
+# more than the five rows Claude Code draws before it folds
+sa9home
+sa9eight=$(jq -cn --argjson a "$(sa9tasks running:5 completed:1 mystery:1)" '$a + [{id:"nested", status:"running", model:"claude-sonnet-5", contextWindowSize:1000000, tokenCount:5000, description:"nested subagent of running0"}]')
+sa9run "$_h" "$(sa9pay "$SA9SID" "$sa9eight")" >/dev/null
+sa9c=$(sa9line "$_h/.claude/sl-subagents/$SA9SID" 0 9999999999)
+[ "$sa9c" = "0 0 0 6 0 0 1" ] || { echo "  ★ FAIL eight tasks with one mystery: wanted [0 0 0 6 0 0 1], got [$sa9c]"; sa9bad=1; }
+# (f) first write of a session sweeps files older than 86400 s by mtime alone; links, directories and young files stay
+SA9OLD=$(date -v-2d +%Y%m%d%H%M.%S); SA9NEW=$(date -v-10S +%Y%m%d%H%M.%S)
+sa9home; sa9d="$_h/.claude/sl-subagents"; mkdir -m 700 "$sa9d"
+printf 'V1 1700000000 0 0 0 1 0 0 0\n' > "$sa9d/11111111-1111-4111-8111-111111111111"; touch -t "$SA9OLD" "$sa9d/11111111-1111-4111-8111-111111111111"
+printf 'garbage\n' > "$sa9d/22222222-2222-4222-8222-222222222222"; touch -t "$SA9OLD" "$sa9d/22222222-2222-4222-8222-222222222222"
+printf 'garbage\n' > "$sa9d/33333333-3333-4333-8333-333333333333"; touch -t "$SA9NEW" "$sa9d/33333333-3333-4333-8333-333333333333"
+printf 'V1 17' > "$sa9d/.44444444-4444-4444-8444-444444444444.12345"; touch -t "$SA9OLD" "$sa9d/.44444444-4444-4444-8444-444444444444.12345"
+printf 'V1 17' > "$sa9d/.55555555-5555-4555-8555-555555555555.12346"; touch -t "$SA9NEW" "$sa9d/.55555555-5555-4555-8555-555555555555.12346"
+printf 'V1 1700000000 0 0 0 1 0 0 0\n' > "$_h/linktarget"; touch -t "$SA9OLD" "$_h/linktarget"
+ln -s "$_h/linktarget" "$sa9d/66666666-6666-4666-8666-666666666666"; touch -h -t "$SA9OLD" "$sa9d/66666666-6666-4666-8666-666666666666"
+mkdir "$sa9d/77777777-7777-4777-8777-777777777777"; printf 'inner\n' > "$sa9d/77777777-7777-4777-8777-777777777777/f"
+touch -t "$SA9OLD" "$sa9d/77777777-7777-4777-8777-777777777777/f" "$sa9d/77777777-7777-4777-8777-777777777777"
+sa9t0=$(date +%s); sa9run "$_h" "$SA9REF" >/dev/null; sa9t1=$(date +%s)
+[ "$(sa9line "$sa9d/$SA9SID" "$sa9t0" "$sa9t1")" = "0 0 0 2 1 0 1" ] || { echo "  ★ FAIL this session's entry was not written on the sweeping run"; sa9bad=1; }
+[ ! -e "$sa9d/11111111-1111-4111-8111-111111111111" ] || { echo "  ★ FAIL two-day-old valid entry kept"; sa9bad=1; }
+[ ! -e "$sa9d/22222222-2222-4222-8222-222222222222" ] || { echo "  ★ FAIL two-day-old garbage entry kept"; sa9bad=1; }
+[ -f "$sa9d/33333333-3333-4333-8333-333333333333" ] || { echo "  ★ FAIL 10-second-old garbage entry removed (content must never decide)"; sa9bad=1; }
+[ ! -e "$sa9d/.44444444-4444-4444-8444-444444444444.12345" ] || { echo "  ★ FAIL two-day-old temp file kept"; sa9bad=1; }
+[ -f "$sa9d/.55555555-5555-4555-8555-555555555555.12346" ] || { echo "  ★ FAIL 10-second-old temp file removed (another writer may be mid-write)"; sa9bad=1; }
+[ -L "$sa9d/66666666-6666-4666-8666-666666666666" ] && [ "$(cat "$_h/linktarget")" = "V1 1700000000 0 0 0 1 0 0 0" ] \
+  || { echo "  ★ FAIL two-day-old symbolic link or its target removed"; sa9bad=1; }
+[ -f "$sa9d/77777777-7777-4777-8777-777777777777/f" ] || { echo "  ★ FAIL two-day-old directory or its contents removed"; sa9bad=1; }
+# a steady-state write (this session's entry already present) sweeps nothing
+sa9home; sa9d="$_h/.claude/sl-subagents"; mkdir -m 700 "$sa9d"
+printf 'V1 1700000000 0 0 0 1 0 0 0\n' > "$sa9d/$SA9SID"
+printf 'V1 1700000000 0 0 0 1 0 0 0\n' > "$sa9d/11111111-1111-4111-8111-111111111111"; touch -t "$SA9OLD" "$sa9d/11111111-1111-4111-8111-111111111111"
+sa9t0=$(date +%s); sa9run "$_h" "$SA9REF" >/dev/null; sa9t1=$(date +%s)
+[ "$(sa9line "$sa9d/$SA9SID" "$sa9t0" "$sa9t1")" = "0 0 0 2 1 0 1" ] || { echo "  ★ FAIL steady-state write did not refresh this session's entry"; sa9bad=1; }
+[ -f "$sa9d/11111111-1111-4111-8111-111111111111" ] || { echo "  ★ FAIL a steady-state write swept another session's two-day-old entry"; sa9bad=1; }
+[ "$sa9bad" -eq 0 ] && echo "  content + 600/700, unwritable dir, canonical order, 6 refused ids, 5 refused paths, counting, mtime sweep OK" || fail=1
 
 # PEER (change statusline-session-peer-id) The six-hex reference Claude Code's own agent listing shows in brackets after a session.
 # It is derived from the per-session registry record ~/.claude/sessions/<claude pid>.json — a file written by ANOTHER program, so it
