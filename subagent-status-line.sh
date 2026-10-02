@@ -38,6 +38,12 @@
 #   paused → PAUS; failed → FAIL; killed → KILL; completed → DONE; anything else, absent included →
 #   unclassified: no record, so Claude Code keeps its default row. The status string is never rendered.
 #
+# State handed to the session line: every run whose session_id is a Claude Code UUID writes the per-class counts of
+# every classified task, including those that get no record, as "V1 <epoch_s> <FAIL> <KILL> <PAUS> <RUN> <IDLE> <PEND>
+# <DONE>" to ~/.claude/sl-subagents/<session_id> (sa_state_write). It is the only file this command writes; a failed or
+# refused write leaves stdout unchanged. Because it writes under $HOME, run it by hand only through
+# scripts/sandbox-run.sh, never against the real $HOME.
+#
 # Claude Code facts this rests on, read from the 2.1.287 binary (check these first after an upgrade):
 #   F1 this command runs on a tick chain while at least one task exists: ~0.3 s after the panel mounts, then
 #      every 5 s, single-flight, 5000 ms timeout; never with zero tasks.
@@ -231,6 +237,54 @@ sa_render() {   # $1=marker $2=elapsed $3=ctx% $4=tokens $5=model $6=description
     sa_join "$mk" "$cx"                           # pathologically narrow: marker and ctx% are the last to go
 }
 
+# A session id may name a file only when it has the exact shape of a Claude Code session UUID (8-4-4-4-12 lowercase
+# hex), the same gate lib/collect.sh's sid_persistable applies to the rate-limit cache (that module is not sourced
+# here). The shape also excludes "/", "." and every other path character.
+sa_sid_ok() {   # $1=session id → rc 0 when UUID-shaped
+    local h4='[0-9a-f][0-9a-f][0-9a-f][0-9a-f]' g
+    g="$h4$h4-$h4-$h4-$h4-$h4$h4$h4"
+    # shellcheck disable=SC2254  # unquoted on purpose: the expanded pattern IS the glob (quoted it would match literally)
+    case "$1" in $g) return 0 ;; esac
+    return 1
+}
+
+# Hand this invocation's per-class counts to the session line (subagent-summary-line): one line
+# "V1 <epoch_s> <FAIL> <KILL> <PAUS> <RUN> <IDLE> <PEND> <DONE>" in ~/.claude/sl-subagents/<session_id>, written on every
+# run, also when nothing changed, because the epoch is the heartbeat the reader's staleness bound checks. The path is
+# required to be exactly what we create there: a link or a non-directory where the directory belongs, a link or a
+# directory where the entry belongs, and anything at all at the temp path are refused, and nothing found on a refused
+# path is repaired or removed ("mv -f" onto a directory would bury the temp file inside it; "mkdir -p" succeeds through
+# a link, hence the re-check). Written to ".<sid>.<pid>" by the shell and renamed, so a reader never sees half a line.
+# umask 077 inside the subshell: 700 directory, 600 file, and the caller's umask is untouched. On a first write (no
+# entry yet for this session) regular files of the directory older than 86400 s by mtime are swept; content never
+# decides (a temp file another session is writing does not parse yet), and links and directories are never touched
+# (BSD find -type f neither matches nor follows a link; -maxdepth 1 never enters a subdirectory). The bound is written
+# in minutes, -mmin +1440, rather than in days: BSD find's day units are documented as rounded up to whole 24-hour
+# periods, so a day-based bound depends on that rounding. Every failure is silent, and the
+# subshell's output goes nowhere, so the panel's stdout is the same whether or not the write happened.
+sa_state_write() {   # $1=session id $2=epoch seconds $3..$9=FAIL KILL PAUS RUN IDLE PEND DONE counts
+    sa_sid_ok "$1" || return 0
+    (
+        umask 077
+        d="$HOME/.claude/sl-subagents"
+        if [ ! -d "$d" ]; then
+            if [ -L "$d" ] || [ -e "$d" ]; then exit 0; fi
+            mkdir -p "$d" 2>/dev/null || exit 0
+        fi
+        if [ ! -d "$d" ] || [ -L "$d" ]; then exit 0; fi
+        e="$d/$1"; t="$d/.$1.$$"
+        if [ -L "$e" ] || [ -d "$e" ]; then exit 0; fi
+        if [ -e "$t" ] || [ -L "$t" ]; then exit 0; fi
+        first=0; [ -e "$e" ] || first=1
+        { printf 'V1 %s %s %s %s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" > "$t"; } 2>/dev/null || exit 0
+        if [ -f "$t" ] && [ ! -L "$t" ] && [ ! -L "$e" ] && [ ! -d "$e" ] && mv -f "$t" "$e" 2>/dev/null; then
+            [ "$first" = 0 ] || find "$d" -mindepth 1 -maxdepth 1 -type f -mmin +1440 -exec rm -f {} + 2>/dev/null
+        elif [ -f "$t" ] && [ ! -L "$t" ]; then
+            rm -f "$t" 2>/dev/null
+        fi
+    ) </dev/null >/dev/null 2>&1
+}
+
 
 # ── main ────────────────────────────────────────────────────────────────────────────────────────────────
 # The theme job starts first so its jq overlaps the parsing jq below. Its </dev/null is mandatory, not
@@ -247,7 +301,7 @@ SA_IDLE_SAMPLES=16
 # `//` chain, because jq ABORTS the whole program (rc 5) on a type-mismatched index — that would drop every
 # task's row, not just the offending one. Newlines become spaces, control characters are removed by
 # explode/implode codepoint math, and each field is capped at 256 codepoints. Output is positional: one
-# line for the column count, one for jq's clock in epoch ms, then eight lines per task, the last one the
+# line for the column count, one for jq's clock in epoch ms, one for the session id, then eight lines per task, the last one the
 # task's class (empty when unclassified). Lines, not a delimiter: tab is IFS whitespace, so `read` would
 # silently merge consecutive empty fields, and empty fields are the normal case here. The class is decided
 # here, once, so the marker and anything counted from it can never disagree.
@@ -271,6 +325,7 @@ def class: (if has("status") then .status else null end) as $s
     else "" end;
 (if type == "object" then (if (.columns | type) == "number" then (.columns | floor | tostring) else "" end) else "" end),
 (now * 1000 | floor | tostring),
+(if type == "object" then fld("session_id") else "" end),
 ( (if type == "object" then .tasks else null end)
   | (if type == "array" then . else [] end)
   | .[]
@@ -282,6 +337,7 @@ exec 4< <(jq -r --argjson n "$SA_IDLE_SAMPLES" "$SA_JQ" 2>/dev/null)
 sa_cols=""; sa_now_ms=""
 IFS= read -r sa_cols <&4
 IFS= read -r sa_now_ms <&4
+sa_sid=""; IFS= read -r sa_sid <&4
 sa_num_ok "$sa_now_ms" || sa_now_ms=""
 
 # STYLE is the single line's palette knob. Derived from there rather than defined a second time, so the two
@@ -300,6 +356,7 @@ vis_width "$SEP"; SA_SEPW=$_w  # derived, not hardcoded, so a separator change c
 # that will be emitted. Second pass: pad the model cell to that width and narrow each row on its own.
 sa_ids=(); sa_mk=(); sa_el=(); sa_cx=(); sa_tk=(); sa_mn=(); sa_mw=(); sa_de=(); sa_lb=()
 sa_mwmax=0
+sa_nFAIL=0; sa_nKILL=0; sa_nPAUS=0; sa_nRUN=0; sa_nIDLE=0; sa_nPEND=0; sa_nDONE=0
 while IFS= read -r sa_id <&4; do
     IFS= read -r sa_model <&4 || break
     IFS= read -r sa_win   <&4 || break
@@ -310,6 +367,13 @@ while IFS= read -r sa_id <&4; do
     IFS= read -r sa_class <&4 || break
     # Unclassified status (absent, or not one of the seven values) → keep Claude Code's default row.
     [ -n "$sa_class" ] || continue
+    # Counted here, before any rule that decides whether a record is emitted: a classified task counts even when
+    # Claude Code keeps its default row for it (no model, no text) or folds it away.
+    case "$sa_class" in
+        FAIL) sa_nFAIL=$(( sa_nFAIL + 1 )) ;; KILL) sa_nKILL=$(( sa_nKILL + 1 )) ;; PAUS) sa_nPAUS=$(( sa_nPAUS + 1 )) ;;
+        RUN)  sa_nRUN=$(( sa_nRUN + 1 ))   ;; IDLE) sa_nIDLE=$(( sa_nIDLE + 1 )) ;; PEND) sa_nPEND=$(( sa_nPEND + 1 )) ;;
+        DONE) sa_nDONE=$(( sa_nDONE + 1 )) ;;
+    esac
     # No id → the row cannot be addressed. No model → the reason this row exists is missing, and a row
     # without it is worse than Claude Code's default row. Either way: emit nothing, keep the default.
     [ -n "$sa_id" ] && [ -n "$sa_model" ] || continue
@@ -366,5 +430,9 @@ if [ ${#sa_out[@]} -gt 0 ]; then
     # shellcheck disable=SC2016  # $ARGS / $i are jq variables
     jq -cn 'range(0; ($ARGS.positional | length); 2) as $i
             | {id: $ARGS.positional[$i], content: $ARGS.positional[$i + 1]}' --args "${sa_out[@]}" </dev/null
+fi
+if [ -n "$sa_now_ms" ]; then
+    sa_state_write "$sa_sid" "$(( 10#$sa_now_ms / 1000 ))" \
+        "$sa_nFAIL" "$sa_nKILL" "$sa_nPAUS" "$sa_nRUN" "$sa_nIDLE" "$sa_nPEND" "$sa_nDONE"
 fi
 exit 0
