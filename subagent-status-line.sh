@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034,SC2154  # cross-module globals, same contract lib/collect.sh and lib/render.sh use:
-#   _w / _line / _trunc / _tok / _dur / _mname / _content / _rw are set by one function and read by another, and
+#   _w / _trunc / _tok / _dur / _mname / _win / _content are set by one function and read by another, and
 #   STYLE / SEP / _theme are read by render.sh. Lint via: shellcheck -x subagent-status-line.sh
 # subagent-status-line.sh — Claude Code's SUBAGENT status line: the rows that list the subagents currently
 # running. Sibling of statusline-command.sh, which owns the single session line; the two never touch.
@@ -15,22 +15,28 @@
 # ANSI colour codes and is rendered verbatim. A record is never emitted with empty content to hide a row:
 # which rows show, their order and the "↓ N more" fold belong to Claude Code.
 #
-# Row layout — seven cells joined by the same " │ " separator the single line uses, one after the marker too:
+# Row layout — three parts joined by the same " │ " separator the single line uses: the head (marker, the elapsed time
+# in brackets, the description), the stats group (ctx%, tokens and the model with its window marker, joined by " · "),
+# and the activity label:
 #
-#     <marker> │ <elapsed> │ <ctx%> │ <tokens> │ <model> │ <description> │ <label>
-#     RUN  │   12m │ 13% │ 128K │ Opus 5 │ Fold 682173 into 681727 │ Confirming mirror refs unchanged after cleanup
+#     <marker> [<elapsed>] <description> │ <ctx%> · <tokens> · <model>(<window>) │ <label>
+#     RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup
 #
+# Only the marker and the elapsed time are aligned; nothing else is padded, so every description starts at the same
+# column and the " │ " after it need not line up across rows.
 # marker: the class name padded to 4 columns (RUN/DONE green, IDLE/PEND grey, PAUS orange, FAIL/KILL red).
-# elapsed: now - startTime, right-aligned to 5, "45s" under a minute and fmt_dur's "12m"/"1H15m"/"1D3H" from
-# there; it keeps counting on finished rows because the payload has no end time. ctx%: round half up of
-# 100 * tokenCount / contextWindowSize, right-aligned to 3, red above 92 on a window of 1,000,000 or more and
-# above 80 below that. tokens: fmt_tok with an uppercase K, right-aligned to 4, "0" for zero. model: the
-# display name derived by rule (no window marker), padded to the widest name among this invocation's rows.
-# A value the payload does not supply in usable form prints "-"; a PEND row prints 0% and 0 instead and
-# draws elapsed, ctx% and tokens grey, never red. The label is dropped when it only repeats the description
-# (Claude Code fills it that way while an agent is starting), and promoted when the description is empty.
-# A row wider than `columns` gives up, in this order, only as much as it must: label truncated, label
-# dropped, tokens, model, elapsed, description truncated; marker and ctx% are never dropped.
+# elapsed: now - startTime, right-aligned to 5 inside brackets ("[  12m]"), "45s" under a minute and fmt_dur's
+# "12m"/"1H15m"/"1D3H" from there; a longer value widens the brackets instead of being cut. It keeps counting on
+# finished rows because the payload has no end time. ctx%: round half up of 100 * tokenCount / contextWindowSize, red
+# above 92 on a window of 1,000,000 or more and above 80 below that. tokens: fmt_tok with an uppercase K, "0" for zero.
+# model: the display name derived by rule, directly followed by the window marker: "(1M)" in the model colour for a
+# window of 1,000,000 or more, "(200K)" for a smaller one in the warning yellow, brackets included, and no marker at all
+# without a usable window. A value the payload does not supply in usable form prints "-"; a PEND row prints 0% and 0
+# instead and draws elapsed, ctx% and tokens grey, never red. The brackets, the " │ " and the " · " are drawn in the
+# separator grey. The label is dropped when it only repeats the description (Claude Code fills it that way while an
+# agent is starting), and promoted when the description is empty. A row wider than `columns` gives up, in this order,
+# only as much as it must: label truncated, label dropped (with its " │ "), tokens, model, elapsed (with its brackets),
+# description truncated; marker and ctx% are never dropped.
 #
 # Classification (one pass, the same answer for the marker and for anything counted later):
 #   running + the last SA_IDLE_SAMPLES (16) tokenSamples all numbers and none of their 15 adjacent pairs
@@ -67,7 +73,7 @@ export LC_ALL=C
 SA_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # lib/render.sh is pure function definitions with no side effects at source time; we borrow load_palette,
-# vis_width, trunc_head, join_parts and fmt_tok so both lines share one palette and one width model.
+# vis_width, trunc_head, fmt_tok and fmt_elapsed so both lines share one palette and one width model.
 # lib/collect.sh is deliberately NOT sourced: it carries path constants bound to the real $HOME, and its
 # reconcile_* / tokens_* helpers write shared cache files that every live session reads.
 # shellcheck source=lib/render.sh
@@ -88,7 +94,8 @@ sa_resolve_theme() {
 # loudly when a new model ships: it falls through to some default and prints another model's name or
 # nothing, and this segment is precisely what the reader uses to tell an expensive model from a cheap one.
 # The rule: strip a leading "claude-", strip a trailing extended-window suffix "[<digits>m]", capitalise the
-# family, then join the hyphen-separated numeric segments with "." after a single space.
+# family, then join the hyphen-separated numeric segments with "." after a single space. The window is not read from
+# that suffix: the window marker comes from contextWindowSize (sa_window).
 #   claude-sonnet-5 → Sonnet 5    claude-opus-5[1m] → Opus 5    claude-haiku-4-5 → Haiku 4.5
 # Anything that does not match that shape is printed verbatim after the prefix/suffix strip — a strange but
 # TRUE string, never a plausible-looking guess.
@@ -147,9 +154,26 @@ sa_lpad() {   # $1=ASCII text $2=width → _pad, right-aligned with leading spac
     while [ "${#_pad}" -lt "$2" ]; do _pad=" $_pad"; done
 }
 
-# The three numeric cells of one row. A value the payload does not supply in usable form prints "-"; a PEND row
-# prints the settled 0% and 0 instead and draws all three in the secondary grey, never red.
-sa_cells() {   # $1=class $2=raw startTime $3=raw contextWindowSize $4=raw tokenCount → _el _cx _tk (coloured, padded)
+# Context-window marker, appended directly after the model name. Present only when the size is a usable positive integer:
+# no placeholder, no assumed default, because a guessed window is exactly the kind of confident wrong answer this row must
+# never give. A full window is normal and wears the model's own colour; anything smaller is the condition the reader needs
+# to spot, so the whole marker, brackets included, wears the warning role.
+sa_window() {   # $1=raw contextWindowSize → _win (coloured, "" when unusable)
+    local n
+    _win=""
+    sa_num_ok "$1" || return 0
+    n=$(( 10#$1 ))                                # base 10 always: bash reads a leading zero as octal
+    [ "$n" -gt 0 ] || return 0
+    if [ "$n" -ge 1000000 ]; then _win="${MD}(1M)${RS}"; return 0; fi
+    fmt_tok "$n"                                  # borrowed from render.sh: <1000 raw, else "Nk"
+    case "$_tok" in *k) _tok="${_tok%k}K" ;; esac
+    _win="${YL}(${_tok})${RS}"
+}
+
+# The three numeric cells of one row. A value the payload does not supply in usable form prints "-"; a PEND row prints the
+# settled 0% and 0 instead and draws all three in the secondary grey, never red. Only the elapsed value is padded: right-
+# aligned to 5 inside its brackets, so every description starts at the same column. ctx% and tokens print at their own width.
+sa_cells() {   # $1=class $2=raw startTime $3=raw contextWindowSize $4=raw tokenCount → _el _cx _tk (coloured)
     local cls=$1 s n w pct role
     if [ -n "$sa_now_ms" ] && sa_num_ok "$2"; then
         s=$(( (10#$sa_now_ms - 10#$2) / 1000 ))
@@ -158,7 +182,7 @@ sa_cells() {   # $1=class $2=raw startTime $3=raw contextWindowSize $4=raw token
     else
         sa_lpad "-" 5
     fi
-    _el="${DM}${_pad}${RS}"
+    _el="${SP}[${RS}${DM}${_pad}${RS}${SP}]${RS}"
     role=$WH; [ "$cls" != PEND ] || role=$DM
     if sa_num_ok "$4" && sa_num_ok "$3" && [ $(( 10#$3 )) -gt 0 ]; then
         n=$(( 10#$4 )); w=$(( 10#$3 ))
@@ -167,74 +191,70 @@ sa_cells() {   # $1=class $2=raw startTime $3=raw contextWindowSize $4=raw token
             # Same -gt comparison as the session line's context meter: 92 on a 1M window, 80 below it.
             if [ "$w" -ge 1000000 ]; then [ "$pct" -le 92 ] || role=$RD; else [ "$pct" -le 80 ] || role=$RD; fi
         fi
-        sa_lpad "${pct}%" 3
+        _cx="${role}${pct}%${RS}"
     elif [ "$cls" = PEND ]; then
-        sa_lpad "0%" 3
+        _cx="${role}0%${RS}"
     else
-        sa_lpad "-" 3
+        _cx="${role}-${RS}"
     fi
-    _cx="${role}${_pad}${RS}"
     role=$WH; [ "$cls" != PEND ] || role=$DM
     if sa_num_ok "$4"; then
         fmt_tok "$(( 10#$4 ))"                    # borrowed from render.sh: 262414 → "262k", 1234567 → "1.2M"
         case "$_tok" in *k) _tok="${_tok%k}K" ;; esac
-        sa_lpad "$_tok" 4
+        _tk="${role}${_tok}${RS}"
     elif [ "$cls" = PEND ]; then
-        sa_lpad "0" 4
+        _tk="${role}0${RS}"
     else
-        sa_lpad "-" 4
+        _tk="${role}-${RS}"
     fi
-    _tk="${role}${_pad}${RS}"
 }
 
-sa_join() {   # $@=cells in order; an empty one is skipped along with the separator that would precede it
-    local p
-    sa_parts=()
-    for p in "$@"; do [ -n "$p" ] && sa_parts[${#sa_parts[@]}]=$p; done
-    join_parts "${sa_parts[@]}"
-    _content=$_line
+# Assemble one row from its cells: "<marker> <elapsed> <description> │ <ctx%> · <tokens> · <model> │ <label>". An empty
+# cell is left out together with its joiner (the space before the elapsed time or the description, the " · " before
+# tokens or model, the " │ " before the label), so a row never shows an empty cell or two joiners in a row. Without a
+# description the row is the marker, " │ " and ctx% alone.
+sa_compose() {   # $1=marker $2=elapsed $3=description $4=ctx% $5=tokens $6=model $7=label (coloured, "" = absent) → _content
+    _content=$1
+    [ -z "$2" ] || _content="$_content $2"
+    [ -z "$3" ] || _content="$_content $3"
+    _content="$_content$SEP$4"
+    [ -z "$5" ] || _content="$_content$SA_DOT$5"
+    [ -z "$6" ] || _content="$_content$SA_DOT$6"
+    [ -z "$7" ] || _content="$_content$SEP$7"
 }
 
-sa_rowwidth() {   # $@=cells in order, empty ones absent → _rw = visible width of the joined row
-    local p n=0 t=0
-    for p in "$@"; do [ -n "$p" ] || continue; vis_width "$p"; t=$(( t + _w )); n=$(( n + 1 )); done
-    _rw=$t; [ "$n" -le 1 ] || _rw=$(( t + (n - 1) * SA_SEPW ))
-}
-
-# Assemble one row and bound it to the reported column count. Each step below runs only when the row still does
-# not fit, and keeps what the earlier steps did: truncate the label, drop the label (when it cannot keep one
-# character plus the ellipsis), drop tokens, drop model, drop elapsed, truncate the description. Marker and ctx%
-# are never dropped; when not even one description character plus the ellipsis fits beside them, the row is the
-# two of them alone, emitted even past the column count (Claude Code truncates it). Widths include the padding.
-sa_render() {   # $1=marker $2=elapsed $3=ctx% $4=tokens $5=model $6=description $7=label (coloured, "" = absent) $8=cap → _content
-    local mk=$1 el=$2 cx=$3 tk=$4 mo=$5 de=$6 lb=$7 cap=$8 room
+# Assemble one row and bound it to the reported column count. Each step below runs only when the row still does not fit,
+# and keeps what the earlier steps did: truncate the label, drop the label (when it cannot keep one character plus the
+# ellipsis), drop tokens, drop the model with its window marker, drop the elapsed time with its brackets, truncate the
+# description. Marker and ctx% are never dropped; when not even one description character plus the ellipsis fits beside
+# them, the row is the two of them alone, emitted even past the column count (Claude Code truncates it). Every width is
+# measured on the assembled row, so it includes the marker's and the elapsed time's padding, the brackets and every joiner.
+sa_render() {   # $1=marker $2=elapsed $3=description $4=ctx% $5=tokens $6=model $7=label (coloured, "" = absent) $8=cap → _content
+    local mk=$1 el=$2 de=$3 cx=$4 tk=$5 mo=$6 lb=$7 cap=$8 room
     case "$cap" in
         ''|*[!0-9]*) cap=0 ;;
         *) if [ "${#cap}" -le 9 ]; then cap=$(( 10#$cap )); else cap=0; fi ;;
     esac
-    # No usable column count → nothing to bound against, so render the row whole (the single line takes the
-    # same unbounded path when the terminal width cannot be measured).
-    if [ "$cap" -le 0 ]; then sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$lb"; return; fi
-    sa_rowwidth "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$lb"
-    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$lb"; return; fi
+    sa_compose "$mk" "$el" "$de" "$cx" "$tk" "$mo" "$lb"
+    # No usable column count → nothing to bound against, so the row stays whole (the single line takes the same unbounded
+    # path when the terminal width cannot be measured).
+    [ "$cap" -gt 0 ] || return 0
+    vis_width "$_content"; [ "$_w" -gt "$cap" ] || return 0
     if [ -n "$lb" ]; then
-        sa_rowwidth "$mk" "$el" "$cx" "$tk" "$mo" "$de"
-        room=$(( cap - _rw - SA_SEPW ))
+        sa_compose "$mk" "$el" "$de" "$cx" "$tk" "$mo" ""; vis_width "$_content"
+        room=$(( cap - _w - SA_SEPW ))
         if [ "$room" -ge 2 ]; then                # 2 cells is trunc_head's floor: one glyph plus the ellipsis
-            trunc_head "$lb" "$room"; sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de" "$_trunc"; return
+            trunc_head "$lb" "$room"; sa_compose "$mk" "$el" "$de" "$cx" "$tk" "$mo" "$_trunc"; return 0
         fi
-        if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$tk" "$mo" "$de"; return; fi
+        [ "$_w" -gt "$cap" ] || return 0
     fi
-    sa_rowwidth "$mk" "$el" "$cx" "$mo" "$de"
-    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$mo" "$de"; return; fi
-    sa_rowwidth "$mk" "$el" "$cx" "$de"
-    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$el" "$cx" "$de"; return; fi
-    sa_rowwidth "$mk" "$cx" "$de"
-    if [ "$_rw" -le "$cap" ]; then sa_join "$mk" "$cx" "$de"; return; fi
-    sa_rowwidth "$mk" "$cx"
-    room=$(( cap - _rw - SA_SEPW ))
-    if [ "$room" -ge 2 ]; then trunc_head "$de" "$room"; sa_join "$mk" "$cx" "$_trunc"; return; fi
-    sa_join "$mk" "$cx"                           # pathologically narrow: marker and ctx% are the last to go
+    sa_compose "$mk" "$el" "$de" "$cx" "" "$mo" ""; vis_width "$_content"; [ "$_w" -gt "$cap" ] || return 0
+    sa_compose "$mk" "$el" "$de" "$cx" "" "" "";   vis_width "$_content"; [ "$_w" -gt "$cap" ] || return 0
+    sa_compose "$mk" "" "$de" "$cx" "" "" "";      vis_width "$_content"; [ "$_w" -gt "$cap" ] || return 0
+    sa_compose "$mk" "" "" "$cx" "" "" "";         vis_width "$_content"
+    room=$(( cap - _w - 1 ))                      # the truncated description also brings the space before it
+    if [ "$room" -ge 2 ]; then trunc_head "$de" "$room"; sa_compose "$mk" "" "$_trunc" "$cx" "" "" ""; fi
+    return 0                                      # pathologically narrow: marker and ctx% are the last to go
 }
 
 # A session id may name a file only when it has the exact shape of a Claude Code session UUID (8-4-4-4-12 lowercase
@@ -350,12 +370,12 @@ exec 3<&-
 load_palette
 SA_TAB=$'\t'                   # named so sa_trim's case patterns stay readable
 SEP="${SP} │ ${RS}"            # same separator the single line uses, so the two read as one system
+SA_DOT="${SP} · ${RS}"         # joiner inside the stats group (ctx% · tokens · model)
 vis_width "$SEP"; SA_SEPW=$_w  # derived, not hardcoded, so a separator change cannot desync the width math
 
-# First pass: classify, build every cell but the model's padding, and find the widest model name among the rows
-# that will be emitted. Second pass: pad the model cell to that width and narrow each row on its own.
-sa_ids=(); sa_mk=(); sa_el=(); sa_cx=(); sa_tk=(); sa_mn=(); sa_mw=(); sa_de=(); sa_lb=()
-sa_mwmax=0
+# One pass: classify and count every task, then build, narrow and keep the record of every row that is emitted. Rows
+# do not depend on each other (nothing is padded to the widest value of the frame), so each is finished on its own.
+sa_out=()
 sa_nFAIL=0; sa_nKILL=0; sa_nPAUS=0; sa_nRUN=0; sa_nIDLE=0; sa_nPEND=0; sa_nDONE=0
 while IFS= read -r sa_id <&4; do
     IFS= read -r sa_model <&4 || break
@@ -402,27 +422,14 @@ while IFS= read -r sa_id <&4; do
     sa_mpad=$sa_class; while [ "${#sa_mpad}" -lt 4 ]; do sa_mpad="$sa_mpad "; done
     sa_cells "$sa_class" "$sa_start" "$sa_win" "$sa_tokc"
     sa_model_name "$sa_model"
-    vis_width "$_mname"; [ "$_w" -le "$sa_mwmax" ] || sa_mwmax=$_w
-    sa_i=${#sa_ids[@]}
-    sa_ids[sa_i]=$sa_id; sa_mk[sa_i]="${sa_mcol}${sa_mpad}${RS}"
-    sa_el[sa_i]=$_el; sa_cx[sa_i]=$_cx; sa_tk[sa_i]=$_tk
-    sa_mn[sa_i]=$_mname; sa_mw[sa_i]=$_w
-    sa_de[sa_i]="${WH}${sa_desc}${RS}"
-    sa_lb[sa_i]=""; [ -z "$sa_label" ] || sa_lb[sa_i]="${DM}${sa_label}${RS}"
+    sa_window "$sa_win"
+    sa_lbc=""; [ -z "$sa_label" ] || sa_lbc="${DM}${sa_label}${RS}"
+    sa_render "${sa_mcol}${sa_mpad}${RS}" "$_el" "${WH}${sa_desc}${RS}" "$_cx" "$_tk" "${MD}${_mname}${RS}${_win}" \
+              "$sa_lbc" "$sa_cols"
+    sa_out[${#sa_out[@]}]=$sa_id
+    sa_out[${#sa_out[@]}]=$_content
 done
 exec 4<&-
-
-sa_out=()
-sa_i=0
-while [ "$sa_i" -lt "${#sa_ids[@]}" ]; do
-    sa_mcell=${sa_mn[sa_i]}; sa_k=${sa_mw[sa_i]}
-    while [ "$sa_k" -lt "$sa_mwmax" ]; do sa_mcell="$sa_mcell "; sa_k=$(( sa_k + 1 )); done
-    sa_render "${sa_mk[sa_i]}" "${sa_el[sa_i]}" "${sa_cx[sa_i]}" "${sa_tk[sa_i]}" "${MD}${sa_mcell}${RS}" \
-              "${sa_de[sa_i]}" "${sa_lb[sa_i]}" "$sa_cols"
-    sa_out[${#sa_out[@]}]=${sa_ids[sa_i]}
-    sa_out[${#sa_out[@]}]=$_content
-    sa_i=$(( sa_i + 1 ))
-done
 
 # One jq out. The records are built by jq from positional arguments, never by hand-concatenating JSON: the
 # content holds ANSI escapes and arbitrary printable text, and escaping that is jq's job, not a printf's.
