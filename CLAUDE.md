@@ -56,9 +56,10 @@ statusline publishes this pane's directory to `~/.claude/sl-cwd/<claude pid>`, a
 opens it through `scripts/open-pane-dir.sh`. See "Clickable path" below.
 A second entry point, `subagent-status-line.sh` (setting `subagentStatusLine`), draws Claude Code's subagent rows and
 hands this session's per-class counts to the session line through `~/.claude/sl-subagents/<session_id>`. While that state
-is fresh the session line command prints **one summary line** (`sub 7 │ FAIL 1 │ PAUS 1 │ RUN 3 │ IDLE 1 │ PEND 1`) above
-the session line (`SUB_LINE_POS=above`); with no subagents its output is exactly the single line. See "Subagent rows and
-the summary line" below.
+is fresh the session line command prints **one summary line** (`7 agents · 1 failed · 1 paused · 3 running · 1 idle · 1 pending`)
+below the session line (`SUB_LINE_POS=below`); with no subagents its output is exactly the single line. Each subagent row
+reads `RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup`. See
+"Subagent rows and the summary line" below.
 
 ## Commands
 
@@ -143,7 +144,7 @@ read_theme / read_width             # jobs already done → zero wait
 reconcile_read                      # reap the reconcile FD: adopt the freshest used% any session saw + the burn-projection time-to-exhaust
 read_tokens                         # read this session's cached token totals (tiny file; heavy sum runs only in the bg job)
 read_quota_field / read_sub_state   # alternate-billing quota; this session's subagent counts (builtins only, zero forks)
-load_palette → build_left → build_right → build_sub_line → [summary line] → render_line
+load_palette → build_left → build_right → build_sub_line → render_line → [summary line]
 ```
 
 - **`lib/collect.sh`** — all input collection. Parses the stdin JSON in a single `jq`
@@ -492,10 +493,14 @@ both-fields-unusable fallbacks down the three-level chain.
 `{"id","content"}` out, one record per task row it takes over. It sources `lib/render.sh` (palette, `vis_width`,
 `trunc_head`, `fmt_tok`, `fmt_elapsed`) but never `lib/collect.sh`. Its header comment is the full reference; in short:
 
-- **Row**: seven cells `marker │ elapsed │ ctx% │ tokens │ model │ description │ label`, e.g.
-  `RUN  │   12m │ 13% │ 128K │ Opus 5 │ Fold 682173 into 681727 │ Confirming mirror refs unchanged after cleanup`.
-  A missing value prints `-`; a `PEND` row prints `0%` and `0` in grey. Narrowing order when a row exceeds `columns`:
-  label truncated, label dropped, tokens, model, elapsed, description truncated; marker and ctx% are never dropped.
+- **Row**: `<marker> [<elapsed>] <description> │ <ctx%> · <tokens> · <model>(<window>) │ <label>`, e.g.
+  `RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup`. Only the
+  marker (left, 4 columns) and the elapsed value (right, 5 columns inside `SP` brackets) are padded; nothing else is, so
+  descriptions start at one column and the `│` after them need not line up. The window marker follows the model name:
+  `(1M)` in `MD` for a window of 1,000,000 or more, `(200K)` with its brackets in `YL` for a smaller one, none without a
+  usable window. `│`, `·` and the brackets are `SP`. A missing value prints `-`; a `PEND` row prints `0%` and `0` in grey.
+  Narrowing order when a row exceeds `columns`: label truncated, label dropped (with its `│`), tokens, model, elapsed
+  (with its brackets), description truncated; marker and ctx% are never dropped (`IDLE │ 6%` at the narrowest).
 - **Classification**, one jq pass, shared by the marker and the counts: `running` is `IDLE` when the last
   `SA_IDLE_SAMPLES` (16) `tokenSamples` are all numbers and none of their 15 adjacent pairs increases, otherwise `RUN`;
   `pending` `PEND`, `paused` `PAUS`, `failed` `FAIL`, `killed` `KILL`, `completed` `DONE`; anything else is unclassified
@@ -508,12 +513,15 @@ both-fields-unusable fallbacks down the three-level chain.
 The session line reads that file in `read_sub_state` (lib/collect.sh) with builtins only: UUID gate (`sid_persistable`),
 link and shape refusals, `V1` plus eight fields of 1 to 10 digits with single spaces and **no leading zero** (bash
 arithmetic would read `08` as invalid octal and `010` as 8), stale when older than `SUB_STALE=20` s, refused when dated
-more than `SUB_FUTURE=5` s ahead, absent when the total is 0. `build_sub_line` (lib/render.sh) renders `sub <total>` in
-`WH` plus each non-zero class in its marker colour, separators in `SP`, ending in `ESC[0m` (Claude Code carries an
-unterminated line's colour into the next line), and narrows against the drawable width: full, then `sub N` + the
-non-zero FAIL/KILL/PAUS, then `sub N`, then nothing; width unknown → full. The entry point prints it before
-`render_line` when `SUB_LINE_POS=above` (shipped; `below` prints it after; not a user knob; the tests read the
-constant, so only `SUB1`'s pin changes). The session line itself is untouched: same 14 steps, same bytes. Cost: zero
+more than `SUB_FUTURE=5` s ahead, absent when the total is 0. `build_sub_line` (lib/render.sh) renders `N agents`
+(`1 agent` for one) in `WH`, then `<count> <word>` for each non-zero class in the order `failed killed paused running idle
+pending done`, each entry in its marker colour, joined by ` · ` in `SP`. It starts with `ESC[0m` and ends with one: Claude
+Code carries a line's colour into the next line, so the leading reset keeps the session line's colour out of the summary
+line without touching the session line's bytes. It narrows against the drawable width: full, then `N agents` + the
+non-zero failed/killed/paused, then `N agents`, then nothing; width unknown → full. The entry point prints it after
+`render_line`, on the line below the session line, because `SUB_LINE_POS=below` (shipped; `above` prints it first; not a
+user knob; the tests read the constant, and `SUB1`, `SUB4`, `SUB5` and `T4(e)` pin the line positions). The session
+line itself is untouched: same 14 steps, same bytes. Cost: zero
 added processes on the session line (about 0.26 ms in-process with a fresh file); one `mv` per subagent-command run.
 
 **Timing** (the summary line is only as fresh as the session line's redraw): current while the main conversation is

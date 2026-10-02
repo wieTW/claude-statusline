@@ -194,36 +194,38 @@ If nothing opens, check `ls ~/.claude/sl-cwd/` — it should hold one file per o
 ### Subagent rows
 
 ```
-sub 7 │ FAIL 1 │ PAUS 1 │ RUN 3 │ IDLE 1 │ PEND 1
 claude-statusline │ Opus 4.8 │              42%                             main │ auth-refactor
+7 agents · 1 failed · 1 paused · 3 running · 1 idle · 1 pending
 ```
 
 ```
-RUN  │   12m │ 13% │ 128K │ Opus 5    │ Fold 682173 into 681727 │ Confirming mirror refs unchanged after cleanup
-IDLE │ 1H15m │ 85% │ 170K │ Sonnet 5  │ Remove library-divergence-watch │ Reading threshold-watch.sh
-FAIL │   45s │  5% │   9K │ Haiku 4.5 │ Codex: review relay guard design
-RUN  │    5m │  6% │  62K │ Opus 5    │ Port T21 sightings to the new cache │ Running tests/run-tests.sh
-PAUS │   30m │  3% │  31K │ Sonnet 5  │ Draft the README section │ Waiting for review
-RUN  │    1m │  1% │  12K │ Sonnet 5  │ Measure frame cost │ Timing 41 frames
-PEND │     - │  0% │    0 │ Haiku 4.5 │ Sweep stale state files
+RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup
+IDLE [1H15m] Remove library-divergence-watch │ 85% · 170K · Sonnet 5(200K) │ Reading threshold-watch.sh
+FAIL [  45s] Codex: review relay guard design │ 5% · 9K · Haiku 4.5(200K)
+RUN  [   5m] Port T21 sightings to the new cache │ 6% · 62K · Opus 5(1M) │ Running tests/run-tests.sh
+PAUS [  30m] Draft the README section │ 3% · 31K · Sonnet 5(1M) │ Waiting for review
+RUN  [   1m] Measure frame cost │ 1% · 12K · Sonnet 5(1M) │ Timing 41 frames
+PEND [    -] Sweep stale state files │ 0% · 0 · Haiku 4.5(200K)
 ```
 
 Claude Code lists the subagents it is currently running, one row each, and by default a row shows only the
 current activity. Run several at once and you cannot tell which one is stuck, which one is on the expensive model,
 or which one is about to fill its context window. `subagent-status-line.sh` takes those rows over (the second
-block above), and while any subagent exists the main line gains a **summary line** directly above it (the first
+block above), and while any subagent exists the main line gains a **summary line** directly below it (the first
 block). Both blocks are real output of one seven-task payload, rendered through `scripts/sandbox-run.sh`.
 
-**The row** has seven cells: status, elapsed time, context %, tokens, model, task description, current activity.
+**The row** reads: status, elapsed time in brackets, task description, then the numbers (context %, tokens, model)
+joined by `·`, then the current activity. Only the status and the elapsed time are aligned, so every description
+starts at the same column; nothing after it is padded.
 
 | Cell | Example | Meaning |
 | --- | --- | --- |
 | **Status** | `RUN ` `IDLE` | `RUN`/`DONE` green, `IDLE`/`PEND` grey, `PAUS` orange, `FAIL`/`KILL` red. `IDLE` is a running agent whose token count has not grown across the last 16 samples Claude Code keeps (one per 5 s tick, so about 75–80 s); fewer samples is not enough evidence and stays `RUN` |
-| **Elapsed** | `45s` `12m` `1H15m` | Since the task started; seconds under a minute. It keeps counting on a finished row, because the payload has no end time |
+| **Elapsed** | `[  45s]` `[  12m]` `[1H15m]` | Since the task started; seconds under a minute. It keeps counting on a finished row, because the payload has no end time |
+| **Description**, **activity** | | The activity is dropped when it only repeats the description, as it does while an agent is starting |
 | **Context %** | `13%` | Tokens over the subagent's own context window; red above 80%, above 92% on a 1M window |
 | **Tokens** | `128K` `0` | The subagent's token count, uppercase `K`/`M` |
-| **Model** | `Opus 5` | Derived from the model id by rule, never by a lookup table, so an unknown model shows its real id; padded to the widest name |
-| **Description**, **activity** | | The activity is dropped when it only repeats the description, as it does while an agent is starting |
+| **Model** | `Opus 5(1M)` `Sonnet 5(200K)` | Derived from the model id by rule, never by a lookup table, so an unknown model shows its real id. The context window follows it: `(1M)` in the model's colour, a smaller window such as `(200K)` in yellow, nothing when the payload has no window |
 
 A value the payload does not supply in usable form prints `-`; a `PEND` row prints `0%` and `0` and is drawn grey.
 A task whose status is missing or unknown gets no row from this script, so Claude Code keeps its own default row
@@ -231,12 +233,12 @@ for it, and so does a task without a model or any text. Nothing is ever guessed.
 gives up, in this order and only as much as it must: the activity is shortened, then dropped, then the tokens, the
 model and the elapsed time, then the description is shortened; status and context % are never dropped.
 
-**The summary line** counts every subagent task the script can classify, in the order `FAIL KILL PAUS RUN IDLE
-PEND DONE`, leaving out classes with a count of zero. That includes rows Claude Code folds into `↓ N more` after its
-first five, finished agents Claude Code keeps listed for 30 s, and nested subagents, so `sub N` can be larger than
-the number of rows on screen. On a narrow terminal it shrinks to `sub 7 │ FAIL 1 │ PAUS 1`, then `sub 7`, then
-disappears; it never takes a column from the session line below it. With no subagents there is no summary line at
-all, and the session line is exactly what it was.
+**The summary line** counts every subagent task the script can classify: `N agents`, then each class with its count
+in the order failed, killed, paused, running, idle, pending, done, leaving out classes with a count of zero. That
+includes rows Claude Code folds into `↓ N more` after its first five, finished agents Claude Code keeps listed for
+30 s, and nested subagents, so `N agents` can be larger than the number of rows on screen. On a narrow terminal it
+shrinks to `7 agents · 1 failed · 1 paused`, then `7 agents`, then disappears; it never takes a column from the
+session line above it. With no subagents there is no summary line at all, and the session line is exactly what it was.
 
 The two scripts never talk directly. Every time Claude Code runs the subagent command (every 5 s while a subagent
 exists) it writes this session's counts to `~/.claude/sl-subagents/<session_id>`, and every session-line redraw
