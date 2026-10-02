@@ -4,13 +4,15 @@
 #
 # READS : stdin (statusline JSON), $HOME/.claude.json, $HOME/.claude/settings.json, transcript,
 #         $HOME/.claude/sessions/<claude pid>.json (Claude Code's own per-session registry record — untrusted input),
-#         the claude process's argument list (`ps -o args=` of $PPID, effort-mode fallback only)
+#         the claude process's argument list (`ps -o args=` of $PPID, effort-mode fallback only),
+#         $HOME/.claude/sl-subagents/<session_id> (subagent counts written by subagent-status-line.sh, untrusted input)
 # WRITES: cwd project_dir model session_name used_pct worktree_name effort thinking
 #         five_h seven_d five_reset seven_reset session_id transcript_path exceeds_200k dur_ms api_ms now act_epoch
 #         git_branch git_dirty git_ins git_del effort_mode _theme term_cols
 #         ctx_in_tok ctx_cc_tok ctx_cr_tok ctx_out_tok ctx_win_size
 #         session_tokens subagent_tokens burn_tte
 #         quota_label quota_pct quota_sev quota_at peer_ref
+#         sub_fail sub_kill sub_paus sub_run sub_idle sub_pend sub_done
 #
 # Sync model: background jobs run via process substitution opening an FD; a read blocks until that job hits EOF, which is the
 # sync point — no wait / temp file needed. Jobs are independent and run in parallel, so wall-clock = the slowest one, not the sum.
@@ -885,4 +887,56 @@ peer_ref_update() {   # $1=claude pid $2=now (Unix seconds, for the age prune) �
         [ "$mt" -lt "$cut" ] && rm -f "$f" 2>/dev/null
     done
     return 0                                             # the walk's last comparison is not this function's answer
+}
+
+
+# ── Subagent summary state (subagent-summary-line) ─────────────────────────────────────────────────────────────────────────
+# Only subagent-status-line.sh sees the subagent task list, and only this command can print the summary line, so the counts
+# cross over through one file per session: ~/.claude/sl-subagents/<session_id>, one line
+# "V1 <written_epoch_s> <FAIL> <KILL> <PAUS> <RUN> <IDLE> <PEND> <DONE>", rewritten by that command on every 5 s tick.
+# The file is untrusted input and, like the registry record, it is made safe by construction rather than by filtering: it
+# is accepted only as "V1" plus eight canonical decimal fields (1 to 10 digits, single spaces, no leading zero), and the
+# only text derived from it that reaches the line is counts build_sub_line formats itself. The leading-zero refusal is
+# what keeps shell arithmetic base ten without a 10# prefix: "08" would be an invalid octal number (an error on stderr)
+# and "010" would read as 8. The writer only produces canonical numbers, so no legitimate file is refused.
+# Everything else (no file, stale, future-dated, malformed, a link, the wrong kind of object, a non-UUID session id) is
+# ABSENT: no summary line, nothing on stderr, and the session line byte-identical to a frame without the capability.
+SUB_DIR="$HOME/.claude/sl-subagents"
+# Staleness bounds, against this frame's own clock ($now from parse_input). Check SUB_STALE after a Claude Code upgrade:
+SUB_STALE=20   # it rests on the subagent command's tick (2.1.287: every 5 s, single-flight, 5000 ms timeout), one write per
+               # run, so a live session's entry is at most one tick old. A write can be missed: a run killed at the 5000 ms
+               # timeout writes nothing, the tick that falls while it runs is skipped, and one more run can be slow. So the
+               # bound is one tick plus three ticks of margin: 5 s + 3 x 5 s = 20 s. A 12 s bound left under two ticks of
+               # margin and could blank a live session's line after a single timed-out run.
+SUB_FUTURE=5   # an entry dated more than this far ahead of $now is not a write this session made; 5 s tolerates a clock step
+               # between two processes on one machine.
+
+# Builtins only (two directory tests, two entry tests, one bounded read, case globs, arithmetic): zero forks per frame,
+# with or without a file. Sets all seven counts, or leaves all seven empty when the state is absent or its total is 0.
+read_sub_state() {
+    sub_fail=""; sub_kill=""; sub_paus=""; sub_run=""; sub_idle=""; sub_pend=""; sub_done=""
+    sid_persistable "$session_id" || return 0                # the writer's UUID gate, so a synthetic id names no file
+    case "$now" in ''|*[!0-9]*) return 0 ;; esac
+    local e="$SUB_DIR/$session_id" l r x IFS=' '
+    # Exactly what the writer creates: a real directory holding a regular file. A link or the wrong kind of object is not
+    # ours to follow or to repair; it is simply absent.
+    [ ! -L "$SUB_DIR" ] && [ -d "$SUB_DIR" ] || return 0
+    [ ! -L "$e" ] && [ -f "$e" ] || return 0
+    IFS= read -r -n 100 l < "$e" 2>/dev/null                 # bounded: the longest valid line is 90 bytes, so a longer
+    case "$l" in 'V1 '*) ;; *) return 0 ;; esac             #   line can only fail the shape tests below
+    r=${l#V1 }
+    case "$r" in ''|*[!0-9\ ]*) return 0 ;; esac            # digits and spaces only: no glob character survives to the split
+    # shellcheck disable=SC2086  # split on purpose, safe: r holds digits and spaces only
+    set -- $r
+    [ "$#" -eq 8 ] && [ "$*" = "$r" ] || return 0            # eight fields, joined back by single spaces = no doubled,
+    for x; do                                                #   leading or trailing space in the file
+        case "$x" in
+            0) ;;
+            [1-9]*) [ "${#x}" -le 10 ] || return 0 ;;
+            *) return 0 ;;                                   # a leading zero: 08, 010, 00
+        esac
+    done
+    [ $(( now - $1 )) -le "$SUB_STALE" ] && [ "$1" -le $(( now + SUB_FUTURE )) ] || return 0
+    [ $(( $2 + $3 + $4 + $5 + $6 + $7 + $8 )) -gt 0 ] || return 0
+    sub_fail=$2; sub_kill=$3; sub_paus=$4; sub_run=$5; sub_idle=$6; sub_pend=$7; sub_done=$8
 }

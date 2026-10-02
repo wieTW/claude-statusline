@@ -3,7 +3,8 @@
 # render.sh — render output: palette + single-line assembly (left = path/resources/time, right = git/session, right-aligned)
 #
 # READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD JGAP BURN_SENS LASTMSG_WARN LASTMSG_STALE) + every global written by collect.sh
-# WRITES: stdout (single colored status line). The palette (WH MD GR…TRK) must be global so it's reachable across functions;
+# WRITES: stdout (single colored status line) and _subline (the subagent summary line, printed by the entry point; "" = none).
+#         The palette (WH MD GR…TRK) must be global so it's reachable across functions;
 #         the assembly working variables (parts parts2 _pct _ttl _dur _tok _rate_full _rate_compact _line _rmin bar display_dir git_seg…)
 #         and the per-segment handles built by build_left/build_right for degrade_layout (seg_path seg_model_full/compact seg_effort
 #         seg_thinking seg_ctx_full/compact seg_tok seg_5h_full/compact seg_7d seg_lastmsg seg_git_full/nodiff seg_worktree seg_session)
@@ -156,6 +157,13 @@ fmt_dur_s() {   # $1=seconds (non-negative integer) → _dur="45s"/"3m45s"/"1H15
     if [ "$s" -lt 60 ]; then _dur="${s}s"
     elif [ "$s" -lt 3600 ]; then _dur="$(( s / 60 ))m$(( s % 60 ))s"
     else fmt_dur "$s"; fi
+}
+
+# Elapsed time of a subagent task (subagent-status-line.sh's elapsed cell): under a minute in whole seconds ("45s", "0s"),
+# from 60 s on fmt_dur's minute-grained forms ("12m", "1H15m", "1D3H"). Separate from fmt_dur_s, whose sub-hour form
+# carries seconds ("3m45s"), and leaves both existing formatters untouched. Writes _dur.
+fmt_elapsed() {   # $1=seconds (non-negative integer) → _dur="45s"/"12m"/"1H15m"
+    if [ "$1" -lt 60 ]; then _dur="${1}s"; else fmt_dur "$1"; fi
 }
 
 # Usability gate for the two cost.*_ms fields, mirroring ctx_aligned_pct's: jq's tostring erases the JSON type, so a
@@ -819,4 +827,34 @@ render_line() {
     else
         printf '%s\n' "${left}${right}"
     fi
+}
+
+# Subagent summary line (subagent-summary-line): "sub <total>" then every non-zero class in the settled order FAIL KILL PAUS RUN
+# IDLE PEND DONE, each in its status marker's colour (the same roles subagent-status-line.sh gives the row markers), joined by
+# the session line's own separator. It ends in a reset, because Claude Code carries an unterminated line's SGR state into the
+# next line. It is a separate physical row with its own width budget, the session line's drawable width: it never takes a
+# column from the session line and is not one of the 14 sacrifice steps. Tiers, first that fits: the full form; the total
+# plus the non-zero FAIL / KILL / PAUS; the total alone; nothing. Width unavailable → the full form, unbounded, the same
+# fallback the session line takes. Only digits read_sub_state accepted reach this text.
+build_sub_line() {   # reads sub_* (read_sub_state) + term_cols EDGE_PAD RIGHT_ALIGN + palette → _subline ("" = print nothing)
+    _subline=""
+    [ -n "$sub_fail" ] || return 0
+    local s="${SP} │ ${RS}" n head ph crit="" pc="" rest="" pr="" avail
+    n=$(( sub_fail + sub_kill + sub_paus + sub_run + sub_idle + sub_pend + sub_done ))
+    head="${WH}sub ${n}${RS}"; ph="sub $n"
+    # Each form is kept twice: coloured for output, plain for measuring. vis_width counts the same cells either way, but on
+    # the plain text it has no SGR codes to walk, which keeps this function under its share of the frame budget.
+    [ "$sub_fail" -eq 0 ] || { crit+="${s}${RD}FAIL ${sub_fail}${RS}"; pc+=" │ FAIL $sub_fail"; }
+    [ "$sub_kill" -eq 0 ] || { crit+="${s}${RD}KILL ${sub_kill}${RS}"; pc+=" │ KILL $sub_kill"; }
+    [ "$sub_paus" -eq 0 ] || { crit+="${s}${OG}PAUS ${sub_paus}${RS}"; pc+=" │ PAUS $sub_paus"; }
+    [ "$sub_run"  -eq 0 ] || { rest+="${s}${GR}RUN ${sub_run}${RS}";   pr+=" │ RUN $sub_run"; }
+    [ "$sub_idle" -eq 0 ] || { rest+="${s}${DM}IDLE ${sub_idle}${RS}"; pr+=" │ IDLE $sub_idle"; }
+    [ "$sub_pend" -eq 0 ] || { rest+="${s}${DM}PEND ${sub_pend}${RS}"; pr+=" │ PEND $sub_pend"; }
+    [ "$sub_done" -eq 0 ] || { rest+="${s}${GR}DONE ${sub_done}${RS}"; pr+=" │ DONE $sub_done"; }
+    if ! $RIGHT_ALIGN || ! [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then _subline="$head$crit$rest"; return 0; fi
+    avail=$(( term_cols - EDGE_PAD ))
+    vis_width "$ph$pc$pr"; if [ "$_w" -le "$avail" ]; then _subline="$head$crit$rest"; return 0; fi
+    vis_width "$ph$pc";    if [ "$_w" -le "$avail" ]; then _subline="$head$crit"; return 0; fi
+    vis_width "$ph";       if [ "$_w" -le "$avail" ]; then _subline=$head; fi
+    return 0
 }
