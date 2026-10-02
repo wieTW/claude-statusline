@@ -3120,7 +3120,10 @@ sub5bad=0
 SUB5SID=$(printf '%s' "$SAREAL1" | jq -r .session_id)
 SUB5J=$(subjson "$SUB5SID")
 sub5shift() {  # $1=seconds → move the entry's written epoch that far into the past
-  local v ep rest; IFS=' ' read -r v ep rest < "$SUBDIR/$SUB5SID"
+  local v="" ep="" rest=""
+  [ -f "$SUBDIR/$SUB5SID" ] || return 0     # no entry written: the frame's own assertion reports it (set -u would abort here)
+  IFS=' ' read -r v ep rest < "$SUBDIR/$SUB5SID"
+  case "$ep" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s %s %s\n' "$v" "$(( ep - $1 ))" "$rest" > "$SUBDIR/$SUB5SID"
 }
 subclear; sarun "$SAREAL1" >/dev/null
@@ -3172,6 +3175,7 @@ sub6frame "$WORK/sub6.b"
 sub6r=$(sub6diff "$WORK/sub6.a" "$WORK/sub6.b")
 [ "$sub6r" = same ] || { echo "  ★ FAIL SUB6 a fresh state file changes the session line's external commands: $sub6r"; sub6bad=1; }
 SUB6SA=$(printf '%s' "$SAREAL1" | jq -c '.session_id="'"$SUBSID"'"')
+rm -f "$SUB6H/.claude/sl-subagents/$SUBSID"   # the entry frame b was seeded with; the subagent command must write its own
 sub6sa "$WORK/sub6.sa0" "$SUB6SA"        # first write of the run: creates the entry
 [ -f "$SUB6H/.claude/sl-subagents/$SUBSID" ] || { echo "  ★ FAIL SUB6 the subagent command wrote no state entry"; sub6bad=1; }
 sub6sa "$WORK/sub6.sau" "$SUB6SA"        # steady state: the entry is present
