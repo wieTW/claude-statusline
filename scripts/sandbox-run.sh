@@ -58,7 +58,7 @@ Examples:
   # Render a BURN_SENS variant copy of the script:
   printf '%s' "\$JSON" | $SELF --script /tmp/variant/statusline-command.sh --columns 200
 
-  # Render the summary line above the session line (SID = the frame's session_id, a UUID):
+  # Render the session line with the summary line below it (SID = the frame's session_id, a UUID):
   printf '1 0 1 3 1 1 0\n' > /tmp/sub.counts
   printf '%s' "\$JSON" | $SELF --subagents "\$SID=/tmp/sub.counts" --columns 140
 
