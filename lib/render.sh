@@ -839,21 +839,22 @@ render_line() {
 build_sub_line() {   # reads sub_* (read_sub_state) + term_cols EDGE_PAD RIGHT_ALIGN + palette → _subline ("" = print nothing)
     _subline=""
     [ -n "$sub_fail" ] || return 0
-    local s="${SP} │ ${RS}" head crit="" rest="" full c avail
-    head="${WH}sub $(( sub_fail + sub_kill + sub_paus + sub_run + sub_idle + sub_pend + sub_done ))${RS}"
-    [ "$sub_fail" -eq 0 ] || crit+="${s}${RD}FAIL ${sub_fail}${RS}"
-    [ "$sub_kill" -eq 0 ] || crit+="${s}${RD}KILL ${sub_kill}${RS}"
-    [ "$sub_paus" -eq 0 ] || crit+="${s}${OG}PAUS ${sub_paus}${RS}"
-    [ "$sub_run"  -eq 0 ] || rest+="${s}${GR}RUN ${sub_run}${RS}"
-    [ "$sub_idle" -eq 0 ] || rest+="${s}${DM}IDLE ${sub_idle}${RS}"
-    [ "$sub_pend" -eq 0 ] || rest+="${s}${DM}PEND ${sub_pend}${RS}"
-    [ "$sub_done" -eq 0 ] || rest+="${s}${GR}DONE ${sub_done}${RS}"
-    full="$head$crit$rest"
-    if ! $RIGHT_ALIGN || ! [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then _subline=$full; return 0; fi
+    local s="${SP} │ ${RS}" n head ph crit="" pc="" rest="" pr="" avail
+    n=$(( sub_fail + sub_kill + sub_paus + sub_run + sub_idle + sub_pend + sub_done ))
+    head="${WH}sub ${n}${RS}"; ph="sub $n"
+    # Each form is kept twice: coloured for output, plain for measuring. vis_width counts the same cells either way, but on
+    # the plain text it has no SGR codes to walk, which keeps this function under its share of the frame budget.
+    [ "$sub_fail" -eq 0 ] || { crit+="${s}${RD}FAIL ${sub_fail}${RS}"; pc+=" │ FAIL $sub_fail"; }
+    [ "$sub_kill" -eq 0 ] || { crit+="${s}${RD}KILL ${sub_kill}${RS}"; pc+=" │ KILL $sub_kill"; }
+    [ "$sub_paus" -eq 0 ] || { crit+="${s}${OG}PAUS ${sub_paus}${RS}"; pc+=" │ PAUS $sub_paus"; }
+    [ "$sub_run"  -eq 0 ] || { rest+="${s}${GR}RUN ${sub_run}${RS}";   pr+=" │ RUN $sub_run"; }
+    [ "$sub_idle" -eq 0 ] || { rest+="${s}${DM}IDLE ${sub_idle}${RS}"; pr+=" │ IDLE $sub_idle"; }
+    [ "$sub_pend" -eq 0 ] || { rest+="${s}${DM}PEND ${sub_pend}${RS}"; pr+=" │ PEND $sub_pend"; }
+    [ "$sub_done" -eq 0 ] || { rest+="${s}${GR}DONE ${sub_done}${RS}"; pr+=" │ DONE $sub_done"; }
+    if ! $RIGHT_ALIGN || ! [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then _subline="$head$crit$rest"; return 0; fi
     avail=$(( term_cols - EDGE_PAD ))
-    for c in "$full" "$head$crit" "$head"; do
-        vis_width "$c"
-        if [ "$_w" -le "$avail" ]; then _subline=$c; return 0; fi
-    done
+    vis_width "$ph$pc$pr"; if [ "$_w" -le "$avail" ]; then _subline="$head$crit$rest"; return 0; fi
+    vis_width "$ph$pc";    if [ "$_w" -le "$avail" ]; then _subline="$head$crit"; return 0; fi
+    vis_width "$ph";       if [ "$_w" -le "$avail" ]; then _subline=$head; fi
     return 0
 }
