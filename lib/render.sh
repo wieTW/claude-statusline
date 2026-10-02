@@ -3,7 +3,8 @@
 # render.sh — render output: palette + single-line assembly (left = path/resources/time, right = git/session, right-aligned)
 #
 # READS : config (CTX_BAR NORM_THINKING STYLE RIGHT_ALIGN EDGE_PAD JGAP BURN_SENS LASTMSG_WARN LASTMSG_STALE) + every global written by collect.sh
-# WRITES: stdout (single colored status line). The palette (WH MD GR…TRK) must be global so it's reachable across functions;
+# WRITES: stdout (single colored status line) and _subline (the subagent summary line, printed by the entry point; "" = none).
+#         The palette (WH MD GR…TRK) must be global so it's reachable across functions;
 #         the assembly working variables (parts parts2 _pct _ttl _dur _tok _rate_full _rate_compact _line _rmin bar display_dir git_seg…)
 #         and the per-segment handles built by build_left/build_right for degrade_layout (seg_path seg_model_full/compact seg_effort
 #         seg_thinking seg_ctx_full/compact seg_tok seg_5h_full/compact seg_7d seg_lastmsg seg_git_full/nodiff seg_worktree seg_session)
@@ -826,4 +827,33 @@ render_line() {
     else
         printf '%s\n' "${left}${right}"
     fi
+}
+
+# Subagent summary line (subagent-summary-line): "sub <total>" then every non-zero class in the settled order FAIL KILL PAUS RUN
+# IDLE PEND DONE, each in its status marker's colour (the same roles subagent-status-line.sh gives the row markers), joined by
+# the session line's own separator. It ends in a reset, because Claude Code carries an unterminated line's SGR state into the
+# next line. It is a separate physical row with its own width budget, the session line's drawable width: it never takes a
+# column from the session line and is not one of the 14 sacrifice steps. Tiers, first that fits: the full form; the total
+# plus the non-zero FAIL / KILL / PAUS; the total alone; nothing. Width unavailable → the full form, unbounded, the same
+# fallback the session line takes. Only digits read_sub_state accepted reach this text.
+build_sub_line() {   # reads sub_* (read_sub_state) + term_cols EDGE_PAD RIGHT_ALIGN + palette → _subline ("" = print nothing)
+    _subline=""
+    [ -n "$sub_fail" ] || return 0
+    local s="${SP} │ ${RS}" head crit="" rest="" full c avail
+    head="${WH}sub $(( sub_fail + sub_kill + sub_paus + sub_run + sub_idle + sub_pend + sub_done ))${RS}"
+    [ "$sub_fail" -eq 0 ] || crit+="${s}${RD}FAIL ${sub_fail}${RS}"
+    [ "$sub_kill" -eq 0 ] || crit+="${s}${RD}KILL ${sub_kill}${RS}"
+    [ "$sub_paus" -eq 0 ] || crit+="${s}${OG}PAUS ${sub_paus}${RS}"
+    [ "$sub_run"  -eq 0 ] || rest+="${s}${GR}RUN ${sub_run}${RS}"
+    [ "$sub_idle" -eq 0 ] || rest+="${s}${DM}IDLE ${sub_idle}${RS}"
+    [ "$sub_pend" -eq 0 ] || rest+="${s}${DM}PEND ${sub_pend}${RS}"
+    [ "$sub_done" -eq 0 ] || rest+="${s}${GR}DONE ${sub_done}${RS}"
+    full="$head$crit$rest"
+    if ! $RIGHT_ALIGN || ! [ "${term_cols:-0}" -gt 0 ] 2>/dev/null; then _subline=$full; return 0; fi
+    avail=$(( term_cols - EDGE_PAD ))
+    for c in "$full" "$head$crit" "$head"; do
+        vis_width "$c"
+        if [ "$_w" -le "$avail" ]; then _subline=$c; return 0; fi
+    done
+    return 0
 }
