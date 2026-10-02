@@ -3,7 +3,7 @@
 <p align="center"><b>Idle Claude Code sessions keep their last quota&nbsp;%. This line shares the freshest —
 and warns <code>↘21m</code> before you run dry.</b></p>
 
-<p align="center">One colored line for <a href="https://claude.ai/code">Claude Code</a> ·
+<p align="center">One colored line, plus a summary line while subagents run, for <a href="https://claude.ai/code">Claude Code</a> ·
 macOS · stock bash 3.2 · <code>jq</code> is the only dependency · ~26&nbsp;ms a frame</p>
 
 <p align="center">
@@ -193,32 +193,63 @@ If nothing opens, check `ls ~/.claude/sl-cwd/` — it should hold one file per o
 
 ### Subagent rows
 
+```
+sub 7 │ FAIL 1 │ PAUS 1 │ RUN 3 │ IDLE 1 │ PEND 1
+claude-statusline │ Opus 4.8 │              42%                             main │ auth-refactor
+```
+
+```
+RUN  │   12m │ 13% │ 128K │ Opus 5    │ Fold 682173 into 681727 │ Confirming mirror refs unchanged after cleanup
+IDLE │ 1H15m │ 85% │ 170K │ Sonnet 5  │ Remove library-divergence-watch │ Reading threshold-watch.sh
+FAIL │   45s │  5% │   9K │ Haiku 4.5 │ Codex: review relay guard design
+RUN  │    5m │  6% │  62K │ Opus 5    │ Port T21 sightings to the new cache │ Running tests/run-tests.sh
+PAUS │   30m │  3% │  31K │ Sonnet 5  │ Draft the README section │ Waiting for review
+RUN  │    1m │  1% │  12K │ Sonnet 5  │ Measure frame cost │ Timing 41 frames
+PEND │     - │  0% │    0 │ Haiku 4.5 │ Sweep stale state files
+```
+
 Claude Code lists the subagents it is currently running, one row each, and by default a row shows only the
-current activity. Run three at once and you cannot tell which one is on the expensive model, whose context
-window got cut to 200K, or which one is burning your quota. `subagent-status-line.sh` takes those rows over:
+current activity. Run several at once and you cannot tell which one is stuck, which one is on the expensive model,
+or which one is about to fill its context window. `subagent-status-line.sh` takes those rows over (the second
+block above), and while any subagent exists the main line gains a **summary line** directly above it (the first
+block). Both blocks are real output of one seven-task payload, rendered through `scripts/sandbox-run.sh`.
 
-```
-實作 subagent 狀態列 │ Opus 5(1M) │ 262k │ Updating sa3b expectation in run-tests.sh
-Remove library-divergence-watch │ Sonnet 5(200K) │ 43k │ Reading threshold-watch.sh
-Codex: review relay guard design │ Sonnet 5(1M)
-no window size reported │ Haiku 4.5 │ 1.2M │ bracket omitted, 7-digit tokens
-```
+**The row** has seven cells: status, elapsed time, context %, tokens, model, task description, current activity.
 
-Task description, the model with its context window, the tokens it has burned, then what it is doing.
+| Cell | Example | Meaning |
+| --- | --- | --- |
+| **Status** | `RUN ` `IDLE` | `RUN`/`DONE` green, `IDLE`/`PEND` grey, `PAUS` orange, `FAIL`/`KILL` red. `IDLE` is a running agent whose token count has not grown across the last 16 samples Claude Code keeps (one per 5 s tick, so about 75–80 s); fewer samples is not enough evidence and stays `RUN` |
+| **Elapsed** | `45s` `12m` `1H15m` | Since the task started; seconds under a minute. It keeps counting on a finished row, because the payload has no end time |
+| **Context %** | `13%` | Tokens over the subagent's own context window; red above 80%, above 92% on a 1M window |
+| **Tokens** | `128K` `0` | The subagent's token count, uppercase `K`/`M` |
+| **Model** | `Opus 5` | Derived from the model id by rule, never by a lookup table, so an unknown model shows its real id; padded to the widest name |
+| **Description**, **activity** | | The activity is dropped when it only repeats the description, as it does while an agent is starting |
 
-The window marker is the point of the second segment: `(1M)` sits in the model's own colour because that is
-normal, while anything smaller turns warning-yellow — a shrunken window is the thing you want to notice. Token
-usage is deliberately *not* yellow: yellow already means "window cut down" here, and the main status line uses
-it for its own subagent-token total, so a second yellow would make the actual warning unreadable.
+A value the payload does not supply in usable form prints `-`; a `PEND` row prints `0%` and `0` and is drawn grey.
+A task whose status is missing or unknown gets no row from this script, so Claude Code keeps its own default row
+for it, and so does a task without a model or any text. Nothing is ever guessed. When the terminal is narrow a row
+gives up, in this order and only as much as it must: the activity is shortened, then dropped, then the tokens, the
+model and the elapsed time, then the description is shortened; status and context % are never dropped.
 
-Nothing is ever guessed. No window reported means no bracket at all, no token count means no token segment, and
-the model display name is derived from the model id by rule, so a model this script has never heard of shows its
-real id rather than some older model's name. The third row above shows two of those omissions at once: Claude
-Code fills `label` with the description while an agent is starting, so a row that would print the same sentence
-twice prints it once, and a subagent that has burned nothing yet reports nothing rather than `0`.
+**The summary line** counts every subagent task the script can classify, in the order `FAIL KILL PAUS RUN IDLE
+PEND DONE`, leaving out classes with a count of zero. That includes rows Claude Code folds into `↓ N more` after its
+first five, finished agents Claude Code keeps listed for 30 s, and nested subagents, so `sub N` can be larger than
+the number of rows on screen. On a narrow terminal it shrinks to `sub 7 │ FAIL 1 │ PAUS 1`, then `sub 7`, then
+disappears; it never takes a column from the session line below it. With no subagents there is no summary line at
+all, and the session line is exactly what it was.
 
-It is a second entry point, wired up separately and **not** touched by `install.sh` — add it to
-`~/.claude/settings.json` yourself:
+The two scripts never talk directly. Every time Claude Code runs the subagent command (every 5 s while a subagent
+exists) it writes this session's counts to `~/.claude/sl-subagents/<session_id>`, and every session-line redraw
+reads that file. That decides how current the summary line is:
+
+- While the main conversation is active, it is current: every redraw reads a write at most one 5 s tick old.
+- While the main conversation is idle and only background subagents run, it can lag the rows by up to about 60 s,
+  the session line's own `refreshInterval`.
+- After the last subagent finishes, it disappears within about 110 s: up to 30 s while Claude Code still lists the
+  finished task, 20 s until the last write counts as stale, and up to 60 s until the next redraw.
+
+The subagent command is a second entry point, wired up separately and **not** touched by `install.sh` — add it to
+`~/.claude/settings.json` yourself (without it there are no custom rows and no summary line):
 
 ```json
 {
@@ -231,10 +262,8 @@ It is a second entry point, wired up separately and **not** touched by `install.
 
 That setting takes only those two fields; there is no refresh interval or padding to set. If a row is missing the
 information this line exists to show, the script simply says nothing about that row and Claude Code keeps its own
-default display for it — so the worst case is what you have today, never a wrong model name. When the terminal is
-narrow the activity label is shortened first and the description second; the model and token segments are never
-truncated, because they are what the row was added to carry. One thing it cannot show: the subagent's *agent
-type*. It is not in the payload Claude Code sends.
+default display for it — so the worst case is what you have today, never a wrong model name. One thing it cannot
+show: the subagent's *agent type*. It is not in the payload Claude Code sends.
 
 ---
 
@@ -257,10 +286,12 @@ the actual script, so if they look wrong, something *is* wrong.
 # sandbox-run.sh points HOME at a temp directory, so a bad frame can only corrupt that.
 printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M context)"},"context_window":{"used_percentage":42}}' "$PWD" \
   | scripts/sandbox-run.sh --columns 140
+# The subagent command writes ~/.claude/sl-subagents too: run it through the sandbox as well
+# (--script), and seed a summary line for a frame with --subagents SID=FILE (see --help).
 
 # Full check before committing
-bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh   # syntax
-shellcheck -x statusline-command.sh                                               # lint
+bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh && bash -n subagent-status-line.sh
+shellcheck -x statusline-command.sh && shellcheck -x subagent-status-line.sh       # lint
 bash tests/run-tests.sh                                                           # suite → "ALL CHECKS PASSED"
 ```
 

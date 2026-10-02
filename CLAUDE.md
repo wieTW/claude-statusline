@@ -54,13 +54,18 @@ The path segment is cmd+clickable **without changing what it displays** (`PATH_C
 CC re-renders the statusline through its own style model and drops OSC 8, so the line cannot carry one. Instead the
 statusline publishes this pane's directory to `~/.claude/sl-cwd/<claude pid>`, and an iTerm2 Smart Selection rule
 opens it through `scripts/open-pane-dir.sh`. See "Clickable path" below.
+A second entry point, `subagent-status-line.sh` (setting `subagentStatusLine`), draws Claude Code's subagent rows and
+hands this session's per-class counts to the session line through `~/.claude/sl-subagents/<session_id>`. While that state
+is fresh the session line command prints **one summary line** (`sub 7 │ FAIL 1 │ PAUS 1 │ RUN 3 │ IDLE 1 │ PEND 1`) above
+the session line (`SUB_LINE_POS=above`); with no subagents its output is exactly the single line. See "Subagent rows and
+the summary line" below.
 
 ## Commands
 
 ```bash
 # Full check (this is the verify.json gate — all three must exit 0)
-bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh   # syntax
-shellcheck -x statusline-command.sh                                               # lint (follows the . sources)
+bash -n statusline-command.sh && bash -n lib/collect.sh && bash -n lib/render.sh && bash -n subagent-status-line.sh   # syntax
+shellcheck -x statusline-command.sh && shellcheck -x subagent-status-line.sh     # lint (follows the . sources)
 bash tests/run-tests.sh                                                           # suite → prints "ALL CHECKS PASSED"
 
 # Render one frame by hand (the fastest dev loop) — ALWAYS through scripts/sandbox-run.sh, NEVER
@@ -68,7 +73,8 @@ bash tests/run-tests.sh                                                         
 printf '{"workspace":{"current_dir":"%s"},"model":{"display_name":"Opus 4.8 (1M context)"},"context_window":{"used_percentage":6.2}}' "$PWD" \
   | bash scripts/sandbox-run.sh --columns 140
 
-# Seed a cross-session rate-limit scenario and inspect what the frame persisted (throwaway HOME kept):
+# Seed a cross-session rate-limit scenario and inspect what the frame persisted (throwaway HOME kept),
+# seed a summary line (--subagents SID=FILE), or run subagent-status-line.sh by hand (--script):
 bash scripts/sandbox-run.sh --help
 
 # Regenerate the README screenshot SVGs (hero/alerts/degrade/themes): fixture JSON piped
@@ -83,7 +89,9 @@ bash assets/generate.sh
 `DUR` = session-duration primary, `API` = API-thinking-time primary + `fmt_dur_s` + 3-level fallback,
 `V` = parse_input positional sentinel, `W`/`X`/`X2` = token display/dedup/prune,
 `CTX` = budget-aware context meter + 200k cliff, `Y` = burn projection, `CLK` = path-click publish + opener,
-`EFF` = effort mode (`ultra` detection), `Z`/`Z1`–`Z5` = adaptive-layout 14-step degrade. A failure prints `★ FAIL` and the script exits 1. There is **no
+`EFF` = effort mode (`ultra` detection), `Z`/`Z1`–`Z5` = adaptive-layout 14-step degrade,
+`SA1`–`SA9` = subagent rows + the state file, `SUB1`–`SUB6` = summary line (content, absence, tiers, session line
+unchanged, end to end, cost), `SET` = no settings file ever written. A failure prints `★ FAIL` and the script exits 1. There is **no
 per-test flag**; to isolate a case, read its labeled output or temporarily edit the
 script. The harness is self-locating (`SL=$(cd "$(dirname "$0")/.." …)`) and uses a
 fresh `mktemp` work dir + fake `$HOME`, so it survives directory renames and tmp clears.
@@ -93,10 +101,12 @@ review-loop convention) — the three commands above are the standard gate.
 
 ## Never render the statusline against the real `$HOME`
 
-**Rule: never run `statusline-command.sh` (or anything that sources `lib/collect.sh`) with the real `$HOME`.
-Always go through `scripts/sandbox-run.sh`, which builds a throwaway HOME and refuses to run if that HOME
-would land inside a real user home.** `tests/run-tests.sh` is already isolated — every invocation carries a
-`HOME="$FAKE_HOME"` override, and section `T4` fails the suite if any invocation loses it.
+**Rule: never run `statusline-command.sh`, `subagent-status-line.sh` (or anything that sources `lib/collect.sh`) with
+the real `$HOME`. Always go through `scripts/sandbox-run.sh` (`--script subagent-status-line.sh` for the subagent
+command), which builds a throwaway HOME and refuses to run if that HOME would land inside a real user home.**
+`tests/run-tests.sh` is already isolated — every invocation of either command carries a `HOME="$FAKE_HOME"` override,
+and section `T4` fails the suite if any invocation loses it. The subagent command writes
+`~/.claude/sl-subagents/<session_id>`, which every frame of that session turns into its summary line.
 
 **Why.** The rate-limit segment is shared across sessions through `~/.claude/sl-ratelimit-cache`, and the
 authority rule there is *freshest observation wins*. One frame rendered by hand is therefore not a read-only
@@ -109,8 +119,13 @@ against the real `$HOME` did exactly that — the 7d segment went from "84% left
 persist any `session_id` that is not a real Claude Code UUID (8-4-4-4-12 lowercase hex), so a synthetic id
 takes the read-only path and cannot seize the authority (section `T3` reproduces the incident and asserts it).
 That is the **last** line of defence, not permission to skip the sandbox: a hand-run frame carrying a *real*
-session id still writes, and the gate says nothing about the token cache, `~/.claude/sl-cwd`, or whatever
-shared state a future change adds.
+session id still writes, and the gate says nothing about the token cache, `~/.claude/sl-cwd`, `~/.claude/sl-subagents`,
+or whatever shared state a future change adds.
+
+**Changes to either script, or to `lib/`, are made in a git worktree.** The user's `statusLine` and
+`subagentStatusLine` settings run the scripts straight from this checkout, so an edit here is live in every open
+session on its next redraw or tick. Develop on a feature branch in a worktree (under `.claude/worktrees/`), run the
+suite there, and merge only when the user approves.
 
 ## Architecture
 
@@ -127,7 +142,8 @@ collect_status                      # git×3 + effort scan, concurrent, blocks o
 read_theme / read_width             # jobs already done → zero wait
 reconcile_read                      # reap the reconcile FD: adopt the freshest used% any session saw + the burn-projection time-to-exhaust
 read_tokens                         # read this session's cached token totals (tiny file; heavy sum runs only in the bg job)
-load_palette → build_left → build_right → render_line
+read_quota_field / read_sub_state   # alternate-billing quota; this session's subagent counts (builtins only, zero forks)
+load_palette → build_left → build_right → build_sub_line → [summary line] → render_line
 ```
 
 - **`lib/collect.sh`** — all input collection. Parses the stdin JSON in a single `jq`
@@ -470,10 +486,55 @@ no-last-msg case, and the no-`cost` fallback; section `API` covers the API-think
 (overriding both duration and clock), the `fmt_dur_s` boundary table, and the invalid-value +
 both-fields-unusable fallbacks down the three-level chain.
 
+### Subagent rows and the summary line (`subagent-status-line.sh` → `read_sub_state` / `build_sub_line`)
+
+`subagent-status-line.sh` is Claude Code's `subagentStatusLine` command: one subagent payload on stdin, JSON Lines
+`{"id","content"}` out, one record per task row it takes over. It sources `lib/render.sh` (palette, `vis_width`,
+`trunc_head`, `fmt_tok`, `fmt_elapsed`) but never `lib/collect.sh`. Its header comment is the full reference; in short:
+
+- **Row**: seven cells `marker │ elapsed │ ctx% │ tokens │ model │ description │ label`, e.g.
+  `RUN  │   12m │ 13% │ 128K │ Opus 5 │ Fold 682173 into 681727 │ Confirming mirror refs unchanged after cleanup`.
+  A missing value prints `-`; a `PEND` row prints `0%` and `0` in grey. Narrowing order when a row exceeds `columns`:
+  label truncated, label dropped, tokens, model, elapsed, description truncated; marker and ctx% are never dropped.
+- **Classification**, one jq pass, shared by the marker and the counts: `running` is `IDLE` when the last
+  `SA_IDLE_SAMPLES` (16) `tokenSamples` are all numbers and none of their 15 adjacent pairs increases, otherwise `RUN`;
+  `pending` `PEND`, `paused` `PAUS`, `failed` `FAIL`, `killed` `KILL`, `completed` `DONE`; anything else is unclassified
+  (no record, not counted). Claude Code keeps its default row for every task without a record.
+- **State hand-over**: every run whose `session_id` is UUID-shaped writes `V1 <epoch_s> <FAIL> <KILL> <PAUS> <RUN> <IDLE>
+  <PEND> <DONE>` to `~/.claude/sl-subagents/<session_id>` (700 directory, 600 file, temp file + `mv -f`, link and shape
+  refusals, `-mmin +1440` sweep on a session's first write). Every classified task counts, including rows Claude Code
+  folds into `↓ N more`, finished tasks it keeps for 30 s, nested subagents and tasks without a record.
+
+The session line reads that file in `read_sub_state` (lib/collect.sh) with builtins only: UUID gate (`sid_persistable`),
+link and shape refusals, `V1` plus eight fields of 1 to 10 digits with single spaces and **no leading zero** (bash
+arithmetic would read `08` as invalid octal and `010` as 8), stale when older than `SUB_STALE=20` s, refused when dated
+more than `SUB_FUTURE=5` s ahead, absent when the total is 0. `build_sub_line` (lib/render.sh) renders `sub <total>` in
+`WH` plus each non-zero class in its marker colour, separators in `SP`, ending in `ESC[0m` (Claude Code carries an
+unterminated line's colour into the next line), and narrows against the drawable width: full, then `sub N` + the
+non-zero FAIL/KILL/PAUS, then `sub N`, then nothing; width unknown → full. The entry point prints it before
+`render_line` when `SUB_LINE_POS=above` (shipped; `below` prints it after; not a user knob; the tests read the
+constant, so only `SUB1`'s pin changes). The session line itself is untouched: same 14 steps, same bytes. Cost: zero
+added processes on the session line (about 0.26 ms in-process with a fresh file); one `mv` per subagent-command run.
+
+**Timing** (the summary line is only as fresh as the session line's redraw): current while the main conversation is
+active; up to about 60 s behind the rows while it is idle (`refreshInterval`, kept at 60 s); gone within about 110 s
+after the last subagent finishes (30 s `DONE` retention + 20 s `SUB_STALE` + up to 60 s redraw).
+
+Claude Code facts this rests on, read from the 2.1.287 binary. **Check these first after a Claude Code upgrade**:
+F1 the subagent command runs on a 5 s tick chain while a task exists (single-flight, 5000 ms timeout, never with zero
+tasks), and `SUB_STALE` is derived from that tick; F2 the payload fields (`status`, `startTime` in epoch ms, `model`,
+`contextWindowSize`, `tokenCount`, `tokenSamples`, `description`, `label`; top-level `session_id`, `columns`) and the
+30 s retention of finished tasks; F3 `tokenSamples` gets one entry per tick and keeps the last 16 (the IDLE window);
+F4 only `running`/`completed`/`failed`/`killed` are written for `local_agent`, so `PEND`/`PAUS` may never appear;
+F5 rows with `""` content are filtered and the rest fold into `↓ N more` in Claude Code's order. If the rows go back to
+Claude Code's default, check the payload field names; if `IDLE` never or always shows, the 16-sample window; if the
+summary line flickers off while agents run, the 5 s tick against `SUB_STALE`.
+
 ## Hard rules — violating these reintroduces fixed bugs
 
 - **Never render against the real `$HOME`.** `statusline-command.sh` writes cross-session state
-  (`~/.claude/sl-ratelimit-cache` and its `.seen.<session_id>` sightings, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`, `~/.claude/sl-peer-ref`); a frame run by hand
+  (`~/.claude/sl-ratelimit-cache` and its `.seen.<session_id>` sightings, `~/.claude/sl-tokens-cache`, `~/.claude/sl-cwd`, `~/.claude/sl-peer-ref`), and
+  `subagent-status-line.sh` writes `~/.claude/sl-subagents/<session_id>`; a frame run by hand
   becomes the freshest observation and rewrites what every live session shows. Use `scripts/sandbox-run.sh`.
 - **Never `set -e`, anywhere.** A `read` hitting EOF with no trailing newline returns
   rc=1 as a normal path; `-e` would kill the script mid-frame.
@@ -484,11 +545,13 @@ both-fields-unusable fallbacks down the three-level chain.
 - **`parse_input` is the only sanitization entry for external strings.** It escapes
   `\n`/`\r`, strips C0 + DEL **and the C1 block U+0080–U+009F** (`select(. >= 32 and (. <
   127 or . > 159))`), and caps every field to 256 codepoints. Downstream code may then
-  assume "only our own SGR codes reach the terminal." Two sources bypass it, each satisfying
+  assume "only our own SGR codes reach the terminal." Three sources bypass it, each satisfying
   the invariant its own way: the last-message file (read in `build_left`) **re-strips the same
-  control set** via glob — keep those two filters in sync — and the session registry record
+  control set** via glob — keep those two filters in sync — the session registry record
   (`peer_ref_update`) is never filtered at all, because nothing read from it is ever rendered;
-  only a derived digest matching `^[0-9a-f]{6}$` can reach the line.
+  only a derived digest matching `^[0-9a-f]{6}$` can reach the line; and the subagent state file
+  (`read_sub_state`) is accepted only as `V1` plus eight canonical decimal fields, so only counts
+  `build_sub_line` formats itself can reach the summary line.
 - **The 256-cap is load-bearing, not cosmetic.** `vis_width`'s ASCII strip is O(n²) under
   macOS's bash 3.2; an uncapped multi-KB field stalls every frame (20KB ≈ 33s). Test `O`
   guards this.
@@ -500,14 +563,16 @@ both-fields-unusable fallbacks down the three-level chain.
 
 ## Security model
 
-Defense-in-depth, all regression-tested (cases `H`, `L`, `N`, `P`, `Q`, `R`, `S`, and `PEER`):
+Defense-in-depth, all regression-tested (cases `H`, `L`, `N`, `P`, `Q`, `R`, `S`, `PEER`, and `SUB2`):
 ANSI/escape **injection** is neutralized by the control-char strip above (a raw ESC would
 both inject into the terminal and desync `vis_width` into a line wrap); `session_id` is
 **path-traversal-checked** (`''|*/*|*..*` → skip) before being interpolated into the
 last-msg file path; width bounding guarantees **no overflow/wrap** even on 1–2 column
 terminals or with perl absent; rate-limit "remaining" is clamped to ≥0%. The fourth external source, CC's
 per-session **registry record**, satisfies the same invariant by construction rather than by filtering — see
-"Session peer reference" — so a hostile record can contribute a six-hex digest to the line and nothing else.
+"Session peer reference" — so a hostile record can contribute a six-hex digest to the line and nothing else. The fifth,
+`~/.claude/sl-subagents/<session_id>`, does the same: escape bytes, C1 bytes, a 4 KB line, a leading zero, a link or the
+wrong kind of file all make the summary line absent with nothing on stderr (section `SUB2`).
 
 ### Clickable path (`PATH_CLICK` + `scripts/open-pane-dir.sh`)
 
