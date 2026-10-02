@@ -1050,20 +1050,21 @@ rm -f "$SLC"; rm -rf "$LOCK" 2>/dev/null
 
 echo "── T4. SANDBOX DISCIPLINE: nothing here may render the statusline against the real \$HOME"
 t4bad=0
-# (a) Self-audit: every invocation of the real command in THIS harness must carry a HOME override (or go through sandbox-run.sh).
+# (a) Self-audit: every invocation of either real command (statusline-command.sh, and subagent-status-line.sh by path or through
+#     $SASCRIPT) in THIS harness must carry a HOME override (or go through sandbox-run.sh).
 #     Backslash-continued lines are joined first, so an `env … HOME=… \` + `bash …statusline-command.sh` pair reads as one command.
 t4audit() {  # $1=harness file → its un-isolated command invocations, one per line (empty = clean)
   python3 - "$1" <<'PYAUDIT'
 import sys, re
 joined = re.sub(r'\\\n\s*', ' ', open(sys.argv[1]).read())
 bad = [l.strip() for l in joined.split('\n')
-       if re.search(r'bash\s+"\$(SL|WORK)[^"]*/statusline-command\.sh"', l)
+       if re.search(r'bash\s+"(\$(SL|WORK)[^"]*/(statusline-command|subagent-status-line)\.sh|\$SASCRIPT)"', l)
        and 'HOME=' not in l and 'sandbox-run.sh' not in l]
 print('\n'.join(bad))
 PYAUDIT
 }
 t4esc=$(t4audit "$SL/tests/run-tests.sh")
-[ -z "$t4esc" ] || { printf '  ★ FAIL T4 harness renders the statusline with no HOME override:\n%s\n' "$t4esc"; t4bad=1; }
+[ -z "$t4esc" ] || { printf '  ★ FAIL T4 harness runs the statusline or the subagent command with no HOME override:\n%s\n' "$t4esc"; t4bad=1; }
 # (d) The subagent command writes under $HOME too (~/.claude/sl-subagents), so the audit must flag an un-isolated run of it,
 #     by path and through $SASCRIPT. The synthetic lines are assembled with %s so this source line itself never matches.
 printf 'o=$(printf x | bash "$SL/subagent-status-%s.sh")\nprintf x | bash "$%s" >/dev/null\nprintf x | env HOME="$FAKE_HOME" bash "$%s"\n' \
