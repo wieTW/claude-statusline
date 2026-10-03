@@ -58,7 +58,7 @@ A second entry point, `subagent-status-line.sh` (setting `subagentStatusLine`), 
 hands this session's per-class counts to the session line through `~/.claude/sl-subagents/<session_id>`. While that state
 is fresh the session line command prints **one summary line** (`7 agents · 1 failed · 1 paused · 3 running · 1 idle · 1 pending`)
 below the session line (`SUB_LINE_POS=below`); with no subagents its output is exactly the single line. Each subagent row
-reads `RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup`. See
+reads `RUN  [  12m] Fold 682173 into 681727 │ 13% │ 128K │ Opus 5(1M) │ Confirming mirror refs after cleanup`. See
 "Subagent rows and the summary line" below.
 
 ## Commands
@@ -493,13 +493,14 @@ both-fields-unusable fallbacks down the three-level chain.
 `{"id","content"}` out, one record per task row it takes over. It sources `lib/render.sh` (palette, `vis_width`,
 `trunc_head`, `fmt_tok`, `fmt_elapsed`) but never `lib/collect.sh`. Its header comment is the full reference; in short:
 
-- **Row**: `<marker> [<elapsed>] <description> │ <ctx%> · <tokens> · <model>(<window>) │ <label>`, e.g.
-  `RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup`. Only the
+- **Row**: `<marker> [<elapsed>] <description> │ <ctx%> │ <tokens> │ <model>(<window>) │ <label>`, e.g.
+  `RUN  [  12m] Fold 682173 into 681727 │ 13% │ 128K │ Opus 5(1M) │ Confirming mirror refs after cleanup`. Only the
   marker (left, 4 columns) and the elapsed value (right, 5 columns inside `SP` brackets) are padded; nothing else is, so
   descriptions start at one column and the `│` after them need not line up. The window marker follows the model name:
   `(1M)` in `MD` for a window of 1,000,000 or more, `(200K)` with its brackets in `YL` for a smaller one, none without a
-  usable window. `│`, `·` and the brackets are `SP`. A missing value prints `-`; a `PEND` row prints `0%` and `0` in grey.
-  Narrowing order when a row exceeds `columns`: label truncated, label dropped (with its `│`), tokens, model, elapsed
+  usable window. ` │ ` (`SEP`) is the row's only joiner, between the parts and between the three values; every `│` and
+  the brackets are `SP`. A missing value prints `-`; a `PEND` row prints `0%` and `0` in grey. Narrowing order when a
+  row exceeds `columns`: label truncated, label dropped, tokens, model (each with the `│` before it), elapsed
   (with its brackets), description truncated; marker and ctx% are never dropped (`IDLE │ 6%` at the narrowest).
 - **Classification**, one jq pass, shared by the marker and the counts: `running` is `IDLE` when the last
   `SA_IDLE_SAMPLES` (16) `tokenSamples` are all numbers and none of their 15 adjacent pairs increases, otherwise `RUN`;
