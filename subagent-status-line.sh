@@ -15,12 +15,12 @@
 # ANSI colour codes and is rendered verbatim. A record is never emitted with empty content to hide a row:
 # which rows show, their order and the "↓ N more" fold belong to Claude Code.
 #
-# Row layout — three parts joined by the same " │ " separator the single line uses: the head (marker, the elapsed time
-# in brackets, the description), the stats group (ctx%, tokens and the model with its window marker, joined by " · "),
-# and the activity label:
+# Row layout — the head (marker, the elapsed time in brackets, the description), the stats group (ctx%, tokens and the
+# model with its window marker) and the activity label, every part and every value of the stats group joined by the
+# same " │ " separator the single line uses; the row has no other joiner:
 #
-#     <marker> [<elapsed>] <description> │ <ctx%> · <tokens> · <model>(<window>) │ <label>
-#     RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup
+#     <marker> [<elapsed>] <description> │ <ctx%> │ <tokens> │ <model>(<window>) │ <label>
+#     RUN  [  12m] Fold 682173 into 681727 │ 13% │ 128K │ Opus 5(1M) │ Confirming mirror refs after cleanup
 #
 # Only the marker and the elapsed time are aligned; nothing else is padded, so every description starts at the same
 # column and the " │ " after it need not line up across rows.
@@ -32,7 +32,7 @@
 # model: the display name derived by rule, directly followed by the window marker: "(1M)" in the model colour for a
 # window of 1,000,000 or more, "(200K)" for a smaller one in the warning yellow, brackets included, and no marker at all
 # without a usable window. A value the payload does not supply in usable form prints "-"; a PEND row prints 0% and 0
-# instead and draws elapsed, ctx% and tokens grey, never red. The brackets, the " │ " and the " · " are drawn in the
+# instead and draws elapsed, ctx% and tokens grey, never red. The brackets and every " │ " are drawn in the
 # separator grey. The label is dropped when it only repeats the description (Claude Code fills it that way while an
 # agent is starting), and promoted when the description is empty. A row wider than `columns` gives up, in this order,
 # only as much as it must: label truncated, label dropped (with its " │ "), tokens, model, elapsed (with its brackets),
@@ -209,17 +209,17 @@ sa_cells() {   # $1=class $2=raw startTime $3=raw contextWindowSize $4=raw token
     fi
 }
 
-# Assemble one row from its cells: "<marker> <elapsed> <description> │ <ctx%> · <tokens> · <model> │ <label>". An empty
-# cell is left out together with its joiner (the space before the elapsed time or the description, the " · " before
-# tokens or model, the " │ " before the label), so a row never shows an empty cell or two joiners in a row. Without a
-# description the row is the marker, " │ " and ctx% alone.
+# Assemble one row from its cells: "<marker> <elapsed> <description> │ <ctx%> │ <tokens> │ <model> │ <label>". An empty
+# cell is left out together with its joiner (the space before the elapsed time or the description, the " │ " before
+# tokens, model or label), so a row never shows an empty cell or two joiners in a row. Without a description the row is
+# the marker, " │ " and ctx% alone.
 sa_compose() {   # $1=marker $2=elapsed $3=description $4=ctx% $5=tokens $6=model $7=label (coloured, "" = absent) → _content
     _content=$1
     [ -z "$2" ] || _content="$_content $2"
     [ -z "$3" ] || _content="$_content $3"
     _content="$_content$SEP$4"
-    [ -z "$5" ] || _content="$_content$SA_DOT$5"
-    [ -z "$6" ] || _content="$_content$SA_DOT$6"
+    [ -z "$5" ] || _content="$_content$SEP$5"
+    [ -z "$6" ] || _content="$_content$SEP$6"
     [ -z "$7" ] || _content="$_content$SEP$7"
 }
 
@@ -369,8 +369,7 @@ IFS= read -r _theme <&3
 exec 3<&-
 load_palette
 SA_TAB=$'\t'                   # named so sa_trim's case patterns stay readable
-SEP="${SP} │ ${RS}"            # same separator the single line uses, so the two read as one system
-SA_DOT="${SP} · ${RS}"         # joiner inside the stats group (ctx% · tokens · model)
+SEP="${SP} │ ${RS}"            # same separator the single line uses, so the two read as one system; the row's only joiner
 vis_width "$SEP"; SA_SEPW=$_w  # derived, not hardcoded, so a separator change cannot desync the width math
 
 # One pass: classify and count every task, then build, narrow and keep the record of every row that is emitted. Rows
