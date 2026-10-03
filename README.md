@@ -199,13 +199,13 @@ claude-statusline │ Opus 4.8 │              42%                             
 ```
 
 ```
-RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup
-IDLE [1H15m] Remove library-divergence-watch │ 85% · 170K · Sonnet 5(200K) │ Reading threshold-watch.sh
-FAIL [  45s] Codex: review relay guard design │ 5% · 9K · Haiku 4.5(200K)
-RUN  [   5m] Port T21 sightings to the new cache │ 6% · 62K · Opus 5(1M) │ Running tests/run-tests.sh
-PAUS [  30m] Draft the README section │ 3% · 31K · Sonnet 5(1M) │ Waiting for review
-RUN  [   1m] Measure frame cost │ 1% · 12K · Sonnet 5(1M) │ Timing 41 frames
-PEND [    -] Sweep stale state files │ 0% · 0 · Haiku 4.5(200K)
+RUN  [  12m] Fold 682173 into 681727 │ 13% │ 128K │ Opus 5(1M) │ Confirming mirror refs after cleanup
+IDLE [1H15m] Remove library-divergence-watch │ 85% │ 170K │ Sonnet 5(200K) │ Reading threshold-watch.sh
+FAIL [  45s] Codex: review relay guard design │ 5% │ 9K │ Haiku 4.5(200K)
+RUN  [   5m] Port T21 sightings to the new cache │ 6% │ 62K │ Opus 5(1M) │ Running tests/run-tests.sh
+PAUS [  30m] Draft the README section │ 3% │ 31K │ Sonnet 5(1M) │ Waiting for review
+RUN  [   1m] Measure frame cost │ 1% │ 12K │ Sonnet 5(1M) │ Timing 41 frames
+PEND [    -] Sweep stale state files │ 0% │ 0 │ Haiku 4.5(200K)
 ```
 
 Claude Code lists the subagents it is currently running, one row each, and by default a row shows only the
@@ -214,9 +214,9 @@ or which one is about to fill its context window. `subagent-status-line.sh` take
 block above), and while any subagent exists the main line gains a **summary line** directly below it (the first
 block). Both blocks are real output of one seven-task payload, rendered through `scripts/sandbox-run.sh`.
 
-**The row** reads: status, elapsed time in brackets, task description, then the numbers (context %, tokens, model)
-joined by `·`, then the current activity. Only the status and the elapsed time are aligned, so every description
-starts at the same column; nothing after it is padded.
+**The row** reads: status, elapsed time in brackets, task description, then the numbers (context %, tokens, model),
+then the current activity, each part after the description set off by the same `│`. Only the status and the elapsed
+time are aligned, so every description starts at the same column; nothing after it is padded.
 
 | Cell | Example | Meaning |
 | --- | --- | --- |

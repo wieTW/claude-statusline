@@ -2284,10 +2284,12 @@ print("OK %d" % n)'
 # savis(raw) → (visible text, per-character SGR): each visible character paired with the SGR code last set before it.
 # sacells(text) → the logical cells of one visible row, by MEANING rather than by position, so a case names the cell it
 # checks: 0 marker, 1 elapsed (brackets included), 2 ctx%, 3 tokens, 4 model (window marker included), 5 description,
-# 6 label; each a (start, end) span, absent when the row has no such cell. The second layout is
-# "<marker> [<elapsed>] <description> │ <ctx%> · <tokens> · <model> │ <label>". The first layout's seven " │ "-joined cells
-# (same index order) are recognised too, so a case whose expected text the second layout did not change also passes
-# against the first layout's script, and only the cases whose text changed fail there.
+# 6 label; each a (start, end) span, absent when the row has no such cell. The row is
+# "<marker> [<elapsed>] <description> │ <ctx%> │ <tokens> │ <model> │ <label>". The values after the description are read
+# in that order, and a shorter row by the narrowing order (the label goes first, then tokens, then the model), so three
+# values are ctx%, tokens, model and two are ctx%, model. The second layout's " · "-joined stats group and the first
+# layout's seven " │ "-joined cells (same index order) are recognised too, so a case whose expected text did not change
+# also passes against those older scripts, and only the cases whose text changed fail there.
 SAPY='
 import re
 def savis(s):
@@ -2307,22 +2309,23 @@ def sacells(t):
     if t[4:7] == " │ " and len(spans) >= 3:
         for i, sp in enumerate(spans[1:7], 1): cells[i] = sp
         return cells
-    stats = None
-    if t[4:7] == " │ ":
-        stats = spans[1]
-    else:
+    if t[4:7] != " │ ":
         p = 5
         if t[5:6] == "[" and "]" in t[5:]:
             q = t.index("]", 5); cells[1] = (5, q + 1); p = q + 2
         cells[5] = (p, spans[0][1])
-        if len(spans) > 1: stats = spans[1]
-        if len(spans) > 2: cells[6] = (spans[2][0], len(t))
-    if stats:
-        a, b = stats; idx = 2
+    vals = []
+    for a, b in spans[1:2]:   # the first value part; in the second layout it held all three values joined by " · "
         while True:
             k = t.find(" · ", a, b)
-            if k < 0 or idx == 4: cells[idx] = (a, b); break
-            cells[idx] = (a, k); a = k + 3; idx += 1
+            if k < 0: vals.append((a, b)); break
+            vals.append((a, k)); a = k + 3
+    vals += spans[2:]
+    if len(vals) >= 4:        # ctx%, tokens, model, label (a label holding " │ " runs to the end of the row)
+        cells[2], cells[3], cells[4], cells[6] = vals[0], vals[1], vals[2], (vals[3][0], len(t))
+    elif len(vals) == 3: cells[2], cells[3], cells[4] = vals
+    elif len(vals) == 2: cells[2], cells[4] = vals
+    elif len(vals) == 1: cells[2] = vals[0]
     return cells
 '
 
@@ -2412,7 +2415,7 @@ SACTL='{"id":"controlRow","status":"running","model":"claude-sonnet-5","contextW
 sactl_check() {  # $1=the whole JSON Lines output → rc 0 when the control row is present AND rendered right
   local got
   got=$(printf '%s' "$1" | saraw controlRow | nocol)
-  [ "$got" = "RUN  [    -] CTLDESC │ 5% · 50K · Sonnet 5(1M) │ CTLLABEL" ] && return 0
+  [ "$got" = "RUN  [    -] CTLDESC │ 5% │ 50K │ Sonnet 5(1M) │ CTLLABEL" ] && return 0
   echo "  ★ FAIL control row missing or mis-rendered — cannot tell a guard hit from a blackout: [$got]"
   return 1
 }
@@ -2437,7 +2440,7 @@ SAPFX='RUN  [    -] '
 echo "── SA1. SUBAGENT: Model display name derived by rule, never by lookup table (seven derivation cases)"
 sa1bad=0
 sacase() {  # $1=model identifier $2=expected display name (on this 1M window the model cell is the name plus "(1M)")
-  local got want="${SAPFX}d │ 5% · 50K · $2(1M) │ l"
+  local got want="${SAPFX}d │ 5% │ 50K │ $2(1M) │ l"
   got=$(sarun "$(samk "$1" 1000000 d l 120 50000 running)" | saraw tid | nocol)
   if [ "$got" = "$want" ]; then :; else
     echo "  ★ FAIL model [$1] → wanted [$want], got [$got]"; sa1bad=1
@@ -2477,10 +2480,10 @@ case "$sa2out" in *t1*) echo "  ★ FAIL a row with no model was emitted: [$sa2o
 sactl_check "$sa2out" || sa2bad=1
 # (b) description absent, label present → label is promoted into the description cell and NOT repeated as the label
 sa2b=$(sarun "$(samk claude-sonnet-5 1000000 '' PROMOTED 120 50000 running)" | saraw tid | nocol)
-[ "$sa2b" = "${SAPFX}PROMOTED │ 5% · 50K · Sonnet 5(1M)" ] || { echo "  ★ FAIL promoted label: wanted [${SAPFX}PROMOTED │ 5% · 50K · Sonnet 5(1M)], got [$sa2b]"; sa2bad=1; }
+[ "$sa2b" = "${SAPFX}PROMOTED │ 5% │ 50K │ Sonnet 5(1M)" ] || { echo "  ★ FAIL promoted label: wanted [${SAPFX}PROMOTED │ 5% │ 50K │ Sonnet 5(1M)], got [$sa2b]"; sa2bad=1; }
 # (c) label absent → the label cell and the separator before it are both gone
 sa2c=$(sarun "$(samk claude-sonnet-5 1000000 DESCR '' 120 50000 running)" | saraw tid | nocol)
-[ "$sa2c" = "${SAPFX}DESCR │ 5% · 50K · Sonnet 5(1M)" ] || { echo "  ★ FAIL missing label: wanted [${SAPFX}DESCR │ 5% · 50K · Sonnet 5(1M)], got [$sa2c]"; sa2bad=1; }
+[ "$sa2c" = "${SAPFX}DESCR │ 5% │ 50K │ Sonnet 5(1M)" ] || { echo "  ★ FAIL missing label: wanted [${SAPFX}DESCR │ 5% │ 50K │ Sonnet 5(1M)], got [$sa2c]"; sa2bad=1; }
 # (d) neither description nor label → the row cannot be attributed to any task, so it keeps its default row
 sa2d=$(sarun '{"columns":120,"tasks":[{"id":"noTextRow","status":"running","model":"claude-sonnet-5","contextWindowSize":1000000},'"$SACTL"']}')
 case "$sa2d" in *noTextRow*) echo "  ★ FAIL row with no description and no label was emitted: [$sa2d]"; sa2bad=1 ;; esac
@@ -2506,72 +2509,72 @@ echo "── SA2B. SUBAGENT: An activity label that only repeats the description
 # no case folding, no width folding, no squeezing of inner whitespace — those would silently merge two
 # genuinely different strings, and showing the real activity matters more than saving one segment.
 sa2bbad=0
-# (a) identical → the label cell is gone (two " │ " segments), and it is the LABEL that went, not the description
+# (a) identical → the label cell is gone (four " │ " segments), and it is the LABEL that went, not the description
 sa2ba=$(sarun "$(samk claude-sonnet-5 1000000 SAMETEXT SAMETEXT 120 50000 running)" | saraw tid | nocol)
-[ "$sa2ba" = "${SAPFX}SAMETEXT │ 5% · 50K · Sonnet 5(1M)" ] || { echo "  ★ FAIL identical label not dropped: wanted [${SAPFX}SAMETEXT │ 5% · 50K · Sonnet 5(1M)], got [$sa2ba]"; sa2bbad=1; }
+[ "$sa2ba" = "${SAPFX}SAMETEXT │ 5% │ 50K │ Sonnet 5(1M)" ] || { echo "  ★ FAIL identical label not dropped: wanted [${SAPFX}SAMETEXT │ 5% │ 50K │ Sonnet 5(1M)], got [$sa2ba]"; sa2bbad=1; }
 # (b) identical only after trimming → still dropped; the description keeps its own spacing verbatim
 # The exact string matters, not just the segment count: the two candidates differ ONLY in their
 # surrounding spaces, so comparing text is the one way to prove the DESCRIPTION was kept and the label
 # dropped rather than the other way round. A segment count cannot tell those two apart.
 sa2bb=$(sarun "$(samk claude-sonnet-5 1000000 '  SAMETEXT  ' SAMETEXT 120 50000 running)" | saraw tid | nocol)
 sa2bbn=$(printf '%s' "$sa2bb" | sasegs)
-[ "$sa2bbn" -eq 2 ] || { echo "  ★ FAIL label differing only by surrounding spaces was kept ($sa2bbn segments): [$sa2bb]"; sa2bbad=1; }
-[ "$sa2bb" = "${SAPFX}  SAMETEXT   │ 5% · 50K · Sonnet 5(1M)" ] || { echo "  ★ FAIL kept the label instead of the description (spacing differs): got [$sa2bb]"; sa2bbad=1; }
-# (c) CONTROL: genuinely different → the label cell survives (three " │ " segments). Guards against fixing (a) by always
+[ "$sa2bbn" -eq 4 ] || { echo "  ★ FAIL label differing only by surrounding spaces was kept ($sa2bbn segments): [$sa2bb]"; sa2bbad=1; }
+[ "$sa2bb" = "${SAPFX}  SAMETEXT   │ 5% │ 50K │ Sonnet 5(1M)" ] || { echo "  ★ FAIL kept the label instead of the description (spacing differs): got [$sa2bb]"; sa2bbad=1; }
+# (c) CONTROL: genuinely different → the label cell survives (five " │ " segments). Guards against fixing (a) by always
 #     dropping the label.
 sa2bc=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 50000 running)" | saraw tid | nocol)
-[ "$sa2bc" = "${SAPFX}DESCR │ 5% · 50K · Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL different label was not kept: wanted [${SAPFX}DESCR │ 5% · 50K · Sonnet 5(1M) │ LABEL], got [$sa2bc]"; sa2bbad=1; }
+[ "$sa2bc" = "${SAPFX}DESCR │ 5% │ 50K │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL different label was not kept: wanted [${SAPFX}DESCR │ 5% │ 50K │ Sonnet 5(1M) │ LABEL], got [$sa2bc]"; sa2bbad=1; }
 # (d) CONTROL: differing only in case is NOT the same string — no case folding
 sa2bd=$(sarun "$(samk claude-sonnet-5 1000000 'Run Tests' 'run tests' 120 50000 running)" | saraw tid | nocol)
 sa2bdn=$(printf '%s' "$sa2bd" | sasegs)
-[ "$sa2bdn" -eq 3 ] || { echo "  ★ FAIL case-folded comparison dropped a different label ($sa2bdn segments): [$sa2bd]"; sa2bbad=1; }
+[ "$sa2bdn" -eq 5 ] || { echo "  ★ FAIL case-folded comparison dropped a different label ($sa2bdn segments): [$sa2bd]"; sa2bbad=1; }
 # (e) CONTROL: differing only in inner whitespace is NOT the same string — no whitespace squeezing
 sa2be=$(sarun "$(samk claude-sonnet-5 1000000 'a  b' 'a b' 120 50000 running)" | saraw tid | nocol)
 sa2ben=$(printf '%s' "$sa2be" | sasegs)
-[ "$sa2ben" -eq 3 ] || { echo "  ★ FAIL inner whitespace was squeezed before comparing ($sa2ben segments): [$sa2be]"; sa2bbad=1; }
+[ "$sa2ben" -eq 5 ] || { echo "  ★ FAIL inner whitespace was squeezed before comparing ($sa2ben segments): [$sa2be]"; sa2bbad=1; }
 # (f) the real captured shape this rule exists for
 sa2bf=$(sarun '{"columns":160,"tasks":[{"id":"tid","type":"local_agent","status":"running","description":"Codex: review relay guard design","label":"Codex: review relay guard design","model":"claude-sonnet-5","contextWindowSize":1000000}]}' | saraw tid | nocol)
-[ "$sa2bf" = "RUN  [    -] Codex: review relay guard design │ - · - · Sonnet 5(1M)" ] || { echo "  ★ FAIL real duplicated frame: [$sa2bf]"; sa2bbad=1; }
+[ "$sa2bf" = "RUN  [    -] Codex: review relay guard design │ - │ - │ Sonnet 5(1M)" ] || { echo "  ★ FAIL real duplicated frame: [$sa2bf]"; sa2bbad=1; }
 [ "$sa2bbad" -eq 0 ] && echo "  identical / trim-identical dropped; different, case-differing, spacing-differing all kept OK" || fail=1
 
 echo "── SA2T. SUBAGENT: Token usage cell — position, colour, placeholders, and dropped whole, never cut"
 # The user asked to see how many tokens each subagent has burned. The cell sits in the stats group AFTER the context
-# percentage and BEFORE the model cell, joined to both by " · ", with the thousands unit as an uppercase K.
+# percentage and BEFORE the model cell, separated from each by " │ ", with the thousands unit as an uppercase K.
 # Colour is WH, deliberately NOT YL: the single status line uses YL for its own subagent-token total, and a warning
 # colour on a plain count would read as an alarm that is not there.
 sa2tbad=0
 # (a) position and format together — one exact string covers order, separator count and the K form
 sa2ta=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 262414 running)" | saraw tid | nocol)
-[ "$sa2ta" = "${SAPFX}DESCR │ 26% · 262K · Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL token cell position/format: wanted [${SAPFX}DESCR │ 26% · 262K · Sonnet 5(1M) │ LABEL], got [$sa2ta]"; sa2tbad=1; }
+[ "$sa2ta" = "${SAPFX}DESCR │ 26% │ 262K │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL token cell position/format: wanted [${SAPFX}DESCR │ 26% │ 262K │ Sonnet 5(1M) │ LABEL], got [$sa2ta]"; sa2tbad=1; }
 # (b) colour ROLE is the plain-text one, not the warning one
 sa2tb=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 262414 running)" | saraw tid)
 sarole "$sa2tb" 3 "$SAWH" "token cell (must be WH, never YL)" || sa2tbad=1
 # (c) absent → a "-" placeholder in the cell's own column; nothing else moves
 sa2tc=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 '' running)" | saraw tid | nocol)
-[ "$sa2tc" = "${SAPFX}DESCR │ - · - · Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL absent tokenCount: wanted [${SAPFX}DESCR │ - · - · Sonnet 5(1M) │ LABEL], got [$sa2tc]"; sa2tbad=1; }
+[ "$sa2tc" = "${SAPFX}DESCR │ - │ - │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL absent tokenCount: wanted [${SAPFX}DESCR │ - │ - │ Sonnet 5(1M) │ LABEL], got [$sa2tc]"; sa2tbad=1; }
 # (d) non-numeric → the same placeholder, and the rest of the payload still renders
 sa2td=$(sarun '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL","tokenCount":"abc"},'"$SACTL"']}')
 sa2tdc=$(printf '%s' "$sa2td" | saraw tid | nocol)
-[ "$sa2tdc" = "${SAPFX}DESCR │ - · - · Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL non-numeric tokenCount: wanted [${SAPFX}DESCR │ - · - · Sonnet 5(1M) │ LABEL], got [$sa2tdc]"; sa2tbad=1; }
+[ "$sa2tdc" = "${SAPFX}DESCR │ - │ - │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL non-numeric tokenCount: wanted [${SAPFX}DESCR │ - │ - │ Sonnet 5(1M) │ LABEL], got [$sa2tdc]"; sa2tbad=1; }
 sactl_check "$sa2td" || sa2tbad=1
 # (e) zero is a real count and prints 0 (and 0%), never a placeholder and never omitted
 sa2te=$(sarun "$(samk claude-sonnet-5 1000000 DESCR LABEL 120 0 running)" | saraw tid | nocol)
-[ "$sa2te" = "${SAPFX}DESCR │ 0% · 0 · Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL zero tokenCount should print 0, got [$sa2te]"; sa2tbad=1; }
+[ "$sa2te" = "${SAPFX}DESCR │ 0% │ 0 │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL zero tokenCount should print 0, got [$sa2te]"; sa2tbad=1; }
 # (f) string-typed with a leading zero: jq's tostring erases the JSON type, and bash reads a leading zero
 #     as OCTAL. 0262414 as octal is 91916, i.e. a confidently wrong 91K (and a wrong 9%).
 sa2tf=$(sarun '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"claude-sonnet-5","contextWindowSize":1000000,"description":"DESCR","label":"LABEL","tokenCount":"0262414"}]}' | saraw tid | nocol)
-[ "$sa2tf" = "${SAPFX}DESCR │ 26% · 262K · Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL leading-zero tokenCount read as octal: wanted [… │ 26% · 262K · …], got [$sa2tf]"; sa2tbad=1; }
+[ "$sa2tf" = "${SAPFX}DESCR │ 26% │ 262K │ Sonnet 5(1M) │ LABEL" ] || { echo "  ★ FAIL leading-zero tokenCount read as octal: wanted [… │ 26% │ 262K │ …], got [$sa2tf]"; sa2tbad=1; }
 # (g) narrow: the label is sacrificed first; the token and model cells both survive whole
 sa2tg=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that will not fit' 60 262414 running)" | saraw tid | nocol)
 sa2tgw=$(printf '%s' "$sa2tg" | vw)
 [ "$sa2tgw" -le 60 ] || { echo "  ★ FAIL width $sa2tgw > 60: [$sa2tg]"; sa2tbad=1; }
-case "$sa2tg" in "${SAPFX}DESCRIPTION │ 26% · 262K · Sonnet 5(1M) │ a"*…) ;; *) echo "  ★ FAIL label not the first to shrink at width 60: [$sa2tg]"; sa2tbad=1 ;; esac
+case "$sa2tg" in "${SAPFX}DESCRIPTION │ 26% │ 262K │ Sonnet 5(1M) │ a"*…) ;; *) echo "  ★ FAIL label not the first to shrink at width 60: [$sa2tg]"; sa2tbad=1 ;; esac
 # (h) narrower: the label is gone, token and model still whole
 sa2th=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that will not fit' 52 262414 running)" | saraw tid | nocol)
-[ "$sa2th" = "${SAPFX}DESCRIPTION │ 26% · 262K · Sonnet 5(1M)" ] || { echo "  ★ FAIL label-dropped tier: wanted [${SAPFX}DESCRIPTION │ 26% · 262K · Sonnet 5(1M)], got [$sa2th]"; sa2tbad=1; }
+[ "$sa2th" = "${SAPFX}DESCRIPTION │ 26% │ 262K │ Sonnet 5(1M)" ] || { echo "  ★ FAIL label-dropped tier: wanted [${SAPFX}DESCRIPTION │ 26% │ 262K │ Sonnet 5(1M)], got [$sa2th]"; sa2tbad=1; }
 # (i) narrower still: the token cell is the next to go, and it goes WHOLE — no cut-down "262" is ever left behind
 sa2ti=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label' 48 262414 running)" | saraw tid | nocol)
-[ "$sa2ti" = "${SAPFX}DESCRIPTION │ 26% · Sonnet 5(1M)" ] || { echo "  ★ FAIL token-dropped tier: wanted [${SAPFX}DESCRIPTION │ 26% · Sonnet 5(1M)], got [$sa2ti]"; sa2tbad=1; }
+[ "$sa2ti" = "${SAPFX}DESCRIPTION │ 26% │ Sonnet 5(1M)" ] || { echo "  ★ FAIL token-dropped tier: wanted [${SAPFX}DESCRIPTION │ 26% │ Sonnet 5(1M)], got [$sa2ti]"; sa2tbad=1; }
 case "$sa2ti" in *262*) echo "  ★ FAIL a partial token cell survived: [$sa2ti]"; sa2tbad=1 ;; esac
 [ "$sa2tbad" -eq 0 ] && echo "  position/format/colour, absent+non-numeric '-', zero '0', octal guard, dropped whole OK" || fail=1
 echo "── SA3. SUBAGENT: Per-task subagent line content on real frames + the context-window marker after the model name"
@@ -2590,18 +2593,18 @@ sa3j=$(sarun "$SAREAL1" | sajsonl)
 case "$sa3j" in "OK 1") ;; *) echo "  ★ FAIL real 1-task frame is not clean JSON Lines: [$sa3j]"; sa3bad=1 ;; esac
 sa3a=$(sarun "$SAREAL1" | saraw ab4c560a44129c990 | nocol | saemask)
 # tokenCount 254074 of a 1000000 window: 25% and 254K; one token sample is too few for IDLE, so the marker is RUN.
-[ "$sa3a" = "RUN  [<E>] 實作 wrap-up 感知的 ctx guard │ 25% · 254K · Opus 5(1M) │ Extracting command-args from wrap-up envelopes" ] \
+[ "$sa3a" = "RUN  [<E>] 實作 wrap-up 感知的 ctx guard │ 25% │ 254K │ Opus 5(1M) │ Extracting command-args from wrap-up envelopes" ] \
   || { echo "  ★ FAIL real frame content: [$sa3a]"; sa3bad=1; }
 sa3j2=$(sarun "$SAREAL2" | sajsonl)
 case "$sa3j2" in "OK 2") ;; *) echo "  ★ FAIL real 2-task frame did not yield 2 clean records: [$sa3j2]"; sa3bad=1 ;; esac
 sa3a2=$(sarun "$SAREAL2" | saraw aa0603d3a354ff732 | nocol | saemask)
-[ "$sa3a2" = "RUN  [<E>] Remove library-divergence-watch │ 7% · 66K · Sonnet 5(1M) │ Reading threshold-watch.sh" ] \
+[ "$sa3a2" = "RUN  [<E>] Remove library-divergence-watch │ 7% │ 66K │ Sonnet 5(1M) │ Reading threshold-watch.sh" ] \
   || { echo "  ★ FAIL first task of the real 2-task frame: [$sa3a2]"; sa3bad=1; }
 # The second task of this captured frame carries label == description (the starting-up shape), so its
 # label cell is dropped by the duplicate-label rule in SA2B, and its zero token count prints 0 and 0%.
 # Both tasks of the frame must still be emitted — that is what this assertion is here for.
 sa3b=$(sarun "$SAREAL2" | saraw acee8f6f3483fcf1f | nocol | saemask)
-[ "$sa3b" = "RUN  [<E>] Codex: review relay guard design │ 0% · 0 · Sonnet 5(1M)" ] \
+[ "$sa3b" = "RUN  [<E>] Codex: review relay guard design │ 0% │ 0 │ Sonnet 5(1M)" ] \
   || { echo "  ★ FAIL second task of the real 2-task frame: [$sa3b]"; sa3bad=1; }
 # Context-window marker, directly after the model name: "(1M)" in the model role for a window of 1,000,000 or more,
 # "(<n>K)" with its brackets in the warning role for a smaller one, and no marker at all without a usable positive window.
@@ -2619,17 +2622,17 @@ for sa3p in "1000000|Sonnet 5(1M)|(1M)|$SAMD" "200000|Sonnet 5(200K)|(200K)|$SAY
 done
 # a non-numeric window size: no marker, no guessed default, and the row is still emitted
 sa3s=$(sarun '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"claude-sonnet-5","contextWindowSize":"abc","tokenCount":50000,"description":"d","label":"l"}]}' | saraw tid | nocol)
-[ "$sa3s" = "${SAPFX}d │ - · 50K · Sonnet 5 │ l" ] || { echo "  ★ FAIL non-numeric window size: wanted [${SAPFX}d │ - · 50K · Sonnet 5 │ l], got [$sa3s]"; sa3bad=1; }
+[ "$sa3s" = "${SAPFX}d │ - │ 50K │ Sonnet 5 │ l" ] || { echo "  ★ FAIL non-numeric window size: wanted [${SAPFX}d │ - │ 50K │ Sonnet 5 │ l], got [$sa3s]"; sa3bad=1; }
 # a STRING-typed window size with a leading zero. jq's tostring erases the JSON type, so the value reaches
 # the shell verbatim, and bash reads a leading zero as OCTAL: without the 10# prefix "0200000" evaluates to
 # 65536 and 100000 tokens would confidently read as 153%. Same hazard lib/render.sh guards in ctx_aligned_pct.
 sa3oct=$(sarun '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"claude-sonnet-5","contextWindowSize":"0200000","tokenCount":100000,"description":"d","label":"l"}]}' | saraw tid | nocol)
-[ "$sa3oct" = "${SAPFX}d │ 50% · 100K · Sonnet 5(200K) │ l" ] || { echo "  ★ FAIL leading-zero window read as octal: wanted [${SAPFX}d │ 50% · 100K · Sonnet 5(200K) │ l], got [$sa3oct]"; sa3bad=1; }
+[ "$sa3oct" = "${SAPFX}d │ 50% │ 100K │ Sonnet 5(200K) │ l" ] || { echo "  ★ FAIL leading-zero window read as octal: wanted [${SAPFX}d │ 50% │ 100K │ Sonnet 5(200K) │ l], got [$sa3oct]"; sa3bad=1; }
 # window size absent → the percentage cannot be computed and prints "-"; no guessed default window, no marker
 sa3f=$(sarun "$(samk claude-sonnet-5 '' d l 120 50000 running)" | saraw tid | nocol)
-[ "$sa3f" = "${SAPFX}d │ - · 50K · Sonnet 5 │ l" ] || { echo "  ★ FAIL absent window size: wanted [${SAPFX}d │ - · 50K · Sonnet 5 │ l], got [$sa3f]"; sa3bad=1; }
+[ "$sa3f" = "${SAPFX}d │ - │ 50K │ Sonnet 5 │ l" ] || { echo "  ★ FAIL absent window size: wanted [${SAPFX}d │ - │ 50K │ Sonnet 5 │ l], got [$sa3f]"; sa3bad=1; }
 # Every colour role of the text cells on one row, each was unguarded until a mutation run showed that swapping
-# the role changed the output with the suite green; the structural glyphs (│ · [ ]) all in the separator role.
+# the role changed the output with the suite green; the structural glyphs (│ [ ]) all in the separator role.
 sa3g=$(sarun "$(samk claude-sonnet-5 1000000 DTEXT LTEXT 120 50000 running)" | saraw tid)
 for sa3pair in "DTEXT:$SAWH:description" "Sonnet 5:$SAMD:model name" "LTEXT:$SADM:label"; do
   sa3needle=${sa3pair%%:*}; sa3rest=${sa3pair#*:}; sa3want=${sa3rest%:*}; sa3role=${sa3rest##*:}
@@ -2637,7 +2640,7 @@ for sa3pair in "DTEXT:$SAWH:description" "Sonnet 5:$SAMD:model name" "LTEXT:$SAD
   [ "$sa3r" = OK ] || { echo "  ★ FAIL $sa3role colour role: $sa3r"; sa3bad=1; }
 done
 sa3r=$(printf '%s' "$sa3g" | saglyph "$SASP")
-[ "$sa3r" = "│ 2/2 · 2/2 [ 1/1 ] 1/1" ] || { echo "  ★ FAIL structural glyphs in the separator role: [$sa3r], want [│ 2/2 · 2/2 [ 1/1 ] 1/1]"; sa3bad=1; }
+[ "$sa3r" = "│ 4/4 · 0/0 [ 1/1 ] 1/1" ] || { echo "  ★ FAIL structural glyphs in the separator role: [$sa3r], want [│ 4/4 · 0/0 [ 1/1 ] 1/1]"; sa3bad=1; }
 [ "$sa3bad" -eq 0 ] && echo "  real 1-task + 2-task frames, JSON Lines shape, window marker (1M)/(200K)/none x3, octal window, colour roles OK" || fail=1
 
 echo "── SA4. SUBAGENT: Untrusted input is sanitised + Width is bounded by the reported column count"
@@ -2669,14 +2672,14 @@ SABIG=$(printf 'x%.0s' $(seq 1 8000))
 SECONDS=0
 sa4big=$(sarun "$(samk claude-sonnet-5 1000000 "$SABIG" l '' 50000 running)" | saraw tid | vw)
 # Exact, so an empty output (script gone, script broken) cannot sail through as "nicely bounded": 13 columns of marker and
-# bracketed elapsed + 256 capped description + " │ " + 23 columns of "5% · 50K · Sonnet 5(1M)" + " │ " + "l" = 299.
+# bracketed elapsed + 256 capped description + " │ " + 23 columns of "5% │ 50K │ Sonnet 5(1M)" + " │ " + "l" = 299.
 if [ "$SECONDS" -lt 3 ] && [ "$sa4big" -eq 299 ]; then echo "  8KB description → width $sa4big in ${SECONDS}s OK"
 else echo "  ★ FAIL 8KB description: width $sa4big in ${SECONDS}s (want 299 — the 256-codepoint cap plus the other cells)"; sa4bad=1; fi
 # (e) too narrow → the activity label is sacrificed FIRST (truncated); description, model and token cells stay whole
 sa4n=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that cannot possibly fit' 60 50000 running)" | saraw tid | nocol)
 sa4w=$(printf '%s' "$sa4n" | vw)
 [ "$sa4w" -le 60 ]      || { echo "  ★ FAIL narrow width $sa4w > 60: [$sa4n]"; sa4bad=1; }
-case "$sa4n" in "${SAPFX}DESCRIPTION │ 5% · 50K · Sonnet 5(1M) │ a"*) ;; *) echo "  ★ FAIL a cell other than the label shrank at width 60: [$sa4n]"; sa4bad=1 ;; esac
+case "$sa4n" in "${SAPFX}DESCRIPTION │ 5% │ 50K │ Sonnet 5(1M) │ a"*) ;; *) echo "  ★ FAIL a cell other than the label shrank at width 60: [$sa4n]"; sa4bad=1 ;; esac
 case "$sa4n" in *…)                ;; *) echo "  ★ FAIL label dropped instead of truncated: [$sa4n]"; sa4bad=1 ;; esac
 # (f) narrower still → label, tokens, model and elapsed are gone and the description is truncated; marker and
 #     context percentage SURVIVE INTACT
@@ -2690,21 +2693,21 @@ sa4core=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activit
 [ "$sa4core" = "RUN  │ 5%" ] || { echo "  ★ FAIL narrowest tier lost the marker or the ctx%: wanted [RUN  │ 5%], got [$sa4core]"; sa4bad=1; }
 # (g) no usable column count → no bounding at all, every cell intact
 sa4u=$(sarun "$(samk claude-sonnet-5 1000000 DESCRIPTION 'a very long activity label that cannot possibly fit' '' 50000 running)" | saraw tid | nocol)
-[ "$sa4u" = "${SAPFX}DESCRIPTION │ 5% · 50K · Sonnet 5(1M) │ a very long activity label that cannot possibly fit" ] \
+[ "$sa4u" = "${SAPFX}DESCRIPTION │ 5% │ 50K │ Sonnet 5(1M) │ a very long activity label that cannot possibly fit" ] \
   || { echo "  ★ FAIL unbounded render: [$sa4u]"; sa4bad=1; }
 [ "$sa4bad" -eq 0 ] && echo "  ESC/C1 stripped, structural surprises inert, 256-cap, settled narrowing order OK" || fail=1
 
 echo "── SA5. SUBAGENT: second-layout row — part order, joiners, only marker and elapsed aligned, colour roles, shared palette"
 sa5bad=0
-# (a) the 1M Opus example of the spec: marker, bracketed elapsed, description, │, ctx% · tokens · model with its window
+# (a) the 1M Opus example of the spec: marker, bracketed elapsed, description, │, ctx% │ tokens │ model with its window
 #     marker, │, label. Only the marker (4 columns) and the elapsed value (5 columns inside the brackets) are padded.
-SA5ROW='RUN  [  12m] Fold 682173 into 681727 │ 13% · 128K · Opus 5(1M) │ Confirming mirror refs after cleanup'
+SA5ROW='RUN  [  12m] Fold 682173 into 681727 │ 13% │ 128K │ Opus 5(1M) │ Confirming mirror refs after cleanup'
 sa5raw=$(sarun "$(samk 'claude-opus-5[1m]' 1000000 'Fold 682173 into 681727' 'Confirming mirror refs after cleanup' '' 128000 running "$(sastart 720)")" | saraw tid)
 sa5a=$(printf '%s' "$sa5raw" | nocol)
 [ "$sa5a" = "$SA5ROW" ] || { echo "  ★ FAIL 1M Opus example row: wanted [$SA5ROW], got [$sa5a]"; sa5bad=1; }
 [ "$(printf '%s' "$sa5a" | vw)" = 101 ] || { echo "  ★ FAIL 1M Opus example row is $(printf '%s' "$sa5a" | vw) columns, want 101"; sa5bad=1; }
 # (b) colour role per cell: marker by class (RUN green), elapsed value grey, ctx% and tokens primary text, model with its
-#     (1M) marker in the model role, description primary text, label grey; brackets, both │ and both · in the structural grey
+#     (1M) marker in the model role, description primary text, label grey; brackets, all four │ in the structural grey
 sarole "$sa5raw" 0 "$SAGR" "RUN marker" || sa5bad=1
 sarole "$sa5raw" 1 "$SADM" "elapsed value" || sa5bad=1
 sarole "$sa5raw" 2 "$SAWH" "context percentage cell" || sa5bad=1
@@ -2718,7 +2721,7 @@ for sa5c in "12m:$SADM:elapsed value" "13%:$SAWH:context percentage" "128K:$SAWH
   sa5r=$(printf '%s' "$sa5raw" | sacolall "$sa5n" "$sa5w"); [ "$sa5r" = OK ] || { echo "  ★ FAIL ${sa5c##*:} colour role: $sa5r"; sa5bad=1; }
 done
 sa5sep=$(printf '%s' "$sa5raw" | saglyph "$SASP")
-[ "$sa5sep" = "│ 2/2 · 2/2 [ 1/1 ] 1/1" ] || { echo "  ★ FAIL structural glyphs in the structural grey role: [$sa5sep], want [│ 2/2 · 2/2 [ 1/1 ] 1/1]"; sa5bad=1; }
+[ "$sa5sep" = "│ 4/4 · 0/0 [ 1/1 ] 1/1" ] || { echo "  ★ FAIL structural glyphs in the structural grey role: [$sa5sep], want [│ 4/4 · 0/0 [ 1/1 ] 1/1]"; sa5bad=1; }
 # (c) an Opus row and a Sonnet row in one payload: descriptions start at the same column (fixed-width marker and elapsed),
 #     and nothing after them is padded, so ctx%, tokens and the model are printed at their own width (no padding to the
 #     widest model name of the frame) and the two rows' │ need not line up. Sonnet's 200K window is red at 84% and its
@@ -2729,9 +2732,9 @@ sa5out=$(jq -cn --argjson a "$(sastart 45)" --argjson b "$(sastart 4500)" --argj
    description:"Build image and deliver OTA"}]}')
 sa5o=$(sarun "$sa5out")
 sa5o1=$(printf '%s' "$sa5o" | saraw a1 | nocol); sa5r2=$(printf '%s' "$sa5o" | saraw b2); sa5o2=$(printf '%s' "$sa5r2" | nocol)
-[ "$sa5o1" = "RUN  [  45s] Scan logs │ 6% · 60K · Opus 5(1M)" ] || { echo "  ★ FAIL Opus row: wanted [RUN  [  45s] Scan logs │ 6% · 60K · Opus 5(1M)], got [$sa5o1]"; sa5bad=1; }
-[ "$sa5o2" = "IDLE [1H15m] Build image and deliver OTA │ 84% · 168K · Sonnet 5(200K)" ] \
-  || { echo "  ★ FAIL Sonnet row: wanted [IDLE [1H15m] Build image and deliver OTA │ 84% · 168K · Sonnet 5(200K)], got [$sa5o2]"; sa5bad=1; }
+[ "$sa5o1" = "RUN  [  45s] Scan logs │ 6% │ 60K │ Opus 5(1M)" ] || { echo "  ★ FAIL Opus row: wanted [RUN  [  45s] Scan logs │ 6% │ 60K │ Opus 5(1M)], got [$sa5o1]"; sa5bad=1; }
+[ "$sa5o2" = "IDLE [1H15m] Build image and deliver OTA │ 84% │ 168K │ Sonnet 5(200K)" ] \
+  || { echo "  ★ FAIL Sonnet row: wanted [IDLE [1H15m] Build image and deliver OTA │ 84% │ 168K │ Sonnet 5(200K)], got [$sa5o2]"; sa5bad=1; }
 for sa5c in "84%:$SARD:84% on a 200K window" "(200K):$SAYL:(200K) window marker" "Sonnet 5:$SAMD:Sonnet model name"; do
   sa5n=${sa5c%%:*}; sa5r=${sa5c#*:}; sa5w=${sa5r%%:*}
   sa5r=$(printf '%s' "$sa5r2" | sacolall "$sa5n" "$sa5w"); [ "$sa5r" = OK ] || { echo "  ★ FAIL ${sa5c##*:} colour role: $sa5r"; sa5bad=1; }
@@ -2741,11 +2744,11 @@ sa5j=$(printf '%s\n' "$sa5o" | sajsonl)
 [ "$sa5j" = "OK 2" ] || { echo "  ★ FAIL two tasks did not give two clean JSON Lines records: [$sa5j]"; sa5bad=1; }
 sa5ids=$(printf '%s\n' "$sa5o" | python3 -c 'import sys, json; print(" ".join(json.loads(l)["id"] for l in sys.stdin if l.strip()))')
 [ "$sa5ids" = "a1 b2" ] || { echo "  ★ FAIL record order: [$sa5ids], want [a1 b2]"; sa5bad=1; }
-# (e) a missing label drops the trailing cell and its separator: the row ends with the model cell, exactly one │, two ·
+# (e) a missing label drops the trailing cell and its separator: the row ends with the model cell, exactly three │, no ·
 sa5e=$(sarun "$(samk claude-sonnet-5 1000000 DESCR '' '' 5000 running)" | saraw tid | nocol)
-[ "$sa5e" = "${SAPFX}DESCR │ 1% · 5K · Sonnet 5(1M)" ] || { echo "  ★ FAIL missing label: [$sa5e]"; sa5bad=1; }
+[ "$sa5e" = "${SAPFX}DESCR │ 1% │ 5K │ Sonnet 5(1M)" ] || { echo "  ★ FAIL missing label: [$sa5e]"; sa5bad=1; }
 sa5n=$(printf '%s' "$sa5e" | python3 -c 'import sys; t = sys.stdin.read(); print("%d %d" % (t.count("│"), t.count("·")))')
-[ "$sa5n" = "1 2" ] || { echo "  ★ FAIL missing label: [$sa5n] vertical bars and middle dots, want [1 2]: [$sa5e]"; sa5bad=1; }
+[ "$sa5n" = "3 0" ] || { echo "  ★ FAIL missing label: [$sa5n] vertical bars and middle dots, want [3 0]: [$sa5e]"; sa5bad=1; }
 # (f) the palette comes from the shared loader: under a light theme a FAIL marker carries the light RD bytes, and the
 #     script defines no colour of its own. The light HOME is a separate fake HOME so no other section sees the theme.
 SALIGHT="$WORK/sa-light-home"; mkdir -p "$SALIGHT/.claude"; printf '{"theme":"light"}\n' > "$SALIGHT/.claude.json"
@@ -2842,13 +2845,13 @@ sa7cell '{"columns":120,"tasks":[{"id":"tid","status":"running","model":"claude-
 # the missing-values row: no start time, no token count, no window → every missing value prints "-" in its place, and the
 # model cell is the name alone
 sa7m=$(sarun "$(samk claude-sonnet-5 '' D '' 120 '' running)" | saraw tid | nocol)
-[ "$sa7m" = "RUN  [    -] D │ - · - · Sonnet 5" ] || { echo "  ★ FAIL missing-values row: wanted [RUN  [    -] D │ - · - · Sonnet 5], got [$sa7m]"; sa7bad=1; }
+[ "$sa7m" = "RUN  [    -] D │ - │ - │ Sonnet 5" ] || { echo "  ★ FAIL missing-values row: wanted [RUN  [    -] D │ - │ - │ Sonnet 5], got [$sa7m]"; sa7bad=1; }
 [ "$sa7bad" -eq 0 ] && echo "  bracketed elapsed table + placeholders, unpadded ctx% table with 80/92 thresholds and pending rows, token table with K/0/-/octal, missing-values row OK" || fail=1
 
 echo "── SA8. SUBAGENT: Width is bounded by the reported column count — the settled narrowing order, per-row independence"
 sa8bad=0
 SA8D='Build image and deliver OTA'; SA8L='Polling build-final-2106.log for make_release DONE'
-SA8H="IDLE [1H15m] $SA8D"; SA8S='6% · 60K · Opus 5(1M)'   # head (marker, elapsed, description) and stats group
+SA8H="IDLE [1H15m] $SA8D"; SA8S='6% │ 60K │ Opus 5(1M)'   # head (marker, elapsed, description) and stats group
 sa8mk() { samk 'claude-opus-5[1m]' 1000000 "$SA8D" "$SA8L" "$1" 60000 running "$(sastart 4500)" "$SA16"; }
 sa8row() {  # $1=columns $2=expected exact row $3=step name
   local got w
@@ -2865,9 +2868,9 @@ sa8row 69  "$SA8H │ $SA8S │ P…" "label truncated (69 to 116)"
 sa8row 68  "$SA8H │ $SA8S" "label dropped (64 to 68)"
 sa8row 66  "$SA8H │ $SA8S" "label dropped (64 to 68)"
 sa8row 64  "$SA8H │ $SA8S" "label dropped (64 to 68)"
-sa8row 63  "$SA8H │ 6% · Opus 5(1M)" "tokens dropped (58 to 63)"
-sa8row 60  "$SA8H │ 6% · Opus 5(1M)" "tokens dropped (58 to 63)"
-sa8row 58  "$SA8H │ 6% · Opus 5(1M)" "tokens dropped (58 to 63)"
+sa8row 63  "$SA8H │ 6% │ Opus 5(1M)" "tokens dropped (58 to 63)"
+sa8row 60  "$SA8H │ 6% │ Opus 5(1M)" "tokens dropped (58 to 63)"
+sa8row 58  "$SA8H │ 6% │ Opus 5(1M)" "tokens dropped (58 to 63)"
 sa8row 57  "$SA8H │ 6%" "model dropped (45 to 57)"
 sa8row 50  "$SA8H │ 6%" "model dropped (45 to 57)"
 sa8row 45  "$SA8H │ 6%" "model dropped (45 to 57)"
@@ -2893,7 +2896,7 @@ sa8two=$(jq -cn --argjson st "$(sastart 4500)" --argjson smp "$SA16" '{columns:6
    description:"Build image and deliver OTA and then verify every partition", label:"Polling build-final-2106.log for make_release DONE"}]}')
 sa8o=$(sarun "$sa8two")
 sa8s=$(printf '%s' "$sa8o" | saraw short | nocol); sa8l=$(printf '%s' "$sa8o" | saraw long | nocol)
-case "$sa8s" in "IDLE [1H15m] short │ 6% · 60K · Opus 5(1M) │ Polling"*…) ;; *) echo "  ★ FAIL short row at 66 columns: [$sa8s]"; sa8bad=1 ;; esac
+case "$sa8s" in "IDLE [1H15m] short │ 6% │ 60K │ Opus 5(1M) │ Polling"*…) ;; *) echo "  ★ FAIL short row at 66 columns: [$sa8s]"; sa8bad=1 ;; esac
 case "$sa8l" in "IDLE Build image"*"… │ 6%") ;; *) echo "  ★ FAIL long row at 66 columns: [$sa8l]"; sa8bad=1 ;; esac
 for sa8x in "$sa8s" "$sa8l"; do [ "$(printf '%s' "$sa8x" | vw)" -le 66 ] || { echo "  ★ FAIL row wider than 66: [$sa8x]"; sa8bad=1; }; done
 # Row count, order and folding are left to Claude Code: seven classified tasks give seven non-empty records, in input order
@@ -2912,7 +2915,27 @@ for l in sys.stdin:
 print(" ".join(out))')
 [ "$sa8sev" = "s1:IDLE s2:RUN  s3:DONE s4:FAIL s5:KILL s6:PAUS s7:PEND" ] \
   || { echo "  ★ FAIL seven classified tasks: wanted [s1:IDLE s2:RUN  s3:DONE s4:FAIL s5:KILL s6:PAUS s7:PEND], got [$sa8sev]"; sa8bad=1; }
-[ "$sa8bad" -eq 0 ] && echo "  IDLE table at 22 widths (every step and both range bounds), marker+ctx% floor, unbounded, per-row independence, 7 records in order OK" || fail=1
+# One separator between all values, never doubled: " │ " is the row's only joiner, and a dropped label, token or model
+# cell takes the " │ " before it. Four row shapes (the IDLE example with every cell, a PEND row, a row of "-" placeholders
+# without a window, a FAIL row with a CJK description and no label), each narrowed on its own, at every column count from
+# 120 down to 1: no row carries a middle dot, two │ with only spaces between them, or a trailing │. The row count is
+# checked too, so a script that emits nothing cannot pass the guard.
+sa8gp=$(jq -cn --argjson st "$(sastart 4500)" --argjson smp "$SA16" '{tasks:[
+  {id:"g1", status:"running", model:"claude-opus-5[1m]", contextWindowSize:1000000, tokenCount:60000, startTime:$st, tokenSamples:$smp,
+   description:"Build image and deliver OTA", label:"Polling build-final-2106.log for make_release DONE"},
+  {id:"g2", status:"pending", model:"claude-haiku-4-5", contextWindowSize:200000, description:"Sweep stale state files", label:"Waiting"},
+  {id:"g3", status:"running", model:"claude-sonnet-5", description:"Missing values", label:"no window, no tokens"},
+  {id:"g4", status:"failed", model:"claude-sonnet-5", contextWindowSize:200000, tokenCount:9000, startTime:$st, description:"審查中繼防護設計"}]}')
+sa8g=$(sa8gc=120; while [ "$sa8gc" -ge 1 ]; do sarun "{\"columns\":$sa8gc,${sa8gp#\{}"; echo; sa8gc=$((sa8gc - 1)); done | python3 -c '
+import sys, json, re
+n = 0
+for l in sys.stdin:
+    if not l.strip(): continue
+    c = re.sub(r"\x1b\[[0-9;]*m", "", json.loads(l)["content"]); n += 1
+    if "·" in c or re.search(r"│ *│", c) or c.rstrip().endswith("│"): print("bad row: [%s]" % c); sys.exit(0)
+print("OK %d" % n)')
+[ "$sa8g" = "OK 480" ] || { echo "  ★ FAIL separator guard (4 row shapes x 120 widths, want OK 480): $sa8g"; sa8bad=1; }
+[ "$sa8bad" -eq 0 ] && echo "  IDLE table at 22 widths (every step and both range bounds), marker+ctx% floor, unbounded, per-row independence, 7 records in order, separator guard over 4 shapes x 120 widths OK" || fail=1
 
 echo "── SA9. SUBAGENT: per-session state file — content, permissions, UUID gate, refusals, counting, mtime sweep"
 # subagent-status-line.sh hands its per-class counts to the session line through ~/.claude/sl-subagents/<session_id>:
